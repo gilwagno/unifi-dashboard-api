@@ -175,6 +175,12 @@ export interface BandwidthDelta {
   perClient: Array<{ mac: string; hostname: string; rxBytes: number | null; txBytes: number | null }>;
 }
 
+export interface SshInfo {
+  sshEnabled: boolean;
+  sshUsername: string;
+  passwordAuthEnabled: boolean;
+}
+
 export interface Pagination {
   page: number;
   pageSize: number;
@@ -334,4 +340,16 @@ export const api = {
   // --- Histórico de uso de banda ---
   getBandwidthHistory: () => request<{ data: BandwidthSnapshot[] }>('/bandwidth/history'),
   getBandwidthSummary: () => request<{ data: BandwidthDelta[] }>('/bandwidth/history/summary'),
+
+  // --- Credencial SSH dos equipamentos (APs/switches) ---
+  // Configuração única por site (não por device) — GET nunca traz a senha
+  // atual. O rotate devolve a senha NOVA em texto puro uma única vez: o
+  // chamador é responsável por não logar/persistir esse retorno (ver
+  // Security.tsx, que só guarda a senha no estado do componente).
+  getSshInfo: () => request<SshInfo>('/ssh-credentials'),
+  rotateSshCredentials: (opts: { username?: string; password?: string } = {}) =>
+    request<{ sshUsername: string; sshPassword: string }>('/ssh-credentials/rotate', {
+      method: 'POST',
+      body: JSON.stringify(opts),
+    }),
 };

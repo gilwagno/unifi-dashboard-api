@@ -291,6 +291,64 @@ administradores no controller (pesquisa extensiva, incluindo testes
 diretos contra um controller real). Não está disponível nesta versão do
 controller.
 
+### Credencial de administração/SSH dos equipamentos (APs/switches)
+
+Duas rotas, via a mesma API clássica/privada usada nas seções acima
+(reaproveita a sessão por cookie+CSRF já existente). Confirmado contra um
+controller real, incluindo um PUT no-op que devolveu os mesmos valores sem
+mudar nada de verdade.
+
+**Importante — é uma credencial ÚNICA POR SITE, não por device.** No UniFi,
+o usuário e a senha de SSH usados para acessar via linha de comando um
+AP/switch adotado ficam guardados numa única configuração do site
+(`"key": "mgmt"` em `GET /proxy/network/api/s/{site}/get/setting`), aplicada
+a **todos** os APs/switches adotados daquele site de uma vez. Não existe
+senha de SSH separada por dispositivo nesse contexto — trocar a senha aqui
+troca o acesso SSH de toda a infraestrutura adotada do site simultaneamente.
+
+```
+GET /ssh-credentials
+```
+Retorna só os campos não-sensíveis:
+```json
+{ "sshEnabled": true, "sshUsername": "9KYZHt6", "passwordAuthEnabled": true }
+```
+Esta rota **nunca** retorna a senha atual (nem em hash) nem qualquer outro
+segredo do objeto `mgmt` (`x_api_token`, `x_mgmt_key`) — não há forma de
+recuperar a senha em uso pelo dashboard.
+
+```
+POST /ssh-credentials/rotate
+Body: { "username"?: string, "password"?: string }  // ambos opcionais
+```
+Troca a senha de SSH de todos os APs/switches adotados do site. Se
+`password` não for informado, uma senha forte aleatória é gerada com
+`node:crypto` (`randomBytes`, 24 bytes em base64url, 32 caracteres). Se
+`username` não for informado, mantém o usuário atual. Sob o capô, busca o
+objeto `mgmt` completo, troca só os campos de usuário/senha preservando
+**todos** os outros campos exatamente como vieram do GET, e manda de volta
+via `PUT /proxy/network/api/s/{site}/set/setting/mgmt/{_id}` (PUT de objeto
+inteiro — omitir um campo o apagaria/zeraria no controller).
+
+**A resposta desta rota é a ÚNICA vez que a senha nova aparece em texto
+puro em qualquer lugar da API:**
+```json
+{ "sshUsername": "9KYZHt6", "sshPassword": "<senha nova, texto puro>" }
+```
+Quem chamar precisa copiar/guardar a senha na hora — não existe outra rota
+(nem no backend, nem no dashboard) que devolva essa senha depois. Se ela for
+perdida, a única forma de recuperar o acesso é gerar outra senha nova (que
+por sua vez também só aparece uma única vez).
+
+No frontend (`Security.tsx`), a senha nova só fica no estado do próprio
+componente React — nunca é salva em `localStorage`/`sessionStorage` nem em
+nenhum lugar persistente, e some ao recarregar a página ou navegar para
+outra tela.
+
+Assim como as demais rotas da API clássica, retorna `503` se
+`UNIFI_CONTROLLER_USER`/`UNIFI_CONTROLLER_PASSWORD` não estiverem
+configurados no `.env`.
+
 ### Saúde operacional (APs/switches, sinal Wi-Fi e uptime do WAN)
 
 Três rotas, todas via a mesma API clássica/privada usada nas seções acima

@@ -1,9 +1,9 @@
-import { AlertTriangle, ShieldAlert, ShieldCheck, UserCog } from 'lucide-react';
+import { AlertTriangle, KeyRound, ShieldAlert, ShieldCheck, UserCog } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Badge } from '../components/Badge';
 import { Layout } from '../components/Layout';
 import { StatCard } from '../components/StatCard';
-import { api, type Admin, type AdminRole, type CriticalEvent, type SecuritySummary } from '../lib/api';
+import { api, type Admin, type AdminRole, type CriticalEvent, type SecuritySummary, type SshInfo } from '../lib/api';
 
 // O formato exato de cada evento crítico não é conhecido (o endpoint
 // /security/events nunca teve um evento real pra observar no ambiente de
@@ -29,6 +29,21 @@ export function Security() {
   const [admins, setAdmins] = useState<Admin[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const [sshInfo, setSshInfo] = useState<SshInfo | null>(null);
+  const [sshError, setSshError] = useState<string | null>(null);
+  const [rotating, setRotating] = useState(false);
+  // Guardada SÓ no estado deste componente (nunca em localStorage/sessionStorage
+  // nem em nenhum lugar persistente) — some ao trocar de página ou recarregar,
+  // igual ao aviso mostrado na tela.
+  const [newPassword, setNewPassword] = useState<{ username: string; password: string } | null>(null);
+
+  function loadSshInfo() {
+    api
+      .getSshInfo()
+      .then(setSshInfo)
+      .catch((err) => setSshError(err instanceof Error ? err.message : 'Erro ao carregar credencial SSH'));
+  }
+
   useEffect(() => {
     Promise.all([api.getSecuritySummary(), api.getSecurityEvents(), api.getAdmins()])
       .then(([s, e, a]) => {
@@ -37,7 +52,30 @@ export function Security() {
         setAdmins(a.data);
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'Erro ao carregar dados de segurança'));
+
+    loadSshInfo();
   }, []);
+
+  async function handleRotateSsh() {
+    const confirmed = window.confirm(
+      'Isso vai trocar a senha de SSH em TODOS os APs/switches adotados deste site de uma vez só. ' +
+        'A senha nova vai aparecer nesta tela UMA ÚNICA VEZ — depois de sair daqui não tem como recuperá-la ' +
+        '(só trocando de novo). Copie e guarde num lugar seguro assim que aparecer. Continuar?',
+    );
+    if (!confirmed) return;
+
+    setSshError(null);
+    setRotating(true);
+    try {
+      const result = await api.rotateSshCredentials();
+      setNewPassword({ username: result.sshUsername, password: result.sshPassword });
+      loadSshInfo();
+    } catch (err) {
+      setSshError(err instanceof Error ? err.message : 'Erro ao trocar a senha de SSH');
+    } finally {
+      setRotating(false);
+    }
+  }
 
   return (
     <Layout title="Segurança">
@@ -128,6 +166,75 @@ export function Security() {
               <div className="px-5 py-10 text-center text-sm text-slate-400">Carregando…</div>
             )}
           </div>
+        </div>
+      </div>
+
+      <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white">
+        <div className="flex items-center gap-2 border-b border-slate-100 px-5 py-4">
+          <KeyRound className="h-4 w-4 text-slate-500" strokeWidth={2} />
+          <span className="text-[13.5px] font-bold text-slate-900">Credencial SSH dos equipamentos</span>
+        </div>
+
+        <div className="px-5 py-4">
+          <p className="mb-3 text-[12.5px] text-slate-500">
+            Credencial ÚNICA por site — se aplica a TODOS os APs/switches adotados deste site de uma vez. Não existe
+            senha de SSH separada por dispositivo no UniFi.
+          </p>
+
+          {sshError && (
+            <div className="mb-3 rounded-lg border border-[oklch(88%_0.06_25)] bg-[oklch(97%_0.03_25)] px-4 py-3 text-sm text-[oklch(40%_0.15_25)]">
+              {sshError}
+            </div>
+          )}
+
+          {sshInfo === null && !sshError && <div className="py-6 text-center text-sm text-slate-400">Carregando…</div>}
+
+          {sshInfo && (
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[13px] text-slate-700">
+                  Usuário atual: <span className="font-mono font-semibold text-slate-900">{sshInfo.sshUsername || '—'}</span>
+                </span>
+                <div className="flex gap-1.5">
+                  <Badge tone={sshInfo.sshEnabled ? 'success' : 'neutral'}>
+                    SSH {sshInfo.sshEnabled ? 'habilitado' : 'desabilitado'}
+                  </Badge>
+                  <Badge tone={sshInfo.passwordAuthEnabled ? 'success' : 'neutral'}>
+                    Autenticação por senha {sshInfo.passwordAuthEnabled ? 'ativa' : 'inativa'}
+                  </Badge>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleRotateSsh}
+                disabled={rotating}
+                className="rounded-lg bg-slate-900 px-4 py-2 text-[13px] font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {rotating ? 'Gerando…' : 'Gerar nova senha'}
+              </button>
+            </div>
+          )}
+
+          {newPassword && (
+            <div className="mt-4 rounded-lg border border-[oklch(85%_0.12_90)] bg-[oklch(97%_0.06_90)] px-4 py-3.5">
+              <div className="mb-2 text-[12.5px] font-bold text-[oklch(40%_0.12_90)]">
+                Copie agora — essa senha não vai aparecer de novo.
+              </div>
+              <div className="flex flex-col gap-1 font-mono text-[13px] text-slate-900">
+                <div>
+                  usuário: <span className="font-semibold">{newPassword.username}</span>
+                </div>
+                <div className="break-all">
+                  senha: <span className="font-semibold">{newPassword.password}</span>
+                </div>
+              </div>
+              <div className="mt-2 text-[11.5px] text-[oklch(45%_0.1_90)]">
+                Essa senha não é guardada por este dashboard — se você sair desta página sem copiá-la, a única forma
+                de recuperar o acesso é gerar outra senha nova.
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

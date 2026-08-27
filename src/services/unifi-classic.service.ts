@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { env } from '../config/env.js';
 
 // Cliente para a API CLÁSSICA/privada do UniFi (a mesma usada pelo app
@@ -496,6 +497,114 @@ async function fetchRawTrafficCounters(site: string): Promise<RawTrafficCounters
   };
 }
 
+// --- Senha de administração/SSH dos equipamentos (APs/switches) ---
+//
+// Confirmado contra um controller real (incluindo um PUT no-op que devolveu
+// os mesmos valores sem mudar nada de verdade): a credencial de SSH dos
+// equipamentos é uma configuração ÚNICA POR SITE — não por device — guardada
+// no objeto de settings com "key": "mgmt". Ela se aplica a TODOS os
+// APs/switches adotados daquele site de uma vez; não existe SSH por
+// dispositivo separado nesse contexto.
+//
+//   GET /proxy/network/api/s/{site}/get/setting        -> array de settings
+//   PUT /proxy/network/api/s/{site}/set/setting/mgmt/{_id}  -> objeto COMPLETO de volta
+//
+// O PUT é de objeto inteiro, igual ao padrão já usado no módulo de Wi-Fi/
+// networks: buscamos tudo, alteramos só os campos desejados e mandamos o
+// objeto inteiro de volta — omitir um campo o apagaria/zeraria no
+// controller.
+//
+// SEGURANÇA — regra não-negociável deste módulo: `MgmtSetting` (com os
+// campos sensíveis: x_ssh_password, x_ssh_sha512passwd, x_api_token,
+// x_mgmt_key) é um tipo PRIVADO deste arquivo e nunca é exportado. Toda
+// leitura pública passa por `SshInfo`, que só expõe usuário/estado —
+// jamais a senha atual ou os outros segredos do objeto. A única exceção
+// intencional é `rotateSshCredentials`: como é o próprio ato de troca, a
+// senha NOVA é devolvida em texto puro UMA ÚNICA VEZ nessa resposta — é
+// assim que quem trocou fica sabendo a senha nova (não há outra forma de
+// recuperá-la depois, nem por essa API nem pelo dashboard).
+interface MgmtSetting {
+  _id: string;
+  key: 'mgmt';
+  site_id?: string;
+  x_ssh_enabled?: boolean;
+  x_ssh_username?: string;
+  x_ssh_password?: string;
+  x_ssh_sha512passwd?: string;
+  x_ssh_auth_password_enabled?: boolean;
+  x_ssh_bind_wildcard?: boolean;
+  x_api_token?: string;
+  x_mgmt_key?: string;
+  [key: string]: unknown;
+}
+
+export interface SshInfo {
+  sshEnabled: boolean;
+  sshUsername: string;
+  passwordAuthEnabled: boolean;
+}
+
+async function fetchMgmtSetting(site: string): Promise<MgmtSetting> {
+  const { data } = await classicFetch<ClassicResponse<MgmtSetting[]>>(`/proxy/network/api/s/${site}/get/setting`);
+  const mgmt = data.find((setting) => setting.key === 'mgmt');
+  if (!mgmt) {
+    throw new UniFiClassicApiError(
+      502,
+      'Configuração "mgmt" (SSH dos equipamentos) não encontrada em get/setting — resposta inesperada do controller',
+    );
+  }
+  return mgmt;
+}
+
+function toSshInfo(mgmt: MgmtSetting): SshInfo {
+  return {
+    sshEnabled: Boolean(mgmt.x_ssh_enabled),
+    sshUsername: mgmt.x_ssh_username ?? '',
+    passwordAuthEnabled: Boolean(mgmt.x_ssh_auth_password_enabled),
+  };
+}
+
+async function getSshInfo(site: string): Promise<SshInfo> {
+  const mgmt = await fetchMgmtSetting(site);
+  return toSshInfo(mgmt);
+}
+
+// Senha forte aleatória gerada com node:crypto (não Math.random) — 24 bytes
+// aleatórios em base64url dão 32 caracteres sem caracteres problemáticos
+// pra um campo de senha (sem +, /, = do base64 padrão).
+function generateStrongPassword(): string {
+  return randomBytes(24).toString('base64url');
+}
+
+async function rotateSshCredentials(
+  opts: { username?: string; password?: string },
+  site: string,
+): Promise<{ sshUsername: string; sshPassword: string }> {
+  const current = await fetchMgmtSetting(site);
+
+  const sshUsername = opts.username ?? current.x_ssh_username ?? '';
+  const sshPassword = opts.password ?? generateStrongPassword();
+
+  // PUT de objeto completo: preserva TODOS os outros campos do GET original
+  // (_id, key, site_id, x_api_token, x_mgmt_key, wifiman_enabled, etc.) e
+  // troca só username/senha. x_ssh_sha512passwd fica desatualizado no
+  // objeto que temos em mãos, mas não é enviado por nós — é o próprio
+  // controller que recalcula o hash a partir de x_ssh_password ao
+  // processar o PUT.
+  const updated: MgmtSetting = {
+    ...current,
+    x_ssh_username: sshUsername,
+    x_ssh_password: sshPassword,
+  };
+
+  await classicFetch<ClassicResponse<MgmtSetting[]>>(
+    `/proxy/network/api/s/${site}/set/setting/mgmt/${current._id}`,
+    { method: 'PUT', body: JSON.stringify(updated) },
+  );
+
+  return { sshUsername, sshPassword };
+}
+
 export const unifiClassicService = {
   isConfigured: isClassicApiConfigured,
 
@@ -531,6 +640,11 @@ export const unifiClassicService = {
   getWanUptimeHistory: (site = env.UNIFI_CONTROLLER_SITE) => fetchWanUptimeHistory(site),
 
   getRawTrafficCounters: (site = env.UNIFI_CONTROLLER_SITE) => fetchRawTrafficCounters(site),
+
+  getSshInfo: (site = env.UNIFI_CONTROLLER_SITE) => getSshInfo(site),
+
+  rotateSshCredentials: (opts: { username?: string; password?: string }, site = env.UNIFI_CONTROLLER_SITE) =>
+    rotateSshCredentials(opts, site),
 };
 
 export { UniFiClassicApiError, ClassicApiNotConfiguredError, UnknownClientError };

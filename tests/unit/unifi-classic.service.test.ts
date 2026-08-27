@@ -169,4 +169,107 @@ describe('unifiClassicService', () => {
 
     expect(blocked).toEqual(new Set(['aa:aa:aa:aa:aa:aa']));
   });
+
+  describe('SSH dos equipamentos (get/setting mgmt)', () => {
+    function mgmtSettingFixture(overrides: Record<string, unknown> = {}) {
+      return {
+        _id: 'mgmt-id-1',
+        key: 'mgmt',
+        site_id: 'site-1',
+        x_ssh_enabled: true,
+        x_ssh_username: '9KYZHt6',
+        x_ssh_password: 'senha-atual-secreta',
+        x_ssh_sha512passwd: 'hash-atual-secreto',
+        x_ssh_auth_password_enabled: true,
+        x_ssh_bind_wildcard: false,
+        x_api_token: 'token-secreto',
+        x_mgmt_key: 'chave-secreta',
+        wifiman_enabled: true,
+        advanced_feature_enabled: false,
+        ...overrides,
+      };
+    }
+
+    it('getSshInfo() retorna só os campos públicos — sem senha, hash, token ou chave', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url.endsWith('/api/auth/login')) return loginResponse();
+        if (url.includes('/get/setting')) {
+          return jsonResponse({
+            meta: { rc: 'ok' },
+            data: [{ _id: 'wifi-id', key: 'other' }, mgmtSettingFixture()],
+          });
+        }
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService } = await import('../../src/services/unifi-classic.service.js');
+      const info = await unifiClassicService.getSshInfo();
+
+      expect(info).toEqual({ sshEnabled: true, sshUsername: '9KYZHt6', passwordAuthEnabled: true });
+      expect(Object.keys(info)).toEqual(['sshEnabled', 'sshUsername', 'passwordAuthEnabled']);
+    });
+
+    it('rotateSshCredentials() sem password: gera uma senha forte aleatória com node:crypto', async () => {
+      let putBody: Record<string, unknown> | undefined;
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.endsWith('/api/auth/login')) return loginResponse();
+        if (url.includes('/get/setting')) {
+          return jsonResponse({ meta: { rc: 'ok' }, data: [mgmtSettingFixture()] });
+        }
+        if (url.includes('/set/setting/mgmt/')) {
+          putBody = JSON.parse(String(init?.body));
+          return jsonResponse({ meta: { rc: 'ok' }, data: [putBody] });
+        }
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService } = await import('../../src/services/unifi-classic.service.js');
+      const result = await unifiClassicService.rotateSshCredentials({});
+
+      expect(result.sshUsername).toBe('9KYZHt6');
+      expect(result.sshPassword).toBeTruthy();
+      expect(result.sshPassword).not.toBe('senha-atual-secreta');
+      expect(result.sshPassword.length).toBeGreaterThanOrEqual(20);
+
+      // O PUT precisa preservar TODOS os outros campos do GET original.
+      expect(putBody).toMatchObject({
+        _id: 'mgmt-id-1',
+        key: 'mgmt',
+        site_id: 'site-1',
+        x_api_token: 'token-secreto',
+        x_mgmt_key: 'chave-secreta',
+        wifiman_enabled: true,
+        advanced_feature_enabled: false,
+      });
+      expect(putBody?.x_ssh_password).toBe(result.sshPassword);
+    });
+
+    it('rotateSshCredentials() com username/password fornecidos: usa exatamente os valores dados', async () => {
+      let putBody: Record<string, unknown> | undefined;
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.endsWith('/api/auth/login')) return loginResponse();
+        if (url.includes('/get/setting')) {
+          return jsonResponse({ meta: { rc: 'ok' }, data: [mgmtSettingFixture()] });
+        }
+        if (url.includes('/set/setting/mgmt/')) {
+          putBody = JSON.parse(String(init?.body));
+          return jsonResponse({ meta: { rc: 'ok' }, data: [putBody] });
+        }
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService } = await import('../../src/services/unifi-classic.service.js');
+      const result = await unifiClassicService.rotateSshCredentials({
+        username: 'novo-usuario',
+        password: 'senha-fornecida-pelo-chamador',
+      });
+
+      expect(result).toEqual({ sshUsername: 'novo-usuario', sshPassword: 'senha-fornecida-pelo-chamador' });
+      expect(putBody?.x_ssh_username).toBe('novo-usuario');
+      expect(putBody?.x_ssh_password).toBe('senha-fornecida-pelo-chamador');
+    });
+  });
 });
