@@ -36,6 +36,27 @@ export interface UniFiDevice {
   state: 'ONLINE' | 'OFFLINE' | 'PENDING' | 'UPDATING';
 }
 
+export interface UniFiDevicePort {
+  idx: number;
+  state: 'UP' | 'DOWN';
+  connector?: string;
+  maxSpeedMbps?: number;
+  speedMbps?: number;
+}
+
+export interface UniFiDeviceDetail {
+  id: string;
+  macAddress: string;
+  ipAddress?: string;
+  name: string;
+  model: string;
+  state: 'ONLINE' | 'OFFLINE' | 'PENDING' | 'UPDATING';
+  firmwareVersion?: string;
+  interfaces?: {
+    ports?: UniFiDevicePort[];
+  };
+}
+
 export interface UniFiEventRecord {
   receivedAt: string;
   data: string;
@@ -88,7 +109,9 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
   const res = await fetch(`${BASE_URL}${path}`, {
     ...init,
     headers: {
-      'Content-Type': 'application/json',
+      // Fastify rejeita Content-Type: application/json com corpo vazio
+      // ("Body cannot be empty..."), então só manda o header quando há body.
+      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...init.headers,
     },
@@ -101,7 +124,13 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new ApiError(res.status, body.error ?? res.statusText);
+    // `details` carrega a mensagem real do controller UniFi (ex: "Port does
+    // not support PoE") — sem isso, o usuário só via o genérico "Erro na
+    // API do UniFi", sem saber o motivo de verdade.
+    const detail =
+      typeof body.details === 'string' ? body.details : body.details ? JSON.stringify(body.details) : undefined;
+    const message = [body.error ?? res.statusText, detail].filter(Boolean).join(': ');
+    throw new ApiError(res.status, message);
   }
 
   if (res.status === 204) return undefined as T;
@@ -144,6 +173,11 @@ export const api = {
   },
 
   restartDevice: (id: string) => request<{ ok: true }>(`/devices/${id}/restart`, { method: 'POST' }),
+
+  getDevice: (id: string) => request<UniFiDeviceDetail>(`/devices/${id}`),
+
+  powerCyclePort: (id: string, portIdx: number) =>
+    request<{ ok: true }>(`/devices/${id}/ports/${portIdx}/power-cycle`, { method: 'POST' }),
 
   eventsHistory: (limit = 50) => request<{ data: UniFiEventRecord[] }>(`/events/history?limit=${limit}`),
 };

@@ -40,7 +40,9 @@ Vite + Tailwind) que consome essa API.
 | POST   | /clients/:mac/block?siteId=...  | Bloqueia um cliente               |
 | POST   | /clients/:mac/unblock?siteId=... | Desbloqueia um cliente            |
 | GET    | /devices?siteId=&page=&pageSize= | Lista APs/switches de um site (paginado) |
+| GET    | /devices/:id?siteId=...         | Detalhe de um dispositivo (inclui portas, se houver) |
 | POST   | /devices/:id/restart?siteId=... | Reinicia um dispositivo           |
+| POST   | /devices/:id/ports/:portIdx/power-cycle?siteId=... | Power-cycle de uma porta PoE (reboot do que estiver ligado nela) |
 | WS     | /ws/events?token=...            | Stream de eventos em tempo real   |
 | GET    | /events/history?limit=...      | Últimos eventos recebidos (buffer em memória) |
 
@@ -85,7 +87,29 @@ Os limites de requisição são configuráveis via `.env` (veja
 | `RATE_LIMIT_WINDOW`              | `1 minute` | janela compartilhada por todos os limites     |
 | `RATE_LIMIT_MAX`                 | `100`      | limite global por IP                          |
 | `RATE_LIMIT_CLIENT_ACTION_MAX`   | `10`       | `POST /clients/:mac/block` e `/unblock`       |
-| `RATE_LIMIT_DEVICE_RESTART_MAX`  | `5`        | `POST /devices/:id/restart`                   |
+| `RATE_LIMIT_DEVICE_RESTART_MAX`  | `5`        | `POST /devices/:id/restart` e `POST /devices/:id/ports/:portIdx/power-cycle` |
+
+### Power-cycle de porta (switches PoE)
+
+A UniFi Network Integration API **não suporta** habilitar/desabilitar porta
+de switch remotamente — isso foi testado contra um controller real: o
+controller responde 400 com `Invalid $.action value '...' (valid values:
+'POWER_CYCLE')`. A única ação de porta suportada é `POWER_CYCLE` (ciclo de
+energia PoE), que efetivamente reinicia qualquer equipamento PoE ligado
+naquela porta (ex.: um AP mexido fisicamente).
+
+Fluxo: `GET /devices/:id?siteId=...` retorna o detalhe do dispositivo,
+incluindo `interfaces.ports` (lista de portas com `idx`, `state` UP/DOWN,
+`speedMbps`) quando o device é um switch. Note que isso é diferente do
+campo `interfaces` da listagem (`GET /devices`), que ali é só um array de
+strings de capacidade (ex.: `["ports"]"`) — os dois endpoints usam o mesmo
+nome de campo com formatos diferentes.
+
+Para power-cycle-ar uma porta específica:
+
+```
+POST /devices/:id/ports/:portIdx/power-cycle?siteId=...
+```
 
 ### Histórico de eventos
 

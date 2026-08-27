@@ -1,5 +1,5 @@
 import { env } from '../config/env.js';
-import type { UniFiClient, UniFiDevice, UniFiSite } from '../types/unifi.js';
+import type { UniFiClient, UniFiDevice, UniFiDeviceDetail, UniFiSite } from '../types/unifi.js';
 
 const BASE_URL = `https://${env.CONTROLLER_HOST}/proxy/network/integration/v1`;
 
@@ -35,7 +35,17 @@ async function unifiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new UniFiApiError(res.status, `UniFi API respondeu ${res.status}: ${body}`);
+    // Erros do controller vêm como JSON ({ code, message, ... }) — usa a
+    // mensagem real quando dá pra parsear, em vez de jogar o corpo cru
+    // (que inclui requestPath/requestId/timestamp) pro usuário final ler.
+    let message = body;
+    try {
+      const parsed = JSON.parse(body);
+      if (typeof parsed.message === 'string') message = parsed.message;
+    } catch {
+      // corpo não era JSON — mantém o texto cru
+    }
+    throw new UniFiApiError(res.status, message || `UniFi API respondeu ${res.status}`);
   }
 
   if (res.status === 204) return undefined as T;
@@ -63,10 +73,24 @@ export const unifiService = {
   listDevices: (siteId = env.SITE_ID) =>
     unifiFetch<{ data: UniFiDevice[] }>(`/sites/${siteId}/devices`),
 
+  getDevice: (deviceId: string, siteId = env.SITE_ID) =>
+    unifiFetch<UniFiDeviceDetail>(`/sites/${siteId}/devices/${deviceId}`),
+
   restartDevice: (deviceId: string, siteId = env.SITE_ID) =>
     unifiFetch<void>(`/sites/${siteId}/devices/${deviceId}/actions`, {
       method: 'POST',
       body: JSON.stringify({ action: 'RESTART' }),
+    }),
+
+  // Power-cycle de uma porta PoE de um switch. A API de Integração do
+  // UniFi NÃO suporta habilitar/desabilitar porta remotamente — a única
+  // ação válida confirmada contra o controller é 'POWER_CYCLE' (o
+  // controller rejeita qualquer outro valor com 400 listando os válidos).
+  // Isso força um reboot de qualquer coisa PoE conectada naquela porta.
+  powerCyclePort: (deviceId: string, portIdx: number, siteId = env.SITE_ID) =>
+    unifiFetch<void>(`/sites/${siteId}/devices/${deviceId}/interfaces/ports/${portIdx}/actions`, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'POWER_CYCLE' }),
     }),
 };
 
