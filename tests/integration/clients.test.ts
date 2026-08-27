@@ -43,6 +43,44 @@ describe('GET /clients', () => {
 
     await app.close();
   });
+
+  it('filtra por blocked e type', async () => {
+    const { app, token } = await authedApp();
+    vi.mocked(unifiService.listClients).mockResolvedValueOnce({
+      data: [
+        { id: '1', macAddress: 'aa:aa:aa:aa:aa:aa', type: 'WIRED', blocked: false },
+        { id: '2', macAddress: 'bb:bb:bb:bb:bb:bb', type: 'WIRELESS', blocked: true },
+        { id: '3', macAddress: 'cc:cc:cc:cc:cc:cc', type: 'WIRELESS', blocked: false },
+      ],
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/clients?blocked=false&type=WIRELESS',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toEqual([
+      { id: '3', macAddress: 'cc:cc:cc:cc:cc:cc', type: 'WIRELESS', blocked: false },
+    ]);
+
+    await app.close();
+  });
+
+  it('rejeita type inválido', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/clients?type=BLUETOOTH',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(400);
+
+    await app.close();
+  });
 });
 
 describe('POST /clients/:mac/block', () => {

@@ -5,13 +5,31 @@ import { macParamSchema } from '../validators/mac.js';
 
 const siteQuery = z.object({ siteId: z.string().min(1).optional() });
 
+const listClientsQuery = z.object({
+  siteId: z.string().min(1).optional(),
+  // z.coerce.boolean() trataria "false" como true (Boolean("false") é
+  // truthy) — aceitamos só os literais esperados de uma query string.
+  blocked: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => (v === undefined ? undefined : v === 'true')),
+  type: z.enum(['WIRED', 'WIRELESS']).optional(),
+});
+
 export default async function clientsRoutes(app: FastifyInstance) {
   app.addHook('preHandler', app.authenticate);
 
   app.get('/clients', async (request) => {
-    const { siteId } = siteQuery.parse(request.query);
+    const { siteId, blocked, type } = listClientsQuery.parse(request.query);
     const { data } = await unifiService.listClients(siteId);
-    return { data };
+
+    const filtered = data.filter(
+      (client) =>
+        (blocked === undefined || client.blocked === blocked) &&
+        (type === undefined || client.type === type),
+    );
+
+    return { data: filtered };
   });
 
   app.post(
