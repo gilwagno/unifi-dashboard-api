@@ -42,6 +42,47 @@ describe('GET /devices', () => {
 
     await app.close();
   });
+
+  it('pagina os resultados com page e pageSize', async () => {
+    const { app, token } = await authedApp();
+    vi.mocked(unifiService.listDevices).mockResolvedValueOnce({
+      data: Array.from({ length: 5 }, (_, i) => ({
+        id: `dev-${i}`,
+        name: `AP ${i}`,
+        model: 'U6',
+        macAddress: `aa:aa:aa:aa:aa:0${i}`,
+        state: 'ONLINE',
+      })),
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/devices?page=2&pageSize=2',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.data).toHaveLength(2);
+    expect(body.data[0].id).toBe('dev-2');
+    expect(body.pagination).toEqual({ page: 2, pageSize: 2, total: 5, totalPages: 3 });
+
+    await app.close();
+  });
+
+  it('rejeita pageSize acima do limite', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/devices?pageSize=500',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(400);
+
+    await app.close();
+  });
 });
 
 describe('POST /devices/:id/restart', () => {

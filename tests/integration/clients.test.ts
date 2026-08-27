@@ -68,6 +68,32 @@ describe('GET /clients', () => {
     await app.close();
   });
 
+  it('pagina os resultados com page e pageSize', async () => {
+    const { app, token } = await authedApp();
+    vi.mocked(unifiService.listClients).mockResolvedValueOnce({
+      data: Array.from({ length: 5 }, (_, i) => ({
+        id: `${i}`,
+        macAddress: `aa:aa:aa:aa:aa:0${i}`,
+        type: 'WIRED',
+        blocked: false,
+      })),
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/clients?page=2&pageSize=2',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.data).toHaveLength(2);
+    expect(body.data[0].id).toBe('2');
+    expect(body.pagination).toEqual({ page: 2, pageSize: 2, total: 5, totalPages: 3 });
+
+    await app.close();
+  });
+
   it('rejeita type inválido', async () => {
     const { app, token } = await authedApp();
 

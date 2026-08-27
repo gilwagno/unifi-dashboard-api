@@ -27,10 +27,10 @@ local de Integração do controller.
 | POST   | /auth/login                    | Retorna um access token + refresh token |
 | POST   | /auth/refresh                  | Troca um refresh token por um novo access token |
 | GET    | /sites                         | Lista os sites do controller      |
-| GET    | /clients?siteId=&blocked=&type= | Lista clientes conectados (com filtros opcionais) |
+| GET    | /clients?siteId=&blocked=&type=&page=&pageSize= | Lista clientes conectados (filtros + paginação) |
 | POST   | /clients/:mac/block?siteId=...  | Bloqueia um cliente               |
 | POST   | /clients/:mac/unblock?siteId=... | Desbloqueia um cliente            |
-| GET    | /devices?siteId=...            | Lista APs/switches de um site     |
+| GET    | /devices?siteId=&page=&pageSize= | Lista APs/switches de um site (paginado) |
 | POST   | /devices/:id/restart?siteId=... | Reinicia um dispositivo           |
 | WS     | /ws/events?token=...            | Stream de eventos em tempo real   |
 | GET    | /events/history?limit=...      | Últimos eventos recebidos (buffer em memória) |
@@ -50,6 +50,14 @@ Retorna `{ "token": "<novo access token>" }`. O refresh token em si não é
 rotacionado — continua válido até expirar ou até você trocar `JWT_SECRET`.
 Não há como revogar um token individualmente (sem estado de sessão no
 servidor); se precisar invalidar tokens emitidos, troque `JWT_SECRET`.
+
+### Paginação em /clients e /devices
+
+Ambas aceitam `?page=` (padrão 1) e `?pageSize=` (padrão 50, máximo 200).
+A resposta muda de `{ data }` para `{ data, pagination: { page, pageSize,
+total, totalPages } }`. Assim como o filtro, a paginação é aplicada depois
+de buscar a lista completa no controller — não reduz o tráfego com ele,
+só o tamanho da resposta.
 
 ### Filtro em /clients
 
