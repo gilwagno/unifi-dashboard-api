@@ -1,7 +1,8 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyError } from 'fastify';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import { ZodError } from 'zod';
+import { env } from './config/env.js';
 import authPlugin from './plugins/auth.js';
 import websocketPlugin from './plugins/websocket.js';
 import authRoutes from './routes/auth.routes.js';
@@ -15,7 +16,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
 
   await app.register(cors, { origin: true });
-  await app.register(rateLimit, { max: 100, timeWindow: '1 minute' });
+  await app.register(rateLimit, { max: env.RATE_LIMIT_MAX, timeWindow: env.RATE_LIMIT_WINDOW });
   await app.register(authPlugin);
   await app.register(websocketPlugin);
 
@@ -24,7 +25,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   // error handler vigente no momento do registro. Se setErrorHandler viesse
   // depois, as rotas ficariam presas ao handler default do Fastify (erro de
   // validação do Zod virando 500 genérico em vez dos 400 esperados).
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error: FastifyError | UniFiApiError, _request, reply) => {
     if (error instanceof UniFiApiError) {
       const status = error.status >= 400 && error.status < 600 ? error.status : 502;
       return reply.code(status).send({ error: 'Erro na API do UniFi', details: error.message });
@@ -35,7 +36,20 @@ export async function buildApp(): Promise<FastifyInstance> {
     }
 
     app.log.error(error);
-    return reply.code(500).send({ error: 'Erro interno' });
+
+    // Erros de outros plugins do Fastify (ex: 429 do @fastify/rate-limit)
+    // já vêm com o statusCode certo — respeita em vez de forçar tudo pra
+    // 500. Só o 500 genérico esconde a mensagem, pra não vazar detalhes
+    // internos.
+    const status =
+      typeof error.statusCode === 'number' && error.statusCode >= 400 && error.statusCode < 600
+        ? error.statusCode
+        : 500;
+
+    if (status === 500) {
+      return reply.code(500).send({ error: 'Erro interno' });
+    }
+    return reply.code(status).send({ error: error.message });
   });
 
   await app.register(authRoutes);

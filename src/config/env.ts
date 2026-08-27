@@ -13,6 +13,13 @@ const envSchema = z.object({
   ADMIN_USER: z.string().min(1),
   ADMIN_PASSWORD_HASH: z.string().min(1, 'Gere com bcryptjs.hashSync'),
   PORT: z.coerce.number().default(3000),
+
+  // Janela compartilhada por todos os limites abaixo (formato aceito pelo
+  // @fastify/rate-limit, ex: "1 minute", "30 seconds").
+  RATE_LIMIT_WINDOW: z.string().default('1 minute'),
+  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
+  RATE_LIMIT_CLIENT_ACTION_MAX: z.coerce.number().int().positive().default(10),
+  RATE_LIMIT_DEVICE_RESTART_MAX: z.coerce.number().int().positive().default(5),
 });
 
 const parsed = envSchema.safeParse(process.env);

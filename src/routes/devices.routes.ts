@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { env } from '../config/env.js';
 import { unifiService } from '../services/unifi.service.js';
 import { paginate, paginationQuery } from '../validators/pagination.js';
 
@@ -18,7 +19,7 @@ export default async function devicesRoutes(app: FastifyInstance) {
 
   app.post(
     '/devices/:id/restart',
-    { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } },
+    { config: { rateLimit: { max: env.RATE_LIMIT_DEVICE_RESTART_MAX, timeWindow: env.RATE_LIMIT_WINDOW } } },
     async (request, reply) => {
       const { id } = idParam.parse(request.params);
       const { siteId } = siteQuery.parse(request.query);

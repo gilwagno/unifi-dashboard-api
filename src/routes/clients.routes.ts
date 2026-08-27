@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { env } from '../config/env.js';
 import { unifiService } from '../services/unifi.service.js';
 import { macParamSchema } from '../validators/mac.js';
 import { paginate, paginationQuery } from '../validators/pagination.js';
@@ -37,7 +38,7 @@ export default async function clientsRoutes(app: FastifyInstance) {
 
   app.post(
     '/clients/:mac/block',
-    { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
+    { config: { rateLimit: { max: env.RATE_LIMIT_CLIENT_ACTION_MAX, timeWindow: env.RATE_LIMIT_WINDOW } } },
     async (request, reply) => {
       const { mac } = macParamSchema.parse(request.params);
       const { siteId } = siteQuery.parse(request.query);
@@ -48,7 +49,7 @@ export default async function clientsRoutes(app: FastifyInstance) {
 
   app.post(
     '/clients/:mac/unblock',
-    { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
+    { config: { rateLimit: { max: env.RATE_LIMIT_CLIENT_ACTION_MAX, timeWindow: env.RATE_LIMIT_WINDOW } } },
     async (request, reply) => {
       const { mac } = macParamSchema.parse(request.params);
       const { siteId } = siteQuery.parse(request.query);

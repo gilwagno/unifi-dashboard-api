@@ -66,6 +66,18 @@ combináveis. O filtro é aplicado depois de buscar a lista completa no
 controller (a API de Integração não garante filtro server-side confiável
 entre versões), então não reduz o tráfego com o controller — só a resposta.
 
+### Rate limiting
+
+Os limites de requisição são configuráveis via `.env` (veja
+`.env.example`), todos opcionais com os defaults atuais:
+
+| Variável                        | Default    | Aplica em                                   |
+|----------------------------------|------------|----------------------------------------------|
+| `RATE_LIMIT_WINDOW`              | `1 minute` | janela compartilhada por todos os limites     |
+| `RATE_LIMIT_MAX`                 | `100`      | limite global por IP                          |
+| `RATE_LIMIT_CLIENT_ACTION_MAX`   | `10`       | `POST /clients/:mac/block` e `/unblock`       |
+| `RATE_LIMIT_DEVICE_RESTART_MAX`  | `5`        | `POST /devices/:id/restart`                   |
+
 ### Histórico de eventos
 
 `GET /events/history?limit=N` devolve os últimos eventos recebidos do
