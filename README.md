@@ -4,11 +4,15 @@ Backend em Fastify/TypeScript para controlar clientes e APs UniFi
 (bloquear/desbloquear dispositivos, reiniciar APs, ver status) via a API
 local de Integração do controller.
 
+Tem também um dashboard web em [`frontend/`](frontend/README.md) (React +
+Vite + Tailwind) que consome essa API.
+
 ## Setup
 
 1. No controller: **Settings > Control Plane > Integrations** → gere uma
-   API key.
-2. Copie `.env.example` para `.env` e preencha os valores.
+   API key. Ela vai no header `X-API-Key` (não `Authorization: Bearer`).
+2. Copie `.env.example` para `.env` e preencha `CONTROLLER_HOST` e
+   `UNIFI_API_KEY`.
 3. Gere o hash da sua senha de admin:
    ```
    node -e "console.log(require('bcryptjs').hashSync('SUA_SENHA', 10))"
@@ -19,6 +23,11 @@ local de Integração do controller.
    npm install
    npm run dev
    ```
+5. Descubra o `SITE_ID`: faça login (`POST /auth/login`) e chame
+   `GET /sites` com o token — pegue o campo `id` (um UUID) do site que
+   quer usar e coloque em `SITE_ID` no `.env`. **Não** use o valor de
+   `internalReference` (ex: `"default"`) — a API rejeita isso como siteId.
+   Reinicie o servidor depois de mudar o `.env` (não é hot-reload).
 
 ## Endpoints
 
@@ -123,9 +132,12 @@ Cobertura inclui validação de MAC/paginação, health check, guarda de auth,
 login/refresh, e as rotas de `/clients`, `/devices`, `/sites` e
 `/events/history` com `unifiService`/`unifiEventsHub` mockados. O handshake
 de `/ws/events` também tem teste (token válido, token inválido, mensagem
-sem token, canal somente-leitura após autenticar), via `app.injectWS()` do
-`@fastify/websocket` — **exceto** o fechamento por timeout de 5s sem
-mensagem, que não é coberto (exigiria esperar os 5s de verdade no teste).
+sem token, canal somente-leitura após autenticar), usando um socket TCP
+real (`app.listen()` + cliente `ws`) em vez do helper `app.injectWS()` do
+`@fastify/websocket` — esse helper trava com a combinação de plugins deste
+app (ver comentário em `tests/integration/websocket.test.ts`). O
+fechamento por timeout de 5s sem mensagem não é coberto (exigiria esperar
+os 5s de verdade no teste).
 
 ## Deploy com Docker
 

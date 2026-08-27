@@ -1,15 +1,19 @@
-import https from 'node:https';
 import { env } from '../config/env.js';
 import type { UniFiClient, UniFiDevice, UniFiSite } from '../types/unifi.js';
 
 const BASE_URL = `https://${env.CONTROLLER_HOST}/proxy/network/integration/v1`;
 
-// Controllers locais quase sempre usam certificado autoassinado.
-// Isso desativa a verificação de TLS SÓ para essas chamadas — aceitável em
-// rede local/confiável, mas não use isso pra falar com hosts na internet.
-const agent = new https.Agent({
-  rejectUnauthorized: !env.UNIFI_ALLOW_SELF_SIGNED,
-});
+// Controllers locais quase sempre usam certificado autoassinado. O fetch
+// nativo do Node não aceita um https.Agent nem um dispatcher externo do
+// pacote `undici` pra desativar a verificação de TLS de forma confiável
+// (a interface interna muda entre versões do Node e do pacote) — a forma
+// suportada é essa flag de processo. Como as únicas chamadas HTTPS deste
+// processo são para o controller UniFi, o escopo do risco é esse; ainda
+// assim, só desative isso em rede local/confiável, nunca pra falar com
+// hosts na internet.
+if (env.UNIFI_ALLOW_SELF_SIGNED) {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+}
 
 class UniFiApiError extends Error {
   constructor(public status: number, message: string) {
@@ -21,10 +25,8 @@ class UniFiApiError extends Error {
 async function unifiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     ...init,
-    // @ts-expect-error — a lib de tipos do fetch nativo ainda não conhece `agent`
-    agent,
     headers: {
-      Authorization: `Bearer ${env.UNIFI_API_KEY}`,
+      'X-API-Key': env.UNIFI_API_KEY,
       'Content-Type': 'application/json',
       Accept: 'application/json',
       ...init.headers,

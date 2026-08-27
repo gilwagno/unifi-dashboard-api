@@ -51,7 +51,7 @@ class UniFiEventsHub extends EventEmitter {
   private connectUpstream() {
     const url = `wss://${env.CONTROLLER_HOST}/proxy/network/wss/s/${env.SITE_ID}/events`;
     this.upstream = new WebSocket(url, {
-      headers: { Authorization: `Bearer ${env.UNIFI_API_KEY}` },
+      headers: { 'X-API-Key': env.UNIFI_API_KEY },
       rejectUnauthorized: !env.UNIFI_ALLOW_SELF_SIGNED,
     });
 

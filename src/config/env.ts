@@ -4,7 +4,10 @@ import { z } from 'zod';
 const envSchema = z.object({
   CONTROLLER_HOST: z.string().min(1, 'CONTROLLER_HOST é obrigatório'),
   UNIFI_API_KEY: z.string().min(1, 'UNIFI_API_KEY é obrigatório'),
-  SITE_ID: z.string().default('default'),
+  // Precisa ser o UUID do site (campo "id" de GET /sites), não o
+  // internalReference "default" — a API de Integração rejeita esse valor
+  // como siteId.
+  SITE_ID: z.string().min(1, 'SITE_ID é obrigatório (o UUID de GET /sites, não "default")'),
   UNIFI_ALLOW_SELF_SIGNED: z
     .string()
     .default('true')
