@@ -119,11 +119,13 @@ npm test          # roda uma vez
 npm run test:watch
 ```
 
-Cobertura atual é um esqueleto (validação de MAC, health check, guarda de
-auth, login) — pense nisso como o padrão a seguir, não como suite completa.
-As rotas de `/clients` e `/devices` que chamam a API do UniFi de verdade
-ainda não têm teste, porque isso exige mockar `unifiService` — vale
-adicionar conforme o projeto crescer.
+Cobertura inclui validação de MAC/paginação, health check, guarda de auth,
+login/refresh, e as rotas de `/clients`, `/devices`, `/sites` e
+`/events/history` com `unifiService`/`unifiEventsHub` mockados. O handshake
+de `/ws/events` também tem teste (token válido, token inválido, mensagem
+sem token, canal somente-leitura após autenticar), via `app.injectWS()` do
+`@fastify/websocket` — **exceto** o fechamento por timeout de 5s sem
+mensagem, que não é coberto (exigiria esperar os 5s de verdade no teste).
 
 ## Deploy com Docker
 
