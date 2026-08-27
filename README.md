@@ -24,7 +24,8 @@ local de Integração do controller.
 
 | Método | Rota                          | Descrição                        |
 |--------|--------------------------------|-----------------------------------|
-| POST   | /auth/login                    | Retorna um JWT                    |
+| POST   | /auth/login                    | Retorna um access token + refresh token |
+| POST   | /auth/refresh                  | Troca um refresh token por um novo access token |
 | GET    | /sites                         | Lista os sites do controller      |
 | GET    | /clients?siteId=...            | Lista clientes conectados         |
 | POST   | /clients/:mac/block?siteId=...  | Bloqueia um cliente               |
@@ -32,6 +33,22 @@ local de Integração do controller.
 | GET    | /devices?siteId=...            | Lista APs/switches de um site     |
 | POST   | /devices/:id/restart?siteId=... | Reinicia um dispositivo           |
 | WS     | /ws/events?token=...            | Stream de eventos em tempo real   |
+
+### Renovando o token
+
+`POST /auth/login` retorna um `token` (access token, expira em 12h) e um
+`refreshToken` (expira em 30d). Quando o access token expirar, troque-o por
+um novo sem pedir usuário/senha de novo:
+
+```
+POST /auth/refresh
+{ "refreshToken": "<refreshToken recebido no login>" }
+```
+
+Retorna `{ "token": "<novo access token>" }`. O refresh token em si não é
+rotacionado — continua válido até expirar ou até você trocar `JWT_SECRET`.
+Não há como revogar um token individualmente (sem estado de sessão no
+servidor); se precisar invalidar tokens emitidos, troque `JWT_SECRET`.
 
 ### Múltiplos sites
 

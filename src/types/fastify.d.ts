@@ -8,7 +8,7 @@ declare module 'fastify' {
 
 declare module '@fastify/jwt' {
   interface FastifyJWT {
-    payload: { sub: string };
-    user: { sub: string };
+    payload: { sub: string; type?: 'access' | 'refresh' };
+    user: { sub: string; type?: 'access' | 'refresh' };
   }
 }
