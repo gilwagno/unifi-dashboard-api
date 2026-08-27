@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Badge } from '../components/Badge';
 import { Layout } from '../components/Layout';
-import { api, ApiError, type FirewallZone, type UniFiNetwork, type WifiBroadcast } from '../lib/api';
+import { api, ApiError, type FirewallZone, type RadiusProfile, type UniFiNetwork, type WifiBroadcast } from '../lib/api';
+
+type WifiSecurityType = 'WPA2_PERSONAL' | 'WPA2_ENTERPRISE' | 'WPA3_ENTERPRISE' | 'WPA2_WPA3_ENTERPRISE';
 
 // Zona usada como default no seletor de VLAN, quando existir — mesma zona
 // usada como fallback no backend quando `zoneId` não é informado (ver
@@ -12,6 +14,7 @@ export function Networks() {
   const [wifis, setWifis] = useState<WifiBroadcast[]>([]);
   const [networks, setNetworks] = useState<UniFiNetwork[]>([]);
   const [zones, setZones] = useState<FirewallZone[]>([]);
+  const [radiusProfiles, setRadiusProfiles] = useState<RadiusProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -21,6 +24,8 @@ export function Networks() {
 
   const [newWifiName, setNewWifiName] = useState('');
   const [newWifiPassword, setNewWifiPassword] = useState('');
+  const [newWifiSecurityType, setNewWifiSecurityType] = useState<WifiSecurityType>('WPA2_PERSONAL');
+  const [newWifiRadiusProfileId, setNewWifiRadiusProfileId] = useState('');
   const [creatingWifi, setCreatingWifi] = useState(false);
 
   const [pendingNetworkId, setPendingNetworkId] = useState<string | null>(null);
@@ -34,16 +39,18 @@ export function Networks() {
   const load = useCallback(() => {
     setLoading(true);
     setError(null);
-    Promise.all([api.listWifi(), api.listNetworks(), api.listFirewallZones()])
-      .then(([w, n, z]) => {
+    Promise.all([api.listWifi(), api.listNetworks(), api.listFirewallZones(), api.listRadiusProfiles()])
+      .then(([w, n, z, r]) => {
         setWifis(w.data);
         setNetworks(n.data);
         setZones(z.data);
+        setRadiusProfiles(r.data);
         setNewZoneId((current) => {
           if (current) return current;
           const defaultZone = z.data.find((zone) => zone.name === DEFAULT_ZONE_NAME);
           return (defaultZone ?? z.data[0])?.id ?? '';
         });
+        setNewWifiRadiusProfileId((current) => current || r.data[0]?.id || '');
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'Erro ao carregar redes'))
       .finally(() => setLoading(false));
@@ -55,10 +62,22 @@ export function Networks() {
 
   async function createWifi(e: React.FormEvent) {
     e.preventDefault();
+    if (newWifiSecurityType !== 'WPA2_PERSONAL' && !newWifiRadiusProfileId) {
+      setError('Selecione um perfil RADIUS para a rede Enterprise');
+      return;
+    }
     setCreatingWifi(true);
     setError(null);
     try {
-      await api.createWifi({ name: newWifiName, passphrase: newWifiPassword });
+      if (newWifiSecurityType === 'WPA2_PERSONAL') {
+        await api.createWifi({ name: newWifiName, passphrase: newWifiPassword });
+      } else {
+        await api.createWifi({
+          name: newWifiName,
+          securityType: newWifiSecurityType,
+          radiusProfileId: newWifiRadiusProfileId,
+        });
+      }
       setNewWifiName('');
       setNewWifiPassword('');
       load();
@@ -190,18 +209,51 @@ export function Networks() {
             />
           </div>
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-semibold text-slate-500">Senha (8-63 caracteres)</label>
-            <input
-              value={newWifiPassword}
-              onChange={(e) => setNewWifiPassword(e.target.value)}
-              required
-              minLength={8}
-              maxLength={63}
-              type="text"
-              className="rounded-md border border-slate-300 px-2.5 py-1.5 text-[13px]"
-              placeholder="senha da rede"
-            />
+            <label className="text-[11px] font-semibold text-slate-500">Segurança</label>
+            <select
+              value={newWifiSecurityType}
+              onChange={(e) => setNewWifiSecurityType(e.target.value as WifiSecurityType)}
+              className="w-56 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[13px]"
+            >
+              <option value="WPA2_PERSONAL">Senha (WPA2-Personal)</option>
+              <option value="WPA2_ENTERPRISE">Empresarial / RADIUS (WPA2-Enterprise)</option>
+              <option value="WPA3_ENTERPRISE">Empresarial / RADIUS (WPA3-Enterprise)</option>
+              <option value="WPA2_WPA3_ENTERPRISE">Empresarial / RADIUS (WPA2/WPA3-Enterprise)</option>
+            </select>
           </div>
+
+          {newWifiSecurityType === 'WPA2_PERSONAL' ? (
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-semibold text-slate-500">Senha (8-63 caracteres)</label>
+              <input
+                value={newWifiPassword}
+                onChange={(e) => setNewWifiPassword(e.target.value)}
+                required
+                minLength={8}
+                maxLength={63}
+                type="text"
+                className="rounded-md border border-slate-300 px-2.5 py-1.5 text-[13px]"
+                placeholder="senha da rede"
+              />
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-semibold text-slate-500">Perfil RADIUS (802.1X)</label>
+              <select
+                value={newWifiRadiusProfileId}
+                onChange={(e) => setNewWifiRadiusProfileId(e.target.value)}
+                required
+                className="w-52 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[13px]"
+              >
+                {radiusProfiles.length === 0 && <option value="">Nenhum perfil RADIUS cadastrado</option>}
+                {radiusProfiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <button
             type="submit"
             disabled={creatingWifi}

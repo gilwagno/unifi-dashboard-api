@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { env } from '../config/env.js';
 import { UniFiApiError, unifiService } from '../services/unifi.service.js';
+import type { UniFiWifiSecurityConfigurationCreate } from '../types/unifi.js';
 
 // Nome da zona de firewall usada como default quando o body de POST
 // /networks não informa `zoneId` explicitamente. Confirmado contra um
@@ -75,14 +76,116 @@ const wifiPassphraseSchema = z
   .min(8, 'Senha deve ter no mínimo 8 caracteres')
   .max(63, 'Senha deve ter no máximo 63 caracteres');
 
+// Tipos de segurança Enterprise (WPA*_ENTERPRISE) exigem um perfil RADIUS
+// já cadastrado no painel do UniFi (ver GET /wifi/radius-profiles) em vez
+// de uma senha — perfis RADIUS são só-leitura via API, então não dá pra
+// criar um perfil novo por aqui, só referenciar um existente.
+const wifiEnterpriseSecurityTypes = ['WPA2_ENTERPRISE', 'WPA3_ENTERPRISE', 'WPA2_WPA3_ENTERPRISE'] as const;
+const wifiSecurityTypeSchema = z.union([z.literal('WPA2_PERSONAL'), z.enum(wifiEnterpriseSecurityTypes)]);
+
+// Validação condicional em vez de z.discriminatedUnion: o body histórico
+// (só `name` + `passphrase`, sem `securityType`) precisa continuar válido
+// pra não quebrar clientes existentes — discriminatedUnion exigiria que o
+// campo discriminador estivesse sempre presente no corpo bruto antes de
+// aplicar o default, o que quebraria essa compatibilidade.
 const createWifiBody = z
   .object({
     name: z.string().min(1, 'Nome é obrigatório').max(32),
-    passphrase: wifiPassphraseSchema,
+    securityType: wifiSecurityTypeSchema.optional().default('WPA2_PERSONAL'),
+    passphrase: wifiPassphraseSchema.optional(),
+    radiusProfileId: z.string().min(1).optional(),
     hideName: z.boolean().optional().default(false),
     clientIsolationEnabled: z.boolean().optional().default(false),
   })
-  .merge(siteQuery);
+  .merge(siteQuery)
+  .superRefine((body, ctx) => {
+    const isEnterprise = body.securityType !== 'WPA2_PERSONAL';
+    if (isEnterprise) {
+      if (!body.radiusProfileId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['radiusProfileId'],
+          message: 'radiusProfileId é obrigatório quando securityType é Enterprise (veja GET /wifi/radius-profiles)',
+        });
+      }
+      if (body.passphrase) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['passphrase'],
+          message: 'passphrase não deve ser informado junto com um securityType Enterprise/RADIUS',
+        });
+      }
+    } else {
+      if (!body.passphrase) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['passphrase'],
+          message: 'passphrase é obrigatório para securityType WPA2_PERSONAL',
+        });
+      }
+      if (body.radiusProfileId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['radiusProfileId'],
+          message: 'radiusProfileId só é válido com um securityType Enterprise/RADIUS',
+        });
+      }
+    }
+  });
+
+// Monta o securityConfiguration de uma rede Enterprise/RADIUS. `nasId` usa
+// `{ type: 'DERIVED', source: 'BSSID' }` — confirmado contra uma rede
+// Enterprise real já em produção neste ambiente ("Evok-Corporativa",
+// WPA2_WPA3_ENTERPRISE), criada manualmente pelo usuário antes deste
+// projeto: o controller aceita e usa esse valor sem exigir nenhuma
+// configuração manual adicional (o NAS-Identifier enviado ao RADIUS passa
+// a ser o BSSID do rádio que atendeu a conexão). Por isso o frontend não
+// pede esse valor no formulário — é sempre este default. O schema oficial
+// ("Wifi Radius NAS ID configuration") também aceita `source:
+// DEVICE_MAC_ADDRESS/DEVICE_NAME/SITE_NAME` ou `type: USER_DEFINED` com um
+// `value` livre, caso um valor diferente seja necessário no futuro.
+// `coaEnabled: false` e `fastRoamingEnabled: false` seguem o mesmo default
+// conservador já usado pra WPA2_PERSONAL neste arquivo. `securityMode` e
+// `pmfMode`/`wpa3FastRoamingEnabled` só existem (e são obrigatórios) nos
+// schemas oficiais de WPA3_ENTERPRISE e WPA2_WPA3_ENTERPRISE,
+// respectivamente — por isso são adicionados condicionalmente.
+function buildEnterpriseSecurityConfiguration(
+  securityType: (typeof wifiEnterpriseSecurityTypes)[number],
+  radiusProfileId: string,
+): UniFiWifiSecurityConfigurationCreate {
+  const radiusConfiguration = {
+    profileId: radiusProfileId,
+    nasId: { type: 'DERIVED' as const, source: 'BSSID' as const },
+  };
+
+  if (securityType === 'WPA3_ENTERPRISE') {
+    return {
+      type: 'WPA3_ENTERPRISE',
+      coaEnabled: false,
+      fastRoamingEnabled: false,
+      securityMode: 'DEFAULT',
+      radiusConfiguration,
+    };
+  }
+
+  if (securityType === 'WPA2_WPA3_ENTERPRISE') {
+    return {
+      type: 'WPA2_WPA3_ENTERPRISE',
+      coaEnabled: false,
+      fastRoamingEnabled: false,
+      pmfMode: 'OPTIONAL',
+      wpa3FastRoamingEnabled: false,
+      radiusConfiguration,
+    };
+  }
+
+  return {
+    type: 'WPA2_ENTERPRISE',
+    coaEnabled: false,
+    fastRoamingEnabled: false,
+    radiusConfiguration,
+  };
+}
 
 const updatePasswordBody = z.object({ passphrase: wifiPassphraseSchema }).merge(siteQuery);
 const setEnabledBody = z.object({ enabled: z.boolean() }).merge(siteQuery);
@@ -109,11 +212,27 @@ export default async function networksRoutes(app: FastifyInstance) {
     return unifiService.listWifiBroadcasts(siteId);
   });
 
+  // Perfis RADIUS cadastrados manualmente no painel do UniFi (ex: "RADIUS
+  // Windows AD", apontando pro NPS do Windows Server) — usado pelo
+  // frontend pra popular o select de rede Enterprise em vez de aceitar
+  // qualquer profileId arbitrário.
+  app.get('/wifi/radius-profiles', async (request) => {
+    const { siteId } = siteQuery.parse(request.query);
+    return unifiService.listRadiusProfiles(siteId);
+  });
+
   app.post(
     '/wifi',
     { config: { rateLimit: { max: env.RATE_LIMIT_CLIENT_ACTION_MAX, timeWindow: env.RATE_LIMIT_WINDOW } } },
     async (request, reply) => {
-      const { name, passphrase, hideName, clientIsolationEnabled, siteId } = createWifiBody.parse(request.body);
+      const { name, securityType, passphrase, radiusProfileId, hideName, clientIsolationEnabled, siteId } =
+        createWifiBody.parse(request.body);
+
+      const securityConfiguration: UniFiWifiSecurityConfigurationCreate =
+        securityType === 'WPA2_PERSONAL'
+          ? { type: 'WPA2_PERSONAL', passphrase: passphrase!, fastRoamingEnabled: false }
+          : buildEnterpriseSecurityConfiguration(securityType, radiusProfileId!);
+
       const broadcast = await unifiService.createWifiBroadcast(
         {
           type: 'STANDARD',
@@ -134,8 +253,10 @@ export default async function networksRoutes(app: FastifyInstance) {
           // security requires exactly one of [preshared keys setting, all
           // of [network setting, passphrase setting]], WPA security
           // combined with standard WiFi requires fast roaming setting").
+          // Aplica-se tanto a WPA2_PERSONAL quanto às variantes Enterprise
+          // criadas aqui (todas ficam na network NATIVE por padrão).
           network: { type: 'NATIVE' },
-          securityConfiguration: { type: 'WPA2_PERSONAL', passphrase, fastRoamingEnabled: false },
+          securityConfiguration,
         },
         siteId,
       );

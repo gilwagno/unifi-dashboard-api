@@ -6,6 +6,7 @@ import type {
   UniFiFirewallZone,
   UniFiNetwork,
   UniFiNetworkCreate,
+  UniFiRadiusProfile,
   UniFiSite,
   UniFiWifiBroadcast,
   UniFiWifiBroadcastCreate,
@@ -148,6 +149,20 @@ export const unifiService = {
       method: 'PUT',
       body: JSON.stringify(updated),
     });
+  },
+
+  // Perfis RADIUS cadastrados manualmente no painel do UniFi (ex: um
+  // apontando pro NPS do Windows Server) — GET /sites/{siteId}/radius/
+  // profiles é SOMENTE LEITURA na API oficial (não existe POST/PUT/DELETE
+  // pra essa rota); a resposta real é paginada ({count, data, limit,
+  // offset, totalCount} — schema "Radius Profile Overview Page") e cada
+  // item traz também `metadata`, que este projeto não usa — por isso o
+  // resultado é simplificado pra {data: [{id, name}]}.
+  listRadiusProfiles: async (siteId = env.SITE_ID) => {
+    const page = await unifiFetch<{ data: Array<UniFiRadiusProfile & { metadata?: unknown }> }>(
+      `/sites/${siteId}/radius/profiles`,
+    );
+    return { data: page.data.map(({ id, name }) => ({ id, name })) };
   },
 
   // --- Networks (VLANs) — GET/POST/DELETE /sites/{siteId}/networks ---

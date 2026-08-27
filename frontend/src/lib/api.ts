@@ -36,6 +36,11 @@ export interface WifiBroadcast {
   [key: string]: unknown;
 }
 
+export interface RadiusProfile {
+  id: string;
+  name: string;
+}
+
 export interface FirewallZone {
   id: string;
   name: string;
@@ -306,8 +311,21 @@ export const api = {
 
   // --- Redes Wi-Fi (SSIDs) ---
   listWifi: () => request<{ data: WifiBroadcast[] }>('/wifi'),
-  createWifi: (body: { name: string; passphrase: string; hideName?: boolean; clientIsolationEnabled?: boolean }) =>
-    request<WifiBroadcast>('/wifi', { method: 'POST', body: JSON.stringify(body) }),
+  // Perfis RADIUS cadastrados manualmente no painel do UniFi (ex: "RADIUS
+  // Windows AD", apontando pro NPS do Windows Server) — só leitura, usado
+  // pra popular o select de rede Enterprise/802.1X.
+  listRadiusProfiles: () => request<{ data: RadiusProfile[] }>('/wifi/radius-profiles'),
+  createWifi: (
+    body:
+      | { name: string; passphrase: string; hideName?: boolean; clientIsolationEnabled?: boolean }
+      | {
+          name: string;
+          securityType: 'WPA2_ENTERPRISE' | 'WPA3_ENTERPRISE' | 'WPA2_WPA3_ENTERPRISE';
+          radiusProfileId: string;
+          hideName?: boolean;
+          clientIsolationEnabled?: boolean;
+        },
+  ) => request<WifiBroadcast>('/wifi', { method: 'POST', body: JSON.stringify(body) }),
   setWifiPassword: (id: string, passphrase: string) =>
     request<WifiBroadcast>(`/wifi/${id}/password`, { method: 'PATCH', body: JSON.stringify({ passphrase }) }),
   setWifiEnabled: (id: string, enabled: boolean) =>

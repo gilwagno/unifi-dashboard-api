@@ -6,6 +6,7 @@ vi.mock('../../src/services/unifi.service.js', () => ({
     listWifiBroadcasts: vi.fn(async () => ({ data: [] })),
     getWifiBroadcast: vi.fn(async () => undefined),
     createWifiBroadcast: vi.fn(async () => ({ id: 'wifi-1', name: 'Nova rede', enabled: true })),
+    listRadiusProfiles: vi.fn(async () => ({ data: [{ id: 'radius-1', name: 'RADIUS Windows AD' }] })),
     updateWifiBroadcastPassword: vi.fn(async () => ({ id: 'wifi-1', name: 'Rede', enabled: true })),
     setWifiBroadcastEnabled: vi.fn(async () => ({ id: 'wifi-1', name: 'Rede', enabled: false })),
     deleteWifiBroadcast: vi.fn(async () => undefined),
@@ -54,6 +55,7 @@ const { unifiService } = await import('../../src/services/unifi.service.js');
 beforeEach(() => {
   vi.mocked(unifiService.listFirewallZones).mockClear();
   vi.mocked(unifiService.createNetwork).mockClear();
+  vi.mocked(unifiService.createWifiBroadcast).mockClear();
 });
 
 async function authedApp() {
@@ -144,6 +146,175 @@ describe('POST /wifi', () => {
   it('retorna 401 sem token', async () => {
     const app = await buildApp();
     const res = await app.inject({ method: 'POST', url: '/wifi', payload: { name: 'x', passphrase: 'senha1234' } });
+    expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('cria uma rede Wi-Fi Enterprise (WPA2_WPA3_ENTERPRISE) referenciando um perfil RADIUS existente', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/wifi',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { name: 'Corporativa', securityType: 'WPA2_WPA3_ENTERPRISE', radiusProfileId: 'radius-1' },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(unifiService.createWifiBroadcast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'STANDARD',
+        name: 'Corporativa',
+        securityConfiguration: {
+          type: 'WPA2_WPA3_ENTERPRISE',
+          coaEnabled: false,
+          fastRoamingEnabled: false,
+          pmfMode: 'OPTIONAL',
+          wpa3FastRoamingEnabled: false,
+          radiusConfiguration: {
+            profileId: 'radius-1',
+            nasId: { type: 'DERIVED', source: 'BSSID' },
+          },
+        },
+      }),
+      undefined,
+    );
+
+    await app.close();
+  });
+
+  it('cria uma rede Wi-Fi Enterprise (WPA2_ENTERPRISE)', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/wifi',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { name: 'Corp2', securityType: 'WPA2_ENTERPRISE', radiusProfileId: 'radius-1' },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(unifiService.createWifiBroadcast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        securityConfiguration: {
+          type: 'WPA2_ENTERPRISE',
+          coaEnabled: false,
+          fastRoamingEnabled: false,
+          radiusConfiguration: {
+            profileId: 'radius-1',
+            nasId: { type: 'DERIVED', source: 'BSSID' },
+          },
+        },
+      }),
+      undefined,
+    );
+
+    await app.close();
+  });
+
+  it('cria uma rede Wi-Fi Enterprise (WPA3_ENTERPRISE)', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/wifi',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { name: 'Corp3', securityType: 'WPA3_ENTERPRISE', radiusProfileId: 'radius-1' },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(unifiService.createWifiBroadcast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        securityConfiguration: {
+          type: 'WPA3_ENTERPRISE',
+          coaEnabled: false,
+          fastRoamingEnabled: false,
+          securityMode: 'DEFAULT',
+          radiusConfiguration: {
+            profileId: 'radius-1',
+            nasId: { type: 'DERIVED', source: 'BSSID' },
+          },
+        },
+      }),
+      undefined,
+    );
+
+    await app.close();
+  });
+
+  it('rejeita securityType Enterprise sem radiusProfileId', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/wifi',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { name: 'Corp', securityType: 'WPA2_ENTERPRISE' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(unifiService.createWifiBroadcast).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it('rejeita misturar passphrase com securityType Enterprise/radiusProfileId', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/wifi',
+      headers: { authorization: `Bearer ${token}` },
+      payload: {
+        name: 'Corp',
+        securityType: 'WPA2_ENTERPRISE',
+        radiusProfileId: 'radius-1',
+        passphrase: 'senha1234',
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(unifiService.createWifiBroadcast).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it('rejeita radiusProfileId sem securityType Enterprise (misturado com WPA2_PERSONAL implícito)', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/wifi',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { name: 'Corp', passphrase: 'senha1234', radiusProfileId: 'radius-1' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(unifiService.createWifiBroadcast).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+});
+
+describe('GET /wifi/radius-profiles', () => {
+  it('lista os perfis RADIUS cadastrados no UniFi', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/wifi/radius-profiles',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toEqual([{ id: 'radius-1', name: 'RADIUS Windows AD' }]);
+
+    await app.close();
+  });
+
+  it('retorna 401 sem token', async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: 'GET', url: '/wifi/radius-profiles' });
     expect(res.statusCode).toBe(401);
     await app.close();
   });

@@ -53,7 +53,8 @@ Vite + Tailwind) que consome essa API.
 | GET    | /security/events                | Eventos/alarmes críticos do controller (API clássica) |
 | GET    | /security/admins                | Admins do controller e seus papéis/permissões por site (API clássica) |
 | GET    | /wifi?siteId=...                 | Lista as redes Wi-Fi (SSIDs) do site (API oficial) |
-| POST   | /wifi?siteId=...                 | Cria uma rede Wi-Fi nova (STANDARD/WPA2_PERSONAL, API oficial) |
+| POST   | /wifi?siteId=...                 | Cria uma rede Wi-Fi nova (WPA2_PERSONAL ou Enterprise/RADIUS, API oficial) |
+| GET    | /wifi/radius-profiles?siteId=...  | Lista os perfis RADIUS cadastrados no UniFi (somente leitura, API oficial) |
 | PATCH  | /wifi/:id/password?siteId=...    | Troca a senha de uma rede Wi-Fi (API oficial) |
 | PATCH  | /wifi/:id/enabled?siteId=...      | Habilita/desabilita uma rede Wi-Fi (API oficial) |
 | DELETE | /wifi/:id?siteId=...              | Remove uma rede Wi-Fi (API oficial) |
@@ -515,6 +516,89 @@ porque os APs do site já estão no limite de SSIDs simultâneos que o rádio
 suporta (geralmente 4-8, dependendo do modelo). Pra criar uma rede nova
 nesse cenário, é preciso primeiro remover/desabilitar um SSID existente
 num dos APs afetados — não há como contornar isso via API.
+
+#### Wi-Fi Enterprise / RADIUS (802.1X) — API oficial
+
+```
+GET /sites/{siteId}/radius/profiles
+```
+
+Perfis RADIUS (ex: um apontando pra um servidor NPS no Active Directory)
+são **somente leitura via API** — o OpenAPI oficial só expõe `GET
+/sites/{siteId}/radius/profiles`, não existe `POST`/`PUT`/`DELETE` para
+essa rota. Um perfil precisa ser cadastrado manualmente no painel do UniFi
+(Settings > Profiles > RADIUS) antes de poder ser referenciado por uma
+rede Wi-Fi criada por este dashboard. `GET /wifi/radius-profiles` expõe a
+listagem simplificada (`{ data: [{ id, name }] }`, sem o campo `metadata`
+que o controller também retorna) usada pelo select do frontend.
+
+Para criar uma rede Wi-Fi Enterprise, `POST /wifi` aceita, além do formato
+existente (`{ name, passphrase, hideName?, clientIsolationEnabled? }`),
+este segundo formato:
+
+```json
+{
+  "name": "Corporativa",
+  "securityType": "WPA2_ENTERPRISE",
+  "radiusProfileId": "570795ab-cd0c-4c7c-903d-3df45fc5d877",
+  "hideName": false,
+  "clientIsolationEnabled": false
+}
+```
+
+`securityType` aceita `WPA2_ENTERPRISE`, `WPA3_ENTERPRISE` ou
+`WPA2_WPA3_ENTERPRISE`; `radiusProfileId` é o `id` de um perfil retornado
+por `GET /wifi/radius-profiles`. A validação (Zod, `superRefine` em vez de
+`z.discriminatedUnion` — necessário porque o formato histórico não envia
+`securityType`, e o discriminador do Zod exigiria o campo sempre presente
+no corpo bruto) rejeita tanto `radiusProfileId` ausente quando
+`securityType` é Enterprise quanto a mistura de `passphrase` com
+`securityType`/`radiusProfileId` no mesmo corpo.
+
+O `securityConfiguration` enviado ao controller pra cada `securityType`
+segue os schemas oficiais
+`IntegrationWifiWpa2EnterpriseSecurityConfigurationDetailDto` /
+`...Wpa3Enterprise...` / `...Wpa2Wpa3Enterprise...`, todos com
+`radiusConfiguration: { profileId, nasId }`
+(`IntegrationWifiEnterpriseRadiusConfigurationDto`, com `profileId` e
+`nasId` **ambos obrigatórios**). O schema mínimo usado pelo backend
+(`buildEnterpriseSecurityConfiguration` em `src/routes/networks.routes.ts`):
+
+```json
+{
+  "type": "WPA2_ENTERPRISE",
+  "coaEnabled": false,
+  "fastRoamingEnabled": false,
+  "radiusConfiguration": {
+    "profileId": "<uuid do perfil RADIUS>",
+    "nasId": { "type": "DERIVED", "source": "BSSID" }
+  }
+}
+```
+
+`nasId` é a única parte não documentada com clareza pelo OpenAPI (o schema
+"Wifi Radius NAS ID configuration" é uma união discriminada por `type`:
+`DERIVED`, que exige `source` — um entre `DEVICE_MAC_ADDRESS`,
+`DEVICE_NAME`, `SITE_NAME`, `BSSID` — e tira o NAS-Identifier
+automaticamente; ou `USER_DEFINED`, que exige um `value` livre). O valor
+usado aqui, `{ type: "DERIVED", source: "BSSID" }`, foi confirmado contra
+uma rede Enterprise real já em produção neste ambiente
+("Evok-Corporativa", `WPA2_WPA3_ENTERPRISE`, configurada manualmente pelo
+usuário antes deste módulo existir) — o controller aceita e usa esse valor
+sem exigir nenhuma configuração manual adicional, por isso é o único valor
+usado pelo backend (o frontend não pede isso no formulário).
+
+`WPA3_ENTERPRISE` adiciona `securityMode: "DEFAULT"` (obrigatório pelo
+schema oficial; a outra opção é `HIGH_SECURITY_192_BIT`).
+`WPA2_WPA3_ENTERPRISE` adiciona `pmfMode: "OPTIONAL"` e
+`wpa3FastRoamingEnabled: false` (ambos obrigatórios pelo schema oficial
+desse tipo). `macAuthenticationConfiguration` (também aceito pelo schema
+de `radiusConfiguration`) não é usado por este módulo.
+
+Como perfis RADIUS não podem ser criados via API, este módulo **nunca cria
+nem edita nada no NPS/Active Directory** — ele só referencia, por
+`profileId`, um perfil que o usuário já configurou manualmente no painel
+do UniFi apontando pro RADIUS existente.
 
 #### Networks (VLANs) — API oficial
 

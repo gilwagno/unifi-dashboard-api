@@ -77,6 +77,67 @@ export interface UniFiWifiBroadcast {
   [key: string]: unknown;
 }
 
+// NAS-Identifier enviado ao servidor RADIUS numa autenticação 802.1X —
+// schema oficial "Wifi Radius NAS ID configuration" (OpenAPI
+// developer.ui.com/network/v10.4.57/openapi.json), união discriminada por
+// `type`: USER_DEFINED exige `value` (string livre); DERIVED exige
+// `source` (um entre DEVICE_MAC_ADDRESS/DEVICE_NAME/SITE_NAME/BSSID) e tira
+// o valor automaticamente do device/site que responde a autenticação.
+export type UniFiWifiNasId =
+  | { type: 'USER_DEFINED'; value: string }
+  | { type: 'DERIVED'; source: 'DEVICE_MAC_ADDRESS' | 'DEVICE_NAME' | 'SITE_NAME' | 'BSSID' };
+
+// Schema oficial "IntegrationWifiEnterpriseRadiusConfigurationDto" — usado
+// dentro de securityConfiguration quando o tipo é WPA2_ENTERPRISE,
+// WPA3_ENTERPRISE ou WPA2_WPA3_ENTERPRISE. `profileId` e `nasId` são AMBOS
+// obrigatórios pelo schema oficial (confirmado no OpenAPI, campo
+// `required`); `macAuthenticationConfiguration` é opcional e não é usado
+// por este projeto.
+export interface UniFiWifiEnterpriseRadiusConfiguration {
+  profileId: string;
+  nasId: UniFiWifiNasId;
+}
+
+// Perfil RADIUS cadastrado manualmente no painel do UniFi — só leitura via
+// API (GET /sites/{siteId}/radius/profiles). O schema oficial
+// "Radius Profile Overview" também traz `metadata`, que este projeto não
+// usa/expõe.
+export interface UniFiRadiusProfile {
+  id: string;
+  name: string;
+}
+
+// securityConfiguration de criação pra cada tipo de segurança suportado.
+// Os campos extras de cada tipo Enterprise seguem os schemas oficiais
+// "IntegrationWifiWpa2EnterpriseSecurityConfigurationDetailDto" /
+// "...Wpa3Enterprise..." / "...Wpa2Wpa3Enterprise...": `coaEnabled` e
+// `radiusConfiguration` são obrigatórios nos três; `securityMode` só é
+// obrigatório em WPA3_ENTERPRISE; `pmfMode` e `wpa3FastRoamingEnabled` só
+// são obrigatórios em WPA2_WPA3_ENTERPRISE.
+export type UniFiWifiSecurityConfigurationCreate =
+  | { type: 'WPA2_PERSONAL'; passphrase: string; fastRoamingEnabled: boolean }
+  | {
+      type: 'WPA2_ENTERPRISE';
+      coaEnabled: boolean;
+      fastRoamingEnabled: boolean;
+      radiusConfiguration: UniFiWifiEnterpriseRadiusConfiguration;
+    }
+  | {
+      type: 'WPA3_ENTERPRISE';
+      coaEnabled: boolean;
+      fastRoamingEnabled: boolean;
+      securityMode: 'DEFAULT' | 'HIGH_SECURITY_192_BIT';
+      radiusConfiguration: UniFiWifiEnterpriseRadiusConfiguration;
+    }
+  | {
+      type: 'WPA2_WPA3_ENTERPRISE';
+      coaEnabled: boolean;
+      fastRoamingEnabled: boolean;
+      pmfMode: 'REQUIRED' | 'OPTIONAL';
+      wpa3FastRoamingEnabled: boolean;
+      radiusConfiguration: UniFiWifiEnterpriseRadiusConfiguration;
+    };
+
 // Payload mínimo pra criar uma rede Wi-Fi (POST /sites/{siteId}/wifi/broadcasts).
 export interface UniFiWifiBroadcastCreate {
   type: 'STANDARD';
@@ -100,7 +161,7 @@ export interface UniFiWifiBroadcastCreate {
   // "NATIVE" }` é o valor mínimo válido, usado pela maioria das redes
   // reais observadas via GET /wifi/broadcasts.
   network: { type: 'NATIVE' };
-  securityConfiguration: { type: 'WPA2_PERSONAL'; passphrase: string; fastRoamingEnabled: boolean };
+  securityConfiguration: UniFiWifiSecurityConfigurationCreate;
 }
 
 // Network/VLAN, como vem em GET/POST /sites/{siteId}/networks[/{id}]. Só
