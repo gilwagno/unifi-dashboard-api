@@ -1,0 +1,15 @@
+@import url("https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap");
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Public Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", "SF Mono", monospace;
+  --color-accent: oklch(52% 0.16 255);
+  --color-accent-hover: oklch(44% 0.16 255);
+}
+
+body {
+  font-family: var(--font-sans);
+  background: oklch(98% 0.003 250);
+  color: oklch(22% 0.01 255);
+}
