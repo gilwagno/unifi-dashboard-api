@@ -52,6 +52,16 @@ Vite + Tailwind) que consome essa API.
 | GET    | /security/summary               | Resumo de segurança: ameaças detectadas, status do IPS, firmware desatualizado (API clássica) |
 | GET    | /security/events                | Eventos/alarmes críticos do controller (API clássica) |
 | GET    | /security/admins                | Admins do controller e seus papéis/permissões por site (API clássica) |
+| GET    | /wifi?siteId=...                 | Lista as redes Wi-Fi (SSIDs) do site (API oficial) |
+| POST   | /wifi?siteId=...                 | Cria uma rede Wi-Fi nova (STANDARD/WPA2_PERSONAL, API oficial) |
+| PATCH  | /wifi/:id/password?siteId=...    | Troca a senha de uma rede Wi-Fi (API oficial) |
+| PATCH  | /wifi/:id/enabled?siteId=...      | Habilita/desabilita uma rede Wi-Fi (API oficial) |
+| DELETE | /wifi/:id?siteId=...              | Remove uma rede Wi-Fi (API oficial) |
+| GET    | /networks?siteId=...              | Lista as networks/VLANs do site (API oficial) |
+| POST   | /networks?siteId=...              | Cria uma VLAN nova gerenciada pelo gateway (API oficial) |
+| DELETE | /networks/:id?siteId=...          | Remove uma VLAN (API oficial) |
+| GET    | /networks/zones?siteId=...        | Lista as zonas de firewall do site (ex: Internal, External) (API oficial) |
+| PATCH  | /clients/:mac/fixed-ip            | Liga/desliga o IP fixo (reserva de DHCP) de um cliente (API clássica) |
 
 ### Renovando o token
 
@@ -244,6 +254,203 @@ nenhum endpoint confiável para consultar o histórico de login de
 administradores no controller (pesquisa extensiva, incluindo testes
 diretos contra um controller real). Não está disponível nesta versão do
 controller.
+
+### Redes Wi-Fi (SSIDs), VLANs e IP fixo por cliente
+
+Módulo de gestão de rede: criar/editar/remover redes Wi-Fi (SSIDs) e VLANs
+(networks), e reservar um IP fixo por cliente. Contratos confirmados
+diretamente no OpenAPI oficial da Integration API
+(`https://developer.ui.com/network/v10.4.57/openapi.json`).
+
+#### Wi-Fi (SSIDs) — API oficial
+
+```
+GET    /sites/{siteId}/wifi/broadcasts
+GET    /sites/{siteId}/wifi/broadcasts/{id}
+POST   /sites/{siteId}/wifi/broadcasts
+PUT    /sites/{siteId}/wifi/broadcasts/{id}
+DELETE /sites/{siteId}/wifi/broadcasts/{id}
+```
+
+`PUT` substitui o objeto inteiro (não é PATCH parcial). Por isso, trocar
+senha (`PATCH /wifi/:id/password`) e habilitar/desabilitar
+(`PATCH /wifi/:id/enabled`) fazem, internamente, `GET` do broadcast atual +
+troca do campo pedido + `PUT` do objeto inteiro de volta, preservando todo
+o resto exatamente como estava (`unifiService.updateWifiBroadcastPassword`
+e `setWifiBroadcastEnabled` em `src/services/unifi.service.ts`).
+
+`POST /wifi` cria uma rede padrão (`type: STANDARD`,
+`securityConfiguration.type: WPA2_PERSONAL`) com este payload mínimo
+enviado ao controller (todos os campos são obrigatórios pelo schema
+oficial, mais dois campos **confirmados como obrigatórios contra um
+controller real** apesar de o schema OpenAPI não os marcar como tal —
+ver observação abaixo):
+
+```json
+{
+  "type": "STANDARD",
+  "name": "Escritório",
+  "enabled": true,
+  "hideName": false,
+  "channel2gLockedTo6": false,
+  "clientIsolationEnabled": false,
+  "dtimPeriod2gLockedTo3": false,
+  "multicastToUnicastConversionEnabled": false,
+  "uapsdEnabled": false,
+  "advertiseDeviceName": false,
+  "arpProxyEnabled": false,
+  "bssTransitionEnabled": true,
+  "broadcastingFrequenciesGHz": [2.4, 5],
+  "network": { "type": "NATIVE" },
+  "securityConfiguration": { "type": "WPA2_PERSONAL", "passphrase": "senha1234", "fastRoamingEnabled": false }
+}
+```
+
+O corpo aceito por `POST /wifi` do dashboard é só `{ name, passphrase,
+hideName?, clientIsolationEnabled? }` — o resto dos defaults acima é
+preenchido pelo backend. `passphrase` é validado com 8 a 63 caracteres
+(mesmo limite do schema oficial), tanto na criação quanto em
+`PATCH /wifi/:id/password`.
+
+**Testado contra um controller real** (criação e remoção de um SSID de
+teste): sem `network: { type: "NATIVE" }` e sem
+`securityConfiguration.fastRoamingEnabled: false`, o controller rejeita a
+criação com `400`:
+```
+WPA2 personal security requires exactly one of [preshared keys setting,
+all of [network setting, passphrase setting]], WPA security combined with
+standard WiFi requires fast roaming setting
+```
+`network` é a referência à network associada ao SSID — `{ type: "NATIVE"
+}` é o valor mínimo válido (observado na maioria das redes Wi-Fi reais via
+`GET /wifi/broadcasts`). `fastRoamingEnabled` é obrigatório porque
+`bssTransitionEnabled: true` está fixo no payload.
+
+**Limite de hardware — "too many WiFi broadcasts"**: mesmo com o payload
+acima 100% correto (confirmado — o erro deixou de ser sobre o schema e
+passou a ser sobre capacidade), `POST /wifi` pode falhar com `400` e uma
+mensagem do tipo `"too many WiFi broadcasts assigned to the device with
+id=..."`. Isso **não é um bug do dashboard**: é o controller recusando
+porque os APs do site já estão no limite de SSIDs simultâneos que o rádio
+suporta (geralmente 4-8, dependendo do modelo). Pra criar uma rede nova
+nesse cenário, é preciso primeiro remover/desabilitar um SSID existente
+num dos APs afetados — não há como contornar isso via API.
+
+#### Networks (VLANs) — API oficial
+
+```
+GET    /sites/{siteId}/networks
+GET    /sites/{siteId}/networks/{id}
+POST   /sites/{siteId}/networks
+DELETE /sites/{siteId}/networks/{id}
+```
+
+`POST /networks` cria uma VLAN gerenciada pelo gateway
+(`management: GATEWAY`) com este payload mínimo:
+
+```json
+{
+  "management": "GATEWAY",
+  "name": "IoT",
+  "enabled": true,
+  "vlanId": 10,
+  "cellularBackupEnabled": false,
+  "internetAccessEnabled": true,
+  "isolationEnabled": false,
+  "zoneId": "749f84e7-7347-42c4-8f69-ec2632823809",
+  "ipv4Configuration": {
+    "autoScaleEnabled": false,
+    "hostIpAddress": "10.30.0.1",
+    "prefixLength": 24,
+    "dhcpConfiguration": {
+      "mode": "SERVER",
+      "ipAddressRange": { "start": "10.30.0.10", "stop": "10.30.0.254" },
+      "leaseTimeSeconds": 86400,
+      "pingConflictDetectionEnabled": false
+    }
+  }
+}
+```
+
+O corpo aceito por `POST /networks` do dashboard é `{ name, vlanId,
+hostIpAddress, prefixLength, internetAccessEnabled?, isolationEnabled?,
+zoneId? }`. `vlanId` é validado entre 2 e 4009 (1 é reservado pra rede
+default) e `hostIpAddress` precisa ser um IPv4 válido. Não há `PUT`
+documentado neste endpoint no OpenAPI oficial consultado — por isso este
+módulo só cobre criar/listar/remover VLAN, sem edição.
+
+**Testado contra um controller real** (criação e remoção de uma VLAN de
+teste): o OpenAPI oficial declara `ipAddressRange`, `leaseTimeSeconds`,
+`pingConflictDetectionEnabled` (dentro de `dhcpConfiguration`) e `zoneId`
+(no nível do corpo da network) como opcionais, mas o controller rejeita a
+criação com `400` sem eles:
+```
+ipv4Configuration.dhcpConfiguration.ipAddressRange must not be null,
+ipv4Configuration.dhcpConfiguration.leaseTimeSeconds must not be null,
+ipv4Configuration.dhcpConfiguration.pingConflictDetectionEnabled must not
+be null
+```
+e, separadamente, `zoneId must not be null`.
+
+`leaseTimeSeconds: 86400` (24h) e `pingConflictDetectionEnabled: false`
+são valores fixos razoáveis. `ipAddressRange` (`{ start, stop }`) é
+**calculado a partir do `hostIpAddress`/`prefixLength`** informados
+(função `computeDhcpRange` em `src/routes/networks.routes.ts`): começa 10
+endereços depois do início da sub-rede (deixando espaço pro gateway e IPs
+fixos manuais) e termina um endereço antes do broadcast — ex: para
+`10.30.0.1/24` o range calculado é `10.30.0.10`–`10.30.0.254`. Em
+sub-redes muito pequenas o cálculo colapsa para o menor intervalo válido
+em vez de gerar um range invertido.
+
+`zoneId` é o id de uma **zona de firewall** existente (`GET
+/sites/{siteId}/firewall/zones`, agora exposto neste dashboard como `GET
+/networks/zones` — resposta `{ data: [{ id, name, networkIds, metadata
+}] }`). Se o corpo de `POST /networks` não informar `zoneId`
+explicitamente, o backend busca as zonas do site e usa a que se chama
+**"Internal"** como default (é a zona usada pelas networks LAN comuns
+observadas em ambientes reais — equivalente a "Trusted"). Se não existir
+nenhuma zona chamada "Internal" nesse site, a criação falha com `502` e
+uma mensagem pedindo pra informar `zoneId` explicitamente — em vez de
+mandar `zoneId: null` de novo pro controller. O frontend busca as zonas
+disponíveis e deixa escolher no formulário de criação de VLAN (com
+"Internal" pré-selecionado quando existir), pra quem precisar de outra
+zona (ex: DMZ) não ficar preso ao default.
+
+**`DELETE` com corpo vazio**: confirmado contra um controller real,
+`DELETE /wifi/broadcasts/{id}` e `DELETE /networks/{id}` respondem `200`
+(não `204`) com corpo **completamente vazio** (sem `Content-Type`, sem
+nenhum byte). `unifiFetch` (em `src/services/unifi.service.ts`) lê o corpo
+como texto antes de decidir se há algo pra parsear como JSON — em vez de
+assumir que só `204` vem sem corpo — justamente por causa desse caso.
+
+**Consistência eventual após deletar uma VLAN**: por alguns segundos
+depois de um `DELETE /networks/:id` bem-sucedido, `GET /networks` pode
+responder com um erro transitório do próprio controller (`422
+api.firewall.zone.network-does-not-exist`) antes de se estabilizar
+sozinho. Isso é comportamento do controller (não deste backend) — se a
+listagem de VLANs falhar logo depois de deletar uma, tente de novo em
+alguns segundos.
+
+#### IP fixo por cliente — API clássica
+
+A Integration API oficial **não tem** o conceito de IP fixo/reserva de
+DHCP — ele só existe no registro do cliente na API clássica (a mesma
+usada para bloquear/desbloquear, ver seção acima), nos campos
+`use_fixedip`/`fixed_ip`:
+
+```
+PUT /proxy/network/api/s/{site}/rest/user/{clientObjectId}
+Body: { "use_fixedip": true, "fixed_ip": "172.16.0.50", "network_id": "<opcional>" }
+```
+
+`{clientObjectId}` é o campo `_id` do registro do cliente em
+`GET /rest/user` — o mesmo lookup por MAC já usado pelo bloqueio
+(`unifiClassicService`) é reaproveitado para achar esse `_id` antes do
+`PUT`. `PATCH /clients/:mac/fixed-ip` aceita `{ enabled: boolean, ip?:
+string, networkId?: string }` — `ip` é obrigatório (e validado como IPv4)
+quando `enabled: true`; para desligar o IP fixo, basta `{ enabled: false }`.
+Mesmas regras de MAC desconhecido (`404`) e API clássica não configurada
+(`503`) do bloqueio de clientes se aplicam aqui.
 
 ## Conectando no WebSocket de eventos
 

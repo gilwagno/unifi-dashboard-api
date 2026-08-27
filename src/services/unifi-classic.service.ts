@@ -168,6 +168,41 @@ async function assertKnownClient(mac: string, site: string, knownClients?: Class
   if (!isKnown) throw new UnknownClientError(mac);
 }
 
+async function findClientByMac(mac: string, site: string): Promise<ClassicClient> {
+  const clients = await fetchKnownClients(site);
+  const client = clients.find((c) => c.mac.toLowerCase() === mac.toLowerCase());
+  if (!client) throw new UnknownClientError(mac);
+  return client;
+}
+
+// IP fixo (reserva de DHCP) por cliente. Esse conceito não existe na
+// Integration API oficial — só no registro do cliente na API clássica
+// (/rest/user), via os campos `use_fixedip`/`fixed_ip`. Reaproveita o mesmo
+// lookup por MAC usado no bloqueio pra achar o `_id` do registro antes do
+// PUT.
+async function setFixedIp(
+  mac: string,
+  site: string,
+  opts: { enabled: boolean; ip?: string; networkId?: string },
+): Promise<ClassicResponse<unknown[]>> {
+  const client = await findClientByMac(mac, site);
+  const clientId = client._id as string | undefined;
+  if (!clientId) {
+    throw new UniFiClassicApiError(502, `Registro do cliente ${mac} não tem campo _id — resposta inesperada do controller`);
+  }
+
+  const body: Record<string, unknown> = { use_fixedip: opts.enabled };
+  if (opts.enabled) {
+    body.fixed_ip = opts.ip;
+    if (opts.networkId) body.network_id = opts.networkId;
+  }
+
+  return classicFetch<ClassicResponse<unknown[]>>(`/proxy/network/api/s/${site}/rest/user/${clientId}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+}
+
 async function setBlockedState(
   mac: string,
   site: string,
@@ -282,6 +317,12 @@ export const unifiClassicService = {
   getCriticalEvents: (site = env.UNIFI_CONTROLLER_SITE) => fetchCriticalEvents(site),
 
   getAdmins: () => fetchAdmins(),
+
+  setClientFixedIp: (
+    mac: string,
+    opts: { enabled: boolean; ip?: string; networkId?: string },
+    site = env.UNIFI_CONTROLLER_SITE,
+  ) => setFixedIp(mac, site, opts),
 };
 
 export { UniFiClassicApiError, ClassicApiNotConfiguredError, UnknownClientError };

@@ -1,5 +1,15 @@
 import { env } from '../config/env.js';
-import type { UniFiClient, UniFiDevice, UniFiDeviceDetail, UniFiSite } from '../types/unifi.js';
+import type {
+  UniFiClient,
+  UniFiDevice,
+  UniFiDeviceDetail,
+  UniFiFirewallZone,
+  UniFiNetwork,
+  UniFiNetworkCreate,
+  UniFiSite,
+  UniFiWifiBroadcast,
+  UniFiWifiBroadcastCreate,
+} from '../types/unifi.js';
 
 const BASE_URL = `https://${env.CONTROLLER_HOST}/proxy/network/integration/v1`;
 
@@ -48,8 +58,17 @@ async function unifiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new UniFiApiError(res.status, message || `UniFi API respondeu ${res.status}`);
   }
 
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
+  // Não basta confiar em `res.status === 204` pra saber que não há corpo:
+  // confirmado contra um controller real que alguns endpoints (ex: DELETE
+  // /wifi/broadcasts/{id} e DELETE /networks/{id}) respondem 200 com corpo
+  // completamente vazio (content-type null, body length 0). Chamar
+  // `res.json()` direto nesse caso lança (JSON inválido: string vazia), o
+  // que virava um 500 genérico escondendo que a ação tinha funcionado de
+  // verdade no controller. Por isso lê como texto primeiro e só faz
+  // JSON.parse quando há de fato algo pra parsear.
+  const text = await res.text();
+  if (!text) return undefined as T;
+  return JSON.parse(text) as T;
 }
 
 export const unifiService = {
@@ -80,6 +99,74 @@ export const unifiService = {
       method: 'POST',
       body: JSON.stringify({ action: 'POWER_CYCLE' }),
     }),
+
+  // --- Wi-Fi (SSIDs) — GET/POST/PUT/DELETE /sites/{siteId}/wifi/broadcasts ---
+
+  listWifiBroadcasts: (siteId = env.SITE_ID) =>
+    unifiFetch<{ data: UniFiWifiBroadcast[] }>(`/sites/${siteId}/wifi/broadcasts`),
+
+  getWifiBroadcast: (wifiBroadcastId: string, siteId = env.SITE_ID) =>
+    unifiFetch<UniFiWifiBroadcast>(`/sites/${siteId}/wifi/broadcasts/${wifiBroadcastId}`),
+
+  createWifiBroadcast: (body: UniFiWifiBroadcastCreate, siteId = env.SITE_ID) =>
+    unifiFetch<UniFiWifiBroadcast>(`/sites/${siteId}/wifi/broadcasts`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  deleteWifiBroadcast: (wifiBroadcastId: string, siteId = env.SITE_ID) =>
+    unifiFetch<void>(`/sites/${siteId}/wifi/broadcasts/${wifiBroadcastId}`, { method: 'DELETE' }),
+
+  // PUT substitui o objeto inteiro (não é PATCH parcial) — por isso as duas
+  // operações abaixo fazem GET do broadcast atual, trocam só o campo
+  // pedido, e mandam o objeto inteiro de volta, preservando todo o resto
+  // exatamente como estava.
+  updateWifiBroadcastPassword: async (
+    wifiBroadcastId: string,
+    passphrase: string,
+    siteId = env.SITE_ID,
+  ): Promise<UniFiWifiBroadcast> => {
+    const current = await unifiFetch<UniFiWifiBroadcast>(`/sites/${siteId}/wifi/broadcasts/${wifiBroadcastId}`);
+    const updated: UniFiWifiBroadcast = {
+      ...current,
+      securityConfiguration: { ...current.securityConfiguration, passphrase },
+    };
+    return unifiFetch<UniFiWifiBroadcast>(`/sites/${siteId}/wifi/broadcasts/${wifiBroadcastId}`, {
+      method: 'PUT',
+      body: JSON.stringify(updated),
+    });
+  },
+
+  setWifiBroadcastEnabled: async (
+    wifiBroadcastId: string,
+    enabled: boolean,
+    siteId = env.SITE_ID,
+  ): Promise<UniFiWifiBroadcast> => {
+    const current = await unifiFetch<UniFiWifiBroadcast>(`/sites/${siteId}/wifi/broadcasts/${wifiBroadcastId}`);
+    const updated: UniFiWifiBroadcast = { ...current, enabled };
+    return unifiFetch<UniFiWifiBroadcast>(`/sites/${siteId}/wifi/broadcasts/${wifiBroadcastId}`, {
+      method: 'PUT',
+      body: JSON.stringify(updated),
+    });
+  },
+
+  // --- Networks (VLANs) — GET/POST/DELETE /sites/{siteId}/networks ---
+
+  listNetworks: (siteId = env.SITE_ID) => unifiFetch<{ data: UniFiNetwork[] }>(`/sites/${siteId}/networks`),
+
+  createNetwork: (body: UniFiNetworkCreate, siteId = env.SITE_ID) =>
+    unifiFetch<UniFiNetwork>(`/sites/${siteId}/networks`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  deleteNetwork: (networkId: string, siteId = env.SITE_ID) =>
+    unifiFetch<void>(`/sites/${siteId}/networks/${networkId}`, { method: 'DELETE' }),
+
+  // Zonas de firewall (ex: "Internal", "External", "DMZ") — toda network
+  // precisa referenciar uma via `zoneId` (ver UniFiNetworkCreate).
+  listFirewallZones: (siteId = env.SITE_ID) =>
+    unifiFetch<{ data: UniFiFirewallZone[] }>(`/sites/${siteId}/firewall/zones`),
 };
 
 export { UniFiApiError };

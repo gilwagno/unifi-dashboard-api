@@ -27,6 +27,37 @@ export interface UniFiClient {
   blocked: boolean;
 }
 
+export interface WifiBroadcast {
+  id: string;
+  name: string;
+  enabled: boolean;
+  type: string;
+  securityConfiguration: { type: string; passphrase?: string };
+  [key: string]: unknown;
+}
+
+export interface FirewallZone {
+  id: string;
+  name: string;
+  networkIds?: string[];
+  [key: string]: unknown;
+}
+
+export interface UniFiNetwork {
+  id: string;
+  name: string;
+  management: string;
+  enabled: boolean;
+  vlanId?: number;
+  zoneId?: string;
+  ipv4Configuration?: {
+    hostIpAddress?: string;
+    prefixLength?: number;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
 export interface UniFiDevice {
   id: string;
   name: string;
@@ -210,4 +241,32 @@ export const api = {
   getSecuritySummary: () => request<SecuritySummary>('/security/summary'),
   getSecurityEvents: () => request<{ data: CriticalEvent[] }>('/security/events'),
   getAdmins: () => request<{ data: Admin[] }>('/security/admins'),
+
+  // --- Redes Wi-Fi (SSIDs) ---
+  listWifi: () => request<{ data: WifiBroadcast[] }>('/wifi'),
+  createWifi: (body: { name: string; passphrase: string; hideName?: boolean; clientIsolationEnabled?: boolean }) =>
+    request<WifiBroadcast>('/wifi', { method: 'POST', body: JSON.stringify(body) }),
+  setWifiPassword: (id: string, passphrase: string) =>
+    request<WifiBroadcast>(`/wifi/${id}/password`, { method: 'PATCH', body: JSON.stringify({ passphrase }) }),
+  setWifiEnabled: (id: string, enabled: boolean) =>
+    request<WifiBroadcast>(`/wifi/${id}/enabled`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
+  deleteWifi: (id: string) => request<{ ok: true }>(`/wifi/${id}`, { method: 'DELETE' }),
+
+  // --- Networks (VLANs) ---
+  listNetworks: () => request<{ data: UniFiNetwork[] }>('/networks'),
+  listFirewallZones: () => request<{ data: FirewallZone[] }>('/networks/zones'),
+  createNetwork: (body: {
+    name: string;
+    vlanId: number;
+    hostIpAddress: string;
+    prefixLength: number;
+    internetAccessEnabled?: boolean;
+    isolationEnabled?: boolean;
+    zoneId?: string;
+  }) => request<UniFiNetwork>('/networks', { method: 'POST', body: JSON.stringify(body) }),
+  deleteNetwork: (id: string) => request<{ ok: true }>(`/networks/${id}`, { method: 'DELETE' }),
+
+  // --- IP fixo por cliente ---
+  setClientFixedIp: (mac: string, opts: { enabled: boolean; ip?: string; networkId?: string }) =>
+    request<{ ok: true }>(`/clients/${mac}/fixed-ip`, { method: 'PATCH', body: JSON.stringify(opts) }),
 };

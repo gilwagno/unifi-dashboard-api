@@ -6,6 +6,26 @@ import { unifiClassicService } from '../services/unifi-classic.service.js';
 import { macParamSchema } from '../validators/mac.js';
 import { paginate, paginationQuery } from '../validators/pagination.js';
 
+// Mesma regex de IPv4 usada em networks.routes.ts, pro campo `ip` do IP
+// fixo por cliente.
+const ipv4Regex =
+  /^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+
+// `ip` só é obrigatório quando enabled=true (pra desligar o IP fixo não
+// precisa informar nenhum IP) — validado com superRefine em vez de um
+// discriminatedUnion pra manter a mensagem de erro simples num só campo.
+const fixedIpBody = z
+  .object({
+    enabled: z.boolean(),
+    ip: z.string().regex(ipv4Regex, 'ip deve ser um IPv4 válido').optional(),
+    networkId: z.string().min(1).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.enabled && !value.ip) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ip'], message: 'ip é obrigatório quando enabled=true' });
+    }
+  });
+
 const listClientsQuery = z
   .object({
     siteId: z.string().min(1).optional(),
@@ -64,6 +84,20 @@ export default async function clientsRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { mac } = macParamSchema.parse(request.params);
       await unifiClassicService.unblockClient(mac);
+      return reply.send({ ok: true });
+    },
+  );
+
+  // IP fixo (reserva de DHCP) por cliente — só existe na API clássica
+  // (ver unifi-classic.service.ts), a Integration API oficial não tem esse
+  // conceito.
+  app.patch(
+    '/clients/:mac/fixed-ip',
+    { config: { rateLimit: { max: env.RATE_LIMIT_CLIENT_ACTION_MAX, timeWindow: env.RATE_LIMIT_WINDOW } } },
+    async (request, reply) => {
+      const { mac } = macParamSchema.parse(request.params);
+      const { enabled, ip, networkId } = fixedIpBody.parse(request.body);
+      await unifiClassicService.setClientFixedIp(mac, { enabled, ip, networkId });
       return reply.send({ ok: true });
     },
   );

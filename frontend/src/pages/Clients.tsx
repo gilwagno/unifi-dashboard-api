@@ -18,6 +18,10 @@ export function Clients() {
   const [error, setError] = useState<string | null>(null);
   const [pendingMac, setPendingMac] = useState<string | null>(null);
 
+  const [fixedIpMac, setFixedIpMac] = useState<string | null>(null);
+  const [fixedIpDraft, setFixedIpDraft] = useState('');
+  const [pendingFixedIpMac, setPendingFixedIpMac] = useState<string | null>(null);
+
   const load = useCallback(() => {
     setLoading(true);
     setError(null);
@@ -66,6 +70,43 @@ export function Clients() {
     }
   }
 
+  function startFixedIp(client: UniFiClient) {
+    setFixedIpMac(client.macAddress);
+    setFixedIpDraft(client.ipAddress ?? '');
+  }
+
+  async function submitFixedIp(client: UniFiClient) {
+    const ipv4 = /^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+    if (!ipv4.test(fixedIpDraft)) {
+      setError('Informe um IPv4 válido para o IP fixo');
+      return;
+    }
+    setPendingFixedIpMac(client.macAddress);
+    setError(null);
+    try {
+      await api.setClientFixedIp(client.macAddress, { enabled: true, ip: fixedIpDraft });
+      setFixedIpMac(null);
+      setFixedIpDraft('');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Falha ao definir o IP fixo');
+    } finally {
+      setPendingFixedIpMac(null);
+    }
+  }
+
+  async function removeFixedIp(client: UniFiClient) {
+    if (!confirm(`Remover o IP fixo de "${client.name ?? client.hostname ?? client.macAddress}"?`)) return;
+    setPendingFixedIpMac(client.macAddress);
+    setError(null);
+    try {
+      await api.setClientFixedIp(client.macAddress, { enabled: false });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Falha ao remover o IP fixo');
+    } finally {
+      setPendingFixedIpMac(null);
+    }
+  }
+
   return (
     <Layout title="Clientes">
       <div className="mb-4 flex items-center gap-2">
@@ -97,41 +138,83 @@ export function Clients() {
       )}
 
       <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-        <div className="grid grid-cols-[2.2fr_1.6fr_1.3fr_0.9fr_1.3fr_1.1fr] bg-slate-50 px-5 py-2.75 text-[11px] font-bold uppercase tracking-wide text-slate-500">
+        <div className="grid grid-cols-[2fr_1.5fr_1.2fr_0.8fr_1.2fr_2.1fr] bg-slate-50 px-5 py-2.75 text-[11px] font-bold uppercase tracking-wide text-slate-500">
           <span>Cliente</span>
           <span>MAC</span>
           <span>IP</span>
           <span>Tipo</span>
           <span>Status</span>
-          <span className="text-right">Ação</span>
+          <span className="text-right">Ações</span>
         </div>
 
         {loading && <div className="px-5 py-8 text-center text-sm text-slate-400">Carregando…</div>}
 
         {!loading &&
           clients.map((c) => (
-            <div
-              key={c.id}
-              className="grid grid-cols-[2.2fr_1.6fr_1.3fr_0.9fr_1.3fr_1.1fr] items-center border-t border-slate-100 px-5 py-3"
-            >
-              <span className="truncate text-[13px] font-semibold text-slate-800">{c.name ?? c.hostname ?? 'Sem nome'}</span>
-              <span className="font-mono text-xs text-slate-500">{c.macAddress}</span>
-              <span className="font-mono text-xs text-slate-500">{c.ipAddress ?? '—'}</span>
-              <span className="text-xs text-slate-600">{c.type === 'WIRED' ? 'Cabo' : 'Wi-Fi'}</span>
-              <Badge tone={c.blocked ? 'danger' : 'success'}>{c.blocked ? 'Bloqueado' : 'Ativo'}</Badge>
-              <div className="flex justify-end">
-                <button
-                  onClick={() => toggleBlock(c)}
-                  disabled={pendingMac === c.macAddress}
-                  className={`rounded-md border px-3 py-1.5 text-[11.5px] font-semibold disabled:opacity-50 ${
-                    c.blocked
-                      ? 'border-[oklch(85%_0.05_150)] bg-[oklch(97%_0.03_150_/_0.6)] text-[oklch(40%_0.13_150)]'
-                      : 'border-[oklch(87%_0.06_25)] bg-white text-[oklch(48%_0.16_25)]'
-                  }`}
-                >
-                  {pendingMac === c.macAddress ? '...' : c.blocked ? 'Desbloquear' : 'Bloquear'}
-                </button>
+            <div key={c.id} className="border-t border-slate-100">
+              <div className="grid grid-cols-[2fr_1.5fr_1.2fr_0.8fr_1.2fr_2.1fr] items-center px-5 py-3">
+                <span className="truncate text-[13px] font-semibold text-slate-800">{c.name ?? c.hostname ?? 'Sem nome'}</span>
+                <span className="font-mono text-xs text-slate-500">{c.macAddress}</span>
+                <span className="font-mono text-xs text-slate-500">{c.ipAddress ?? '—'}</span>
+                <span className="text-xs text-slate-600">{c.type === 'WIRED' ? 'Cabo' : 'Wi-Fi'}</span>
+                <Badge tone={c.blocked ? 'danger' : 'success'}>{c.blocked ? 'Bloqueado' : 'Ativo'}</Badge>
+                <div className="flex justify-end gap-2">
+                  <button
+                    onClick={() => startFixedIp(c)}
+                    disabled={pendingFixedIpMac === c.macAddress}
+                    className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-[11.5px] font-semibold text-slate-700 disabled:opacity-50"
+                  >
+                    IP fixo
+                  </button>
+                  <button
+                    onClick={() => toggleBlock(c)}
+                    disabled={pendingMac === c.macAddress}
+                    className={`rounded-md border px-3 py-1.5 text-[11.5px] font-semibold disabled:opacity-50 ${
+                      c.blocked
+                        ? 'border-[oklch(85%_0.05_150)] bg-[oklch(97%_0.03_150_/_0.6)] text-[oklch(40%_0.13_150)]'
+                        : 'border-[oklch(87%_0.06_25)] bg-white text-[oklch(48%_0.16_25)]'
+                    }`}
+                  >
+                    {pendingMac === c.macAddress ? '...' : c.blocked ? 'Desbloquear' : 'Bloquear'}
+                  </button>
+                </div>
               </div>
+
+              {fixedIpMac === c.macAddress && (
+                <div className="flex items-center gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">
+                  <span className="text-[12px] text-slate-500">
+                    Reserva de DHCP para este cliente (o controller sempre atribui este IP a ele):
+                  </span>
+                  <input
+                    autoFocus
+                    type="text"
+                    value={fixedIpDraft}
+                    onChange={(e) => setFixedIpDraft(e.target.value)}
+                    placeholder="172.16.0.50"
+                    className="w-36 rounded-md border border-slate-300 px-2 py-1 font-mono text-xs"
+                  />
+                  <button
+                    onClick={() => submitFixedIp(c)}
+                    disabled={pendingFixedIpMac === c.macAddress}
+                    className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-[11.5px] font-semibold text-slate-700 disabled:opacity-50"
+                  >
+                    Ativar IP fixo
+                  </button>
+                  <button
+                    onClick={() => removeFixedIp(c)}
+                    disabled={pendingFixedIpMac === c.macAddress}
+                    className="rounded-md border border-[oklch(87%_0.06_25)] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[oklch(48%_0.16_25)] disabled:opacity-50"
+                  >
+                    Remover IP fixo
+                  </button>
+                  <button
+                    onClick={() => setFixedIpMac(null)}
+                    className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11.5px] font-semibold text-slate-500"
+                  >
+                    Fechar
+                  </button>
+                </div>
+              )}
             </div>
           ))}
 

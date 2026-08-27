@@ -4,6 +4,7 @@ import { Clients } from './pages/Clients';
 import { Devices } from './pages/Devices';
 import { Events } from './pages/Events';
 import { Login } from './pages/Login';
+import { Networks } from './pages/Networks';
 import { Overview } from './pages/Overview';
 import { Security } from './pages/Security';
 
@@ -38,6 +39,14 @@ function AppRoutes() {
         element={
           <RequireAuth>
             <Devices />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/networks"
+        element={
+          <RequireAuth>
+            <Networks />
           </RequireAuth>
         }
       />

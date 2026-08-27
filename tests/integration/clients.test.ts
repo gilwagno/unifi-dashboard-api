@@ -13,6 +13,7 @@ vi.mock('../../src/services/unifi-classic.service.js', () => ({
     getBlockedMacs: vi.fn(async () => new Set<string>()),
     blockClient: vi.fn(async () => undefined),
     unblockClient: vi.fn(async () => undefined),
+    setClientFixedIp: vi.fn(async () => undefined),
   },
   UniFiClassicApiError: class UniFiClassicApiError extends Error {
     constructor(
@@ -232,6 +233,110 @@ describe('POST /clients/:mac/unblock', () => {
 
     expect(res.statusCode).toBe(200);
     expect(unifiClassicService.unblockClient).toHaveBeenCalledWith('aa:bb:cc:dd:ee:ff');
+
+    await app.close();
+  });
+});
+
+describe('PATCH /clients/:mac/fixed-ip', () => {
+  it('liga o IP fixo com o ip informado', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/fixed-ip',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { enabled: true, ip: '172.16.0.50' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(unifiClassicService.setClientFixedIp).toHaveBeenCalledWith('aa:bb:cc:dd:ee:ff', {
+      enabled: true,
+      ip: '172.16.0.50',
+      networkId: undefined,
+    });
+
+    await app.close();
+  });
+
+  it('desliga o IP fixo sem exigir ip', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/fixed-ip',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { enabled: false },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(unifiClassicService.setClientFixedIp).toHaveBeenCalledWith('aa:bb:cc:dd:ee:ff', {
+      enabled: false,
+      ip: undefined,
+      networkId: undefined,
+    });
+
+    await app.close();
+  });
+
+  it('rejeita enabled=true sem ip', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/fixed-ip',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { enabled: true },
+    });
+
+    expect(res.statusCode).toBe(400);
+
+    await app.close();
+  });
+
+  it('rejeita ip inválido', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/fixed-ip',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { enabled: true, ip: 'not-an-ip' },
+    });
+
+    expect(res.statusCode).toBe(400);
+
+    await app.close();
+  });
+
+  it('retorna 404 quando o MAC não é conhecido pelo controller', async () => {
+    const { app, token } = await authedApp();
+    vi.mocked(unifiClassicService.setClientFixedIp).mockRejectedValueOnce(
+      new UniFiClassicApiError(404, 'Cliente ff:ff:ff:ff:ff:ff não é conhecido pelo controller'),
+    );
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/ff:ff:ff:ff:ff:ff/fixed-ip',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { enabled: true, ip: '172.16.0.50' },
+    });
+
+    expect(res.statusCode).toBe(404);
+
+    await app.close();
+  });
+
+  it('retorna 401 sem token', async () => {
+    const app = await buildApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/fixed-ip',
+      payload: { enabled: false },
+    });
+
+    expect(res.statusCode).toBe(401);
 
     await app.close();
   });
