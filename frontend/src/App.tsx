@@ -5,6 +5,7 @@ import { Devices } from './pages/Devices';
 import { Events } from './pages/Events';
 import { Login } from './pages/Login';
 import { Overview } from './pages/Overview';
+import { Security } from './pages/Security';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuth();
@@ -45,6 +46,14 @@ function AppRoutes() {
         element={
           <RequireAuth>
             <Events />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/security"
+        element={
+          <RequireAuth>
+            <Security />
           </RequireAuth>
         }
       />

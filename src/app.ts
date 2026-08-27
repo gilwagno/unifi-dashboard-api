@@ -9,6 +9,7 @@ import authRoutes from './routes/auth.routes.js';
 import clientsRoutes from './routes/clients.routes.js';
 import devicesRoutes from './routes/devices.routes.js';
 import eventsRoutes from './routes/events.routes.js';
+import securityRoutes from './routes/security.routes.js';
 import sitesRoutes from './routes/sites.routes.js';
 import { UniFiApiError } from './services/unifi.service.js';
 import { ClassicApiNotConfiguredError, UniFiClassicApiError } from './services/unifi-classic.service.js';
@@ -67,6 +68,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(devicesRoutes);
   await app.register(sitesRoutes);
   await app.register(eventsRoutes);
+  await app.register(securityRoutes);
 
   app.get('/health', async () => ({ status: 'ok' }));
 

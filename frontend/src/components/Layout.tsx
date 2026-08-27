@@ -1,4 +1,4 @@
-import { LayoutGrid, LogOut, Radio, Users, Wifi } from 'lucide-react';
+import { LayoutGrid, LogOut, Radio, ShieldCheck, Users, Wifi } from 'lucide-react';
 import { type ReactNode, useEffect, useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { to: '/clients', label: 'Clientes', icon: Users },
   { to: '/devices', label: 'Dispositivos', icon: Wifi },
   { to: '/events', label: 'Eventos', icon: Radio },
+  { to: '/security', label: 'Segurança', icon: ShieldCheck },
 ];
 
 export function Layout({ title, children }: { title: string; children: ReactNode }) {

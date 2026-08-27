@@ -49,6 +49,9 @@ Vite + Tailwind) que consome essa API.
 | POST   | /devices/:id/ports/:portIdx/power-cycle?siteId=... | Power-cycle de uma porta PoE (reboot do que estiver ligado nela) |
 | WS     | /ws/events?token=...            | Stream de eventos em tempo real   |
 | GET    | /events/history?limit=...      | Últimos eventos recebidos (buffer em memória) |
+| GET    | /security/summary               | Resumo de segurança: ameaças detectadas, status do IPS, firmware desatualizado (API clássica) |
+| GET    | /security/events                | Eventos/alarmes críticos do controller (API clássica) |
+| GET    | /security/admins                | Admins do controller e seus papéis/permissões por site (API clássica) |
 
 ### Renovando o token
 
@@ -185,6 +188,63 @@ para apontar para um site específico. Sem o parâmetro, as rotas caem no
 não aceitam `?siteId=` — eles usam a API clássica, que aponta sempre para
 `UNIFI_CONTROLLER_SITE` (ver seção **Bloquear/desbloquear clientes**).
 
+### Segurança e auditoria
+
+Três rotas, todas via a mesma API clássica/privada usada em
+**Bloquear/desbloquear clientes** (reaproveita a sessão por cookie+CSRF já
+existente — nenhuma sessão nova é criada). Testadas manualmente contra um
+controller real (UDM, UniFi OS 10.5.67, Network app):
+
+```
+GET /security/summary
+```
+Resumo do Threat Management/IPS e de firmware desatualizado, lido de
+`GET /proxy/network/v2/api/site/{site}/aggregated-dashboard?historySeconds=86400`
+(janela fixa de 24h, não configurável por enquanto):
+```json
+{
+  "threatsDetected": 0,
+  "ipsEnabled": true,
+  "signaturesActive": 32876,
+  "upgradableDeviceCount": 0
+}
+```
+
+```
+GET /security/events
+```
+Feed de eventos/alarmes críticos, lido de
+`POST /proxy/network/v2/api/site/{site}/system-log/critical` (corpo `{}`).
+Retorna `{ "data": [...] }` com o array **cru** do controller — o formato
+de cada item **não é conhecido**: no ambiente de teste o array veio sempre
+vazio (sem eventos críticos no momento), então não foi possível observar o
+schema completo de um item real. Por isso o backend tipa isso como
+`Record<string, unknown>[]` (sem assumir nenhum campo específico) e o
+frontend renderiza de forma defensiva (tenta `msg`/`message`/`key`/`type`
+e cai para um JSON resumido), no mesmo espírito de `Events.tsx` para o
+histórico de eventos do WebSocket.
+
+```
+GET /security/admins
+```
+Lista de admins do controller com seus papéis/permissões, lida de
+`GET /proxy/network/api/stat/admin`. Existe uma alternativa,
+`GET /proxy/users/api/v2/users/admin/uos` (prefixo `/proxy/users/`, API de
+usuários a nível de sistema do UniFi OS), mas escolhemos `stat/admin`
+porque ele reaproveita exatamente o mesmo padrão de sessão/base URL já
+usado no resto de `unifi-classic.service.ts` — menos código novo, mesmo
+prefixo `/proxy/network/`.
+
+Assim como block/unblock, as três rotas retornam `503` se
+`UNIFI_CONTROLLER_USER`/`UNIFI_CONTROLLER_PASSWORD` não estiverem
+configurados no `.env`.
+
+**Não implementado — log de login de administrador**: não foi encontrado
+nenhum endpoint confiável para consultar o histórico de login de
+administradores no controller (pesquisa extensiva, incluindo testes
+diretos contra um controller real). Não está disponível nesta versão do
+controller.
+
 ## Conectando no WebSocket de eventos
 
 O token JWT **não** vai mais na query string (evita expor em access logs de
@@ -207,8 +267,9 @@ npm run test:watch
 ```
 
 Cobertura inclui validação de MAC/paginação, health check, guarda de auth,
-login/refresh, e as rotas de `/clients`, `/devices`, `/sites` e
-`/events/history` com `unifiService`/`unifiEventsHub` mockados. O handshake
+login/refresh, e as rotas de `/clients`, `/devices`, `/sites`,
+`/events/history` e `/security/*` com
+`unifiService`/`unifiEventsHub`/`unifiClassicService` mockados. O handshake
 de `/ws/events` também tem teste (token válido, token inválido, mensagem
 sem token, canal somente-leitura após autenticar), usando um socket TCP
 real (`app.listen()` + cliente `ws`) em vez do helper `app.injectWS()` do

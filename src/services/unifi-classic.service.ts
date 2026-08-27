@@ -183,6 +183,84 @@ async function setBlockedState(
   });
 }
 
+// --- Segurança e auditoria (Prioridade 2) ---
+//
+// Três endpoints adicionais da mesma API clássica, confirmados manualmente
+// contra um controller real (UDM, UniFi OS 10.5.67, Network app):
+//
+// 1. /v2/api/site/{site}/aggregated-dashboard — traz, entre outras coisas,
+//    o resumo do Threat Management/IPS (`cybersecure`) e a contagem de
+//    dispositivos com firmware desatualizado (`upgradable_device_count`).
+// 2. /v2/api/site/{site}/system-log/critical (POST, corpo vazio) — feed de
+//    eventos/alarmes críticos. O formato de cada item não foi confirmado
+//    (o ambiente de teste não tinha nenhum evento crítico no momento) —
+//    repassamos o array cru, sem assumir nenhum campo específico.
+// 3. /api/stat/admin — lista de admins com `roles` (permissões por site).
+//    Existe também /proxy/users/api/v2/users/admin/uos (API de usuários a
+//    nível de sistema UniFi OS, prefixo diferente), mas escolhemos
+//    stat/admin porque reaproveita exatamente o mesmo padrão de sessão e
+//    base URL já usado no resto deste arquivo, sem prefixo novo.
+//
+// Não implementado: log de login de administrador no controller — não foi
+// encontrado nenhum endpoint confiável para isso (pesquisa extensiva feita
+// pelo orquestrador, incluindo testes contra o controller real). Pode ser
+// que esta versão do controller simplesmente não emita esse tipo de
+// evento.
+
+interface AggregatedDashboardResponse {
+  cybersecure?: {
+    ips_enabled?: boolean;
+    threats?: number;
+    signatures?: number;
+    [key: string]: unknown;
+  };
+  upgradable_device_count?: {
+    device_count?: number;
+  };
+  [key: string]: unknown;
+}
+
+export interface SecuritySummary {
+  threatsDetected: number;
+  ipsEnabled: boolean;
+  signaturesActive: number;
+  upgradableDeviceCount: number;
+}
+
+export interface ClassicAdmin {
+  name?: string;
+  email?: string;
+  roles?: Array<{ site_name?: string; role?: string; permissions?: unknown; [key: string]: unknown }>;
+  [key: string]: unknown;
+}
+
+async function fetchSecuritySummary(site: string): Promise<SecuritySummary> {
+  const res = await classicFetch<AggregatedDashboardResponse>(
+    `/proxy/network/v2/api/site/${site}/aggregated-dashboard?historySeconds=86400`,
+  );
+  return {
+    threatsDetected: res.cybersecure?.threats ?? 0,
+    ipsEnabled: res.cybersecure?.ips_enabled ?? false,
+    signaturesActive: res.cybersecure?.signatures ?? 0,
+    upgradableDeviceCount: res.upgradable_device_count?.device_count ?? 0,
+  };
+}
+
+async function fetchCriticalEvents(site: string): Promise<Record<string, unknown>[]> {
+  // Formato de retorno não confirmado além de "é um array" — tratado como
+  // unknown[] de propósito, sem assumir campos específicos.
+  const res = await classicFetch<unknown>(`/proxy/network/v2/api/site/${site}/system-log/critical`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  return Array.isArray(res) ? (res as Record<string, unknown>[]) : [];
+}
+
+async function fetchAdmins(): Promise<ClassicAdmin[]> {
+  const { data } = await classicFetch<ClassicResponse<ClassicAdmin[]>>('/proxy/network/api/stat/admin');
+  return data;
+}
+
 export const unifiClassicService = {
   isConfigured: isClassicApiConfigured,
 
@@ -198,6 +276,12 @@ export const unifiClassicService = {
     }
     return blocked;
   },
+
+  getSecuritySummary: (site = env.UNIFI_CONTROLLER_SITE) => fetchSecuritySummary(site),
+
+  getCriticalEvents: (site = env.UNIFI_CONTROLLER_SITE) => fetchCriticalEvents(site),
+
+  getAdmins: () => fetchAdmins(),
 };
 
 export { UniFiClassicApiError, ClassicApiNotConfiguredError, UnknownClientError };

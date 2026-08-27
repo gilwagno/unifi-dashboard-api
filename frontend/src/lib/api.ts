@@ -62,6 +62,32 @@ export interface UniFiEventRecord {
   data: string;
 }
 
+export interface SecuritySummary {
+  threatsDetected: number;
+  ipsEnabled: boolean;
+  signaturesActive: number;
+  upgradableDeviceCount: number;
+}
+
+// Formato de cada item não é confirmado (o ambiente de teste não tinha
+// nenhum evento crítico no momento) — tratado como registro genérico,
+// renderizado de forma dinâmica no frontend, sem assumir campos fixos.
+export type CriticalEvent = Record<string, unknown>;
+
+export interface AdminRole {
+  site_name?: string;
+  role?: string;
+  permissions?: unknown;
+  [key: string]: unknown;
+}
+
+export interface Admin {
+  name?: string;
+  email?: string;
+  roles?: AdminRole[];
+  [key: string]: unknown;
+}
+
 export interface Pagination {
   page: number;
   pageSize: number;
@@ -180,4 +206,8 @@ export const api = {
     request<{ ok: true }>(`/devices/${id}/ports/${portIdx}/power-cycle`, { method: 'POST' }),
 
   eventsHistory: (limit = 50) => request<{ data: UniFiEventRecord[] }>(`/events/history?limit=${limit}`),
+
+  getSecuritySummary: () => request<SecuritySummary>('/security/summary'),
+  getSecurityEvents: () => request<{ data: CriticalEvent[] }>('/security/events'),
+  getAdmins: () => request<{ data: Admin[] }>('/security/admins'),
 };
