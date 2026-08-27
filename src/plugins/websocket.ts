@@ -14,22 +14,22 @@ import { unifiEventsHub } from '../services/unifi-events.hub.js';
 export default fp(async function websocketPlugin(app: FastifyInstance) {
   await app.register(websocket);
 
-  app.get('/ws/events', { websocket: true }, (connection) => {
+  app.get('/ws/events', { websocket: true }, (socket) => {
     let authenticated = false;
     let unsubscribe: (() => void) | null = null;
 
     const authTimeout = setTimeout(() => {
-      if (!authenticated) connection.socket.close(1008, 'Timeout de autenticação');
+      if (!authenticated) socket.close(1008, 'Timeout de autenticação');
     }, 5000);
 
-    connection.socket.on('message', (raw) => {
+    socket.on('message', (raw: Buffer) => {
       if (authenticated) return; // canal é somente leitura pro cliente após autenticar
 
       try {
         const token = JSON.parse(raw.toString())?.token;
         app.jwt.verify(token ?? '');
       } catch {
-        connection.socket.close(1008, 'Não autenticado');
+        socket.close(1008, 'Não autenticado');
         return;
       }
 
@@ -37,13 +37,13 @@ export default fp(async function websocketPlugin(app: FastifyInstance) {
       clearTimeout(authTimeout);
 
       unsubscribe = unifiEventsHub.subscribe((data) => {
-        if (connection.socket.readyState === connection.socket.OPEN) {
-          connection.socket.send(data);
+        if (socket.readyState === socket.OPEN) {
+          socket.send(data);
         }
       });
     });
 
-    connection.socket.on('close', () => {
+    socket.on('close', () => {
       clearTimeout(authTimeout);
       unsubscribe?.();
     });

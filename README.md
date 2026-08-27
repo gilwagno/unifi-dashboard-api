@@ -26,9 +26,9 @@ local de Integração do controller.
 |--------|--------------------------------|-----------------------------------|
 | POST   | /auth/login                    | Retorna um JWT                    |
 | GET    | /sites                         | Lista os sites do controller      |
-| GET    | /clients                       | Lista clientes conectados         |
-| POST   | /clients/:mac/block             | Bloqueia um cliente               |
-| POST   | /clients/:mac/unblock           | Desbloqueia um cliente            |
+| GET    | /clients?siteId=...            | Lista clientes conectados         |
+| POST   | /clients/:mac/block?siteId=...  | Bloqueia um cliente               |
+| POST   | /clients/:mac/unblock?siteId=... | Desbloqueia um cliente            |
 | GET    | /devices?siteId=...            | Lista APs/switches de um site     |
 | POST   | /devices/:id/restart?siteId=... | Reinicia um dispositivo           |
 | WS     | /ws/events?token=...            | Stream de eventos em tempo real   |
@@ -37,10 +37,10 @@ local de Integração do controller.
 
 Se o seu controller gerencia mais de um site (ex: várias filiais, cada uma
 com seus próprios APs), use `GET /sites` para descobrir os IDs disponíveis
-e passe `?siteId=<id>` em `/devices` e `/devices/:id/restart` para apontar
+e passe `?siteId=<id>` em `/clients`, `/clients/:mac/block`,
+`/clients/:mac/unblock`, `/devices` e `/devices/:id/restart` para apontar
 para um site específico. Sem o parâmetro, as rotas caem no `SITE_ID`
-configurado no `.env`. `/clients` ainda opera só sobre o `SITE_ID` padrão —
-vale estender o mesmo padrão para lá se isso virar necessidade real.
+configurado no `.env`.
 
 ## Conectando no WebSocket de eventos
 
