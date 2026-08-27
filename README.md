@@ -33,6 +33,7 @@ local de Integração do controller.
 | GET    | /devices?siteId=...            | Lista APs/switches de um site     |
 | POST   | /devices/:id/restart?siteId=... | Reinicia um dispositivo           |
 | WS     | /ws/events?token=...            | Stream de eventos em tempo real   |
+| GET    | /events/history?limit=...      | Últimos eventos recebidos (buffer em memória) |
 
 ### Renovando o token
 
@@ -49,6 +50,17 @@ Retorna `{ "token": "<novo access token>" }`. O refresh token em si não é
 rotacionado — continua válido até expirar ou até você trocar `JWT_SECRET`.
 Não há como revogar um token individualmente (sem estado de sessão no
 servidor); se precisar invalidar tokens emitidos, troque `JWT_SECRET`.
+
+### Histórico de eventos
+
+`GET /events/history?limit=N` devolve os últimos eventos recebidos do
+controller (`data: [{ receivedAt, data }]`, `data` é o payload cru do
+evento). **Isso não é um histórico persistente**: é um buffer em memória de
+até 200 eventos, que zera a cada restart do processo e só é alimentado
+enquanto a conexão WebSocket com o controller está ativa — que por sua vez
+só existe enquanto pelo menos um cliente está (ou esteve nos últimos 10s)
+conectado em `/ws/events`. Se ninguém abriu o dashboard, não há histórico
+pra consultar depois. `limit` é opcional e é limitado a 200.
 
 ### Múltiplos sites
 

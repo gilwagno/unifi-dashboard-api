@@ -78,3 +78,19 @@ describe('POST /clients/:mac/unblock', () => {
     await app.close();
   });
 });
+
+describe('POST /clients/:mac/block validação', () => {
+  it('mac inválido retorna 400 pelo error handler central', async () => {
+    const { app, token } = await authedApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/clients/not-a-mac/block',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('Dados inválidos');
+
+    await app.close();
+  });
+});

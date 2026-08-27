@@ -2,6 +2,13 @@ import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
 import { env } from '../config/env.js';
 
+const HISTORY_LIMIT = 200;
+
+export interface UniFiEventRecord {
+  receivedAt: string;
+  data: string;
+}
+
 // Mantém UMA conexão WebSocket com o controller, não importa quantas abas
 // do dashboard estejam abertas. Conecta quando o primeiro assinante chega,
 // desconecta (com um pequeno atraso, pra não ficar reconectando à toa em
@@ -11,6 +18,11 @@ class UniFiEventsHub extends EventEmitter {
   private subscribers = 0;
   private reconnectDelay = 1000;
   private disconnectTimer: NodeJS.Timeout | null = null;
+  // Buffer em memória, não persiste entre restarts, e só é alimentado
+  // enquanto a conexão upstream está ativa (ou seja, enquanto pelo menos um
+  // cliente WS está/esteve conectado nos últimos 10s) — não é um histórico
+  // completo desde sempre, é "o que passou enquanto alguém estava olhando".
+  private history: UniFiEventRecord[] = [];
 
   subscribe(listener: (data: string) => void): () => void {
     this.subscribers++;
@@ -31,6 +43,11 @@ class UniFiEventsHub extends EventEmitter {
     };
   }
 
+  getHistory(limit = HISTORY_LIMIT): UniFiEventRecord[] {
+    const capped = Math.min(limit, HISTORY_LIMIT);
+    return this.history.slice(-capped);
+  }
+
   private connectUpstream() {
     const url = `wss://${env.CONTROLLER_HOST}/proxy/network/wss/s/${env.SITE_ID}/events`;
     this.upstream = new WebSocket(url, {
@@ -42,7 +59,12 @@ class UniFiEventsHub extends EventEmitter {
       this.reconnectDelay = 1000;
     });
 
-    this.upstream.on('message', (data) => this.emit('event', data.toString()));
+    this.upstream.on('message', (data) => {
+      const record: UniFiEventRecord = { receivedAt: new Date().toISOString(), data: data.toString() };
+      this.history.push(record);
+      if (this.history.length > HISTORY_LIMIT) this.history.shift();
+      this.emit('event', record.data);
+    });
 
     this.upstream.on('close', () => {
       this.upstream = null;
