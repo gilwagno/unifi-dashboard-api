@@ -12,6 +12,19 @@ const envSchema = z.object({
     .string()
     .default('true')
     .transform((v) => v === 'true'),
+
+  // Credenciais do PAINEL do controller (não confundir com
+  // ADMIN_USER/ADMIN_PASSWORD_HASH, que são o login deste dashboard).
+  // Opcionais: sem elas, a API clássica (usada só para bloquear/desbloquear
+  // clientes de verdade) fica indisponível, mas o resto do app funciona
+  // normalmente — ver ClassicApiNotConfiguredError em
+  // src/services/unifi-classic.service.ts.
+  UNIFI_CONTROLLER_USER: z.string().min(1).optional(),
+  UNIFI_CONTROLLER_PASSWORD: z.string().min(1).optional(),
+  // internalReference do site pra API clássica (ex: "default") — DIFERENTE
+  // do SITE_ID (UUID) usado pela Integration API.
+  UNIFI_CONTROLLER_SITE: z.string().min(1).default('default'),
+
   JWT_SECRET: z.string().min(16, 'JWT_SECRET deve ter pelo menos 16 caracteres'),
   ADMIN_USER: z.string().min(1),
   ADMIN_PASSWORD_HASH: z.string().min(1, 'Gere com bcryptjs.hashSync'),

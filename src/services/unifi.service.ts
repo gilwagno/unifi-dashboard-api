@@ -58,18 +58,6 @@ export const unifiService = {
   listClients: (siteId = env.SITE_ID) =>
     unifiFetch<{ data: UniFiClient[] }>(`/sites/${siteId}/clients`),
 
-  blockClient: (mac: string, siteId = env.SITE_ID) =>
-    unifiFetch<void>(`/sites/${siteId}/clients/${mac}/actions`, {
-      method: 'POST',
-      body: JSON.stringify({ action: 'BLOCK' }),
-    }),
-
-  unblockClient: (mac: string, siteId = env.SITE_ID) =>
-    unifiFetch<void>(`/sites/${siteId}/clients/${mac}/actions`, {
-      method: 'POST',
-      body: JSON.stringify({ action: 'UNBLOCK' }),
-    }),
-
   listDevices: (siteId = env.SITE_ID) =>
     unifiFetch<{ data: UniFiDevice[] }>(`/sites/${siteId}/devices`),
 

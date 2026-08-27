@@ -28,6 +28,10 @@ Vite + Tailwind) que consome essa API.
    quer usar e coloque em `SITE_ID` no `.env`. **Não** use o valor de
    `internalReference` (ex: `"default"`) — a API rejeita isso como siteId.
    Reinicie o servidor depois de mudar o `.env` (não é hot-reload).
+6. (Opcional, para bloquear/desbloquear clientes) preencha
+   `UNIFI_CONTROLLER_USER`/`UNIFI_CONTROLLER_PASSWORD` com as credenciais
+   do painel do controller — veja a seção **Bloquear/desbloquear
+   clientes** abaixo.
 
 ## Endpoints
 
@@ -37,8 +41,8 @@ Vite + Tailwind) que consome essa API.
 | POST   | /auth/refresh                  | Troca um refresh token por um novo access token |
 | GET    | /sites                         | Lista os sites do controller      |
 | GET    | /clients?siteId=&blocked=&type=&page=&pageSize= | Lista clientes conectados (filtros + paginação) |
-| POST   | /clients/:mac/block?siteId=...  | Bloqueia um cliente               |
-| POST   | /clients/:mac/unblock?siteId=... | Desbloqueia um cliente            |
+| POST   | /clients/:mac/block             | Bloqueia um cliente (API clássica — ver seção abaixo) |
+| POST   | /clients/:mac/unblock           | Desbloqueia um cliente (API clássica — ver seção abaixo) |
 | GET    | /devices?siteId=&page=&pageSize= | Lista APs/switches de um site (paginado) |
 | GET    | /devices/:id?siteId=...         | Detalhe de um dispositivo (inclui portas, se houver) |
 | POST   | /devices/:id/restart?siteId=... | Reinicia um dispositivo           |
@@ -89,6 +93,55 @@ Os limites de requisição são configuráveis via `.env` (veja
 | `RATE_LIMIT_CLIENT_ACTION_MAX`   | `10`       | `POST /clients/:mac/block` e `/unblock`       |
 | `RATE_LIMIT_DEVICE_RESTART_MAX`  | `5`        | `POST /devices/:id/restart` e `POST /devices/:id/ports/:portIdx/power-cycle` |
 
+### Bloquear/desbloquear clientes
+
+`POST /clients/:mac/block` e `POST /clients/:mac/unblock` bloqueiam/liberam
+o acesso de um cliente à rede (o cliente fica sem conectividade até ser
+desbloqueado). Isso **não** é feito pela Integration API oficial — testado
+contra um controller real e contra a doc OpenAPI da Integration API,
+confirmamos que ela só suporta autorizar/desautorizar acesso de **guest**
+(`AUTHORIZE_GUEST_ACCESS`/`UNAUTHORIZE_GUEST_ACCESS`), não bloquear um
+cliente comum, e também não expõe de forma confiável se um cliente está
+bloqueado.
+
+Por isso essas duas rotas (e o campo `blocked` de `GET /clients`) usam a
+API **clássica/privada** do controller — a mesma que o app UniFi Network
+usa internamente (login por cookie de sessão em `/api/auth/login` +
+comando `block-sta`/`unblock-sta` em `/proxy/network/api/s/{site}/cmd/stamgr`,
+e leitura de `blocked` em `/proxy/network/api/s/{site}/rest/user`). Isso
+**foi testado contra um controller real** (bloqueio/desbloqueio
+confirmados funcionando).
+
+Configuração (veja `.env.example`):
+
+| Variável                    | Obrigatória? | Descrição |
+|------------------------------|--------------|-----------|
+| `UNIFI_CONTROLLER_USER`      | Não          | Usuário do painel do controller (login da UI do UniFi Network) |
+| `UNIFI_CONTROLLER_PASSWORD`  | Não          | Senha do painel do controller |
+| `UNIFI_CONTROLLER_SITE`      | Não (default `default`) | `internalReference` do site — **diferente** do `SITE_ID` (UUID) usado pela Integration API |
+
+**Não confunda** `UNIFI_CONTROLLER_USER`/`PASSWORD` com
+`ADMIN_USER`/`ADMIN_PASSWORD_HASH` — estes últimos são o login deste
+dashboard, não têm relação com o controller.
+
+O comando clássico `block-sta`/`unblock-sta` não valida o MAC — se você
+mandar bloquear um MAC que o controller nunca viu na rede, ele cria um
+registro "fantasma" de cliente novo (já bloqueado) em vez de recusar (isso
+foi observado contra um controller real). Por isso, antes de bloquear ou
+desbloquear, o backend confere se o MAC já é um cliente conhecido (via
+`/rest/user`) e retorna `404` se não for, sem chegar a mandar o comando.
+
+Sem `UNIFI_CONTROLLER_USER`/`UNIFI_CONTROLLER_PASSWORD` configurados:
+- `POST /clients/:mac/block` e `/unblock` retornam `503` com uma mensagem
+  explicando o que falta configurar.
+- `GET /clients` continua funcionando normalmente, mas o campo `blocked`
+  de cada cliente fica sempre `false` (limitação: sem a API clássica não
+  há como saber o status real de bloqueio).
+
+**Atenção**: ao contrário da Integration API oficial, esta é uma API
+**não-documentada/privada** do UniFi — pode mudar de formato ou
+comportamento sem aviso em atualizações de firmware do controller.
+
 ### Power-cycle de porta (switches PoE)
 
 A UniFi Network Integration API **não suporta** habilitar/desabilitar porta
@@ -126,10 +179,11 @@ pra consultar depois. `limit` é opcional e é limitado a 200.
 
 Se o seu controller gerencia mais de um site (ex: várias filiais, cada uma
 com seus próprios APs), use `GET /sites` para descobrir os IDs disponíveis
-e passe `?siteId=<id>` em `/clients`, `/clients/:mac/block`,
-`/clients/:mac/unblock`, `/devices` e `/devices/:id/restart` para apontar
-para um site específico. Sem o parâmetro, as rotas caem no `SITE_ID`
-configurado no `.env`.
+e passe `?siteId=<id>` em `/clients`, `/devices` e `/devices/:id/restart`
+para apontar para um site específico. Sem o parâmetro, as rotas caem no
+`SITE_ID` configurado no `.env`. `POST /clients/:mac/block` e `/unblock`
+não aceitam `?siteId=` — eles usam a API clássica, que aponta sempre para
+`UNIFI_CONTROLLER_SITE` (ver seção **Bloquear/desbloquear clientes**).
 
 ## Conectando no WebSocket de eventos
 

@@ -11,6 +11,7 @@ import devicesRoutes from './routes/devices.routes.js';
 import eventsRoutes from './routes/events.routes.js';
 import sitesRoutes from './routes/sites.routes.js';
 import { UniFiApiError } from './services/unifi.service.js';
+import { ClassicApiNotConfiguredError, UniFiClassicApiError } from './services/unifi-classic.service.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
@@ -25,10 +26,19 @@ export async function buildApp(): Promise<FastifyInstance> {
   // error handler vigente no momento do registro. Se setErrorHandler viesse
   // depois, as rotas ficariam presas ao handler default do Fastify (erro de
   // validação do Zod virando 500 genérico em vez dos 400 esperados).
-  app.setErrorHandler((error: FastifyError | UniFiApiError, _request, reply) => {
+  app.setErrorHandler((error: FastifyError | UniFiApiError | UniFiClassicApiError, _request, reply) => {
     if (error instanceof UniFiApiError) {
       const status = error.status >= 400 && error.status < 600 ? error.status : 502;
       return reply.code(status).send({ error: 'Erro na API do UniFi', details: error.message });
+    }
+
+    if (error instanceof ClassicApiNotConfiguredError) {
+      return reply.code(503).send({ error: 'Funcionalidade indisponível', details: error.message });
+    }
+
+    if (error instanceof UniFiClassicApiError) {
+      const status = error.status >= 400 && error.status < 600 ? error.status : 502;
+      return reply.code(status).send({ error: 'Erro na API clássica do UniFi', details: error.message });
     }
 
     if (error instanceof ZodError) {

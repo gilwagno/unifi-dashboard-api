@@ -3,10 +3,19 @@ import { describe, expect, it, vi } from 'vitest';
 process.env.RATE_LIMIT_CLIENT_ACTION_MAX = '1';
 
 vi.mock('../../src/services/unifi.service.js', () => ({
-  unifiService: {
-    blockClient: vi.fn(async () => undefined),
-  },
+  unifiService: {},
   UniFiApiError: class UniFiApiError extends Error {},
+}));
+
+vi.mock('../../src/services/unifi-classic.service.js', () => ({
+  unifiClassicService: {
+    isConfigured: vi.fn(() => true),
+    getBlockedMacs: vi.fn(async () => new Set<string>()),
+    blockClient: vi.fn(async () => undefined),
+    unblockClient: vi.fn(async () => undefined),
+  },
+  UniFiClassicApiError: class UniFiClassicApiError extends Error {},
+  ClassicApiNotConfiguredError: class ClassicApiNotConfiguredError extends Error {},
 }));
 
 const { buildApp } = await import('../../src/app.js');

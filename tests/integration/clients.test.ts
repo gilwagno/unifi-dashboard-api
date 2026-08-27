@@ -1,16 +1,42 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../src/services/unifi.service.js', () => ({
   unifiService: {
     listClients: vi.fn(async () => ({ data: [] })),
-    blockClient: vi.fn(async () => undefined),
-    unblockClient: vi.fn(async () => undefined),
   },
   UniFiApiError: class UniFiApiError extends Error {},
 }));
 
+vi.mock('../../src/services/unifi-classic.service.js', () => ({
+  unifiClassicService: {
+    isConfigured: vi.fn(() => false),
+    getBlockedMacs: vi.fn(async () => new Set<string>()),
+    blockClient: vi.fn(async () => undefined),
+    unblockClient: vi.fn(async () => undefined),
+  },
+  UniFiClassicApiError: class UniFiClassicApiError extends Error {
+    constructor(
+      public status: number,
+      message: string,
+    ) {
+      super(message);
+    }
+  },
+  ClassicApiNotConfiguredError: class ClassicApiNotConfiguredError extends Error {},
+}));
+
 const { buildApp } = await import('../../src/app.js');
 const { unifiService } = await import('../../src/services/unifi.service.js');
+const { unifiClassicService, ClassicApiNotConfiguredError, UniFiClassicApiError } = await import(
+  '../../src/services/unifi-classic.service.js'
+);
+
+beforeEach(() => {
+  vi.mocked(unifiClassicService.isConfigured).mockClear();
+  vi.mocked(unifiClassicService.getBlockedMacs).mockClear();
+  vi.mocked(unifiClassicService.blockClient).mockClear();
+  vi.mocked(unifiClassicService.unblockClient).mockClear();
+});
 
 async function authedApp() {
   const app = await buildApp();
@@ -107,37 +133,105 @@ describe('GET /clients', () => {
 
     await app.close();
   });
-});
 
-describe('POST /clients/:mac/block', () => {
-  it('repassa siteId da query string para o serviço', async () => {
+  it('cruza o status de bloqueio com a API clássica quando configurada', async () => {
     const { app, token } = await authedApp();
+    vi.mocked(unifiClassicService.isConfigured).mockReturnValueOnce(true);
+    vi.mocked(unifiClassicService.getBlockedMacs).mockResolvedValueOnce(new Set(['bb:bb:bb:bb:bb:bb']));
+    vi.mocked(unifiService.listClients).mockResolvedValueOnce({
+      data: [
+        { id: '1', macAddress: 'aa:aa:aa:aa:aa:aa', type: 'WIRED', blocked: false },
+        { id: '2', macAddress: 'bb:bb:bb:bb:bb:bb', type: 'WIRELESS', blocked: false },
+      ],
+    });
 
     const res = await app.inject({
-      method: 'POST',
-      url: '/clients/aa:bb:cc:dd:ee:ff/block?siteId=site-2',
+      method: 'GET',
+      url: '/clients',
       headers: { authorization: `Bearer ${token}` },
     });
 
     expect(res.statusCode).toBe(200);
-    expect(unifiService.blockClient).toHaveBeenCalledWith('aa:bb:cc:dd:ee:ff', 'site-2');
+    const clients = res.json().data;
+    expect(clients.find((c: { id: string }) => c.id === '1').blocked).toBe(false);
+    expect(clients.find((c: { id: string }) => c.id === '2').blocked).toBe(true);
+
+    await app.close();
+  });
+
+  it('não chama a API clássica quando ela não está configurada', async () => {
+    const { app, token } = await authedApp();
+    vi.mocked(unifiClassicService.isConfigured).mockReturnValueOnce(false);
+
+    await app.inject({ method: 'GET', url: '/clients', headers: { authorization: `Bearer ${token}` } });
+
+    expect(unifiClassicService.getBlockedMacs).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+});
+
+describe('POST /clients/:mac/block', () => {
+  it('chama unifiClassicService.blockClient com o mac', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/clients/aa:bb:cc:dd:ee:ff/block',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(unifiClassicService.blockClient).toHaveBeenCalledWith('aa:bb:cc:dd:ee:ff');
+
+    await app.close();
+  });
+
+  it('retorna 503 quando a API clássica não está configurada', async () => {
+    const { app, token } = await authedApp();
+    vi.mocked(unifiClassicService.blockClient).mockRejectedValueOnce(new ClassicApiNotConfiguredError());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/clients/aa:bb:cc:dd:ee:ff/block',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(503);
+
+    await app.close();
+  });
+
+  it('retorna 404 quando o MAC nunca foi visto pelo controller (evita registro fantasma)', async () => {
+    const { app, token } = await authedApp();
+    vi.mocked(unifiClassicService.blockClient).mockRejectedValueOnce(
+      new UniFiClassicApiError(404, 'Cliente ff:ff:ff:ff:ff:ff não é conhecido pelo controller'),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/clients/ff:ff:ff:ff:ff:ff/block',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(404);
 
     await app.close();
   });
 });
 
 describe('POST /clients/:mac/unblock', () => {
-  it('repassa siteId da query string para o serviço', async () => {
+  it('chama unifiClassicService.unblockClient com o mac', async () => {
     const { app, token } = await authedApp();
 
     const res = await app.inject({
       method: 'POST',
-      url: '/clients/aa:bb:cc:dd:ee:ff/unblock?siteId=site-2',
+      url: '/clients/aa:bb:cc:dd:ee:ff/unblock',
       headers: { authorization: `Bearer ${token}` },
     });
 
     expect(res.statusCode).toBe(200);
-    expect(unifiService.unblockClient).toHaveBeenCalledWith('aa:bb:cc:dd:ee:ff', 'site-2');
+    expect(unifiClassicService.unblockClient).toHaveBeenCalledWith('aa:bb:cc:dd:ee:ff');
 
     await app.close();
   });
