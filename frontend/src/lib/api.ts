@@ -119,6 +119,62 @@ export interface Admin {
   [key: string]: unknown;
 }
 
+export interface DeviceRadioHealth {
+  name: string;
+  channel?: number;
+  channelUtilizationPct?: number;
+  satisfactionScore?: number;
+  clientCount?: number;
+}
+
+export interface DeviceHealth {
+  mac: string;
+  name: string;
+  cpu: number;
+  mem: number;
+  uptimeSeconds: number;
+  clientCount: number;
+  radios: DeviceRadioHealth[];
+}
+
+export interface ClientSignal {
+  mac: string;
+  hostname: string;
+  signalDbm?: number;
+  rssi?: number;
+  satisfactionScore?: number;
+  channel?: number;
+}
+
+export interface WanHealthPoint {
+  timestamp?: number;
+  wan_downtime?: boolean;
+  high_latency?: boolean;
+  packet_loss?: boolean;
+  failover_wan_active?: boolean;
+  wan2_failover_active?: boolean;
+  [key: string]: unknown;
+}
+
+export interface WanHistoryDetail {
+  downtime_history?: unknown[];
+  health_history?: WanHealthPoint[];
+  [key: string]: unknown;
+}
+
+export interface BandwidthSnapshot {
+  timestamp: string;
+  perDevice: Array<{ mac: string; name: string; rxBytes: number; txBytes: number }>;
+  perClient: Array<{ mac: string; hostname: string; rxBytes: number; txBytes: number }>;
+}
+
+export interface BandwidthDelta {
+  intervalStart: string;
+  intervalEnd: string;
+  perDevice: Array<{ mac: string; name: string; rxBytes: number | null; txBytes: number | null }>;
+  perClient: Array<{ mac: string; hostname: string; rxBytes: number | null; txBytes: number | null }>;
+}
+
 export interface Pagination {
   page: number;
   pageSize: number;
@@ -269,4 +325,13 @@ export const api = {
   // --- IP fixo por cliente ---
   setClientFixedIp: (mac: string, opts: { enabled: boolean; ip?: string; networkId?: string }) =>
     request<{ ok: true }>(`/clients/${mac}/fixed-ip`, { method: 'PATCH', body: JSON.stringify(opts) }),
+
+  // --- Saúde operacional ---
+  getDeviceHealth: () => request<{ data: DeviceHealth[] }>('/health/devices'),
+  getClientSignalStrength: () => request<{ data: ClientSignal[] }>('/health/clients-signal'),
+  getWanUptimeHistory: () => request<{ data: WanHistoryDetail[] }>('/health/wan-uptime'),
+
+  // --- Histórico de uso de banda ---
+  getBandwidthHistory: () => request<{ data: BandwidthSnapshot[] }>('/bandwidth/history'),
+  getBandwidthSummary: () => request<{ data: BandwidthDelta[] }>('/bandwidth/history/summary'),
 };

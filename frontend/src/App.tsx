@@ -3,6 +3,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { Clients } from './pages/Clients';
 import { Devices } from './pages/Devices';
 import { Events } from './pages/Events';
+import { Health } from './pages/Health';
 import { Login } from './pages/Login';
 import { Networks } from './pages/Networks';
 import { Overview } from './pages/Overview';
@@ -63,6 +64,14 @@ function AppRoutes() {
         element={
           <RequireAuth>
             <Security />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/health"
+        element={
+          <RequireAuth>
+            <Health />
           </RequireAuth>
         }
       />

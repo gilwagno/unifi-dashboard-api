@@ -296,6 +296,206 @@ async function fetchAdmins(): Promise<ClassicAdmin[]> {
   return data;
 }
 
+// --- Saúde operacional (Prioridade 3, parte 1) ---
+//
+// Três conjuntos de dados adicionais da mesma API clássica, confirmados
+// manualmente contra um controller real:
+//
+// 1. POST /proxy/network/api/s/{site}/stat/device (body vazio) — traz TODOS
+//    os devices (APs e switches) com CPU/memória/uptime, contagem de
+//    clientes e, só em APs, utilização de canal e satisfação por rádio
+//    (`radio_table_stats`). Switches puros não têm esse campo.
+// 2. GET /proxy/network/api/s/{site}/stat/sta — traz TODOS os clientes
+//    conectados agora, com muito mais detalhe que a Integration API,
+//    incluindo força de sinal (`signal`, em dBm) pros clientes wireless.
+//    Clientes com fio (`is_wired: true`) não têm esses campos.
+// 3. GET /proxy/network/v2/api/site/{site}/aggregated-dashboard — mesmo
+//    endpoint já usado em fetchSecuritySummary acima, mas aqui extraímos
+//    `wan_history` em vez de `cybersecure`/`upgradable_device_count`. O
+//    histórico de saúde do WAN (`health_history`, ~1 ponto a cada 5min nas
+//    últimas 24h) já é mantido pelo próprio controller — não precisamos
+//    persistir nada pra isso.
+
+interface ClassicRadioTableStat {
+  name?: string;
+  radio?: string;
+  channel?: number;
+  cu_total?: number;
+  satisfaction?: number;
+  num_sta?: number;
+  state?: string;
+  [key: string]: unknown;
+}
+
+interface ClassicDevice {
+  mac?: string;
+  name?: string;
+  'system-stats'?: { cpu?: string; mem?: string; uptime?: string };
+  uptime?: number;
+  num_sta?: number;
+  radio_table_stats?: ClassicRadioTableStat[];
+  [key: string]: unknown;
+}
+
+export interface DeviceRadioHealth {
+  name: string;
+  channel?: number;
+  channelUtilizationPct?: number;
+  satisfactionScore?: number;
+  clientCount?: number;
+}
+
+export interface DeviceHealth {
+  mac: string;
+  name: string;
+  cpu: number;
+  mem: number;
+  uptimeSeconds: number;
+  clientCount: number;
+  radios: DeviceRadioHealth[];
+}
+
+function toNumber(value: unknown): number {
+  const n = typeof value === 'string' ? Number(value) : typeof value === 'number' ? value : NaN;
+  return Number.isFinite(n) ? n : 0;
+}
+
+async function fetchDeviceHealth(site: string): Promise<DeviceHealth[]> {
+  const { data } = await classicFetch<ClassicResponse<ClassicDevice[]>>(
+    `/proxy/network/api/s/${site}/stat/device`,
+    { method: 'POST', body: JSON.stringify({}) },
+  );
+
+  return data.map((device) => ({
+    mac: device.mac ?? '',
+    name: device.name ?? device.mac ?? 'Dispositivo desconhecido',
+    cpu: toNumber(device['system-stats']?.cpu),
+    mem: toNumber(device['system-stats']?.mem),
+    uptimeSeconds: toNumber(device.uptime ?? device['system-stats']?.uptime),
+    clientCount: toNumber(device.num_sta),
+    radios: (device.radio_table_stats ?? []).map((radio) => ({
+      name: radio.name ?? radio.radio ?? '—',
+      channel: radio.channel,
+      channelUtilizationPct: radio.cu_total,
+      satisfactionScore: radio.satisfaction,
+      clientCount: radio.num_sta,
+    })),
+  }));
+}
+
+interface ClassicClientStation {
+  mac?: string;
+  hostname?: string;
+  name?: string;
+  is_wired?: boolean;
+  signal?: number;
+  rssi?: number;
+  satisfaction?: number;
+  channel?: number;
+  [key: string]: unknown;
+}
+
+export interface ClientSignal {
+  mac: string;
+  hostname: string;
+  signalDbm?: number;
+  rssi?: number;
+  satisfactionScore?: number;
+  channel?: number;
+}
+
+async function fetchClientSignalStrength(site: string): Promise<ClientSignal[]> {
+  const { data } = await classicFetch<ClassicResponse<ClassicClientStation[]>>(
+    `/proxy/network/api/s/${site}/stat/sta`,
+  );
+
+  return data
+    .filter((client) => client.is_wired !== true)
+    .map((client) => ({
+      mac: client.mac ?? '',
+      hostname: client.hostname ?? client.name ?? client.mac ?? 'Cliente desconhecido',
+      signalDbm: client.signal,
+      rssi: client.rssi,
+      satisfactionScore: client.satisfaction,
+      channel: client.channel,
+    }));
+}
+
+export interface WanHealthPoint {
+  timestamp?: number;
+  wan_downtime?: boolean;
+  high_latency?: boolean;
+  packet_loss?: boolean;
+  failover_wan_active?: boolean;
+  wan2_failover_active?: boolean;
+  [key: string]: unknown;
+}
+
+export interface WanHistoryDetail {
+  downtime_history?: unknown[];
+  health_history?: WanHealthPoint[];
+  [key: string]: unknown;
+}
+
+interface AggregatedDashboardWanResponse {
+  wan_history?: {
+    wan_history_details?: WanHistoryDetail[];
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+async function fetchWanUptimeHistory(site: string): Promise<WanHistoryDetail[]> {
+  const res = await classicFetch<AggregatedDashboardWanResponse>(
+    `/proxy/network/v2/api/site/${site}/aggregated-dashboard?historySeconds=86400`,
+  );
+  return res.wan_history?.wan_history_details ?? [];
+}
+
+// --- Histórico de uso de banda (Prioridade 3, parte 2) ---
+//
+// stat/device e stat/sta (os mesmos dois endpoints já usados em
+// fetchDeviceHealth/fetchClientSignalStrength acima) também trazem
+// `tx_bytes`/`rx_bytes` — contadores CUMULATIVOS de bytes transmitidos/
+// recebidos desde que o device ligou (stat/device) ou o cliente conectou
+// (stat/sta). Não reaproveitamos fetchDeviceHealth/fetchClientSignalStrength
+// porque eles filtram/remodelam o dado pra outro propósito (saúde de CPU/
+// sinal) e um deles (fetchClientSignalStrength) descarta clientes com fio —
+// pra banda queremos todos. Em vez disso, uma função enxuta própria que só
+// extrai mac/nome + os dois contadores, reusando classicFetch/toNumber.
+// Quem consome esses contadores cumulativos (bandwidth-history.service.ts)
+// é responsável por calcular a diferença entre amostras — aqui devolvemos
+// o valor cru, sem fazer suposição de intervalo.
+export interface RawTrafficCounters {
+  perDevice: Array<{ mac: string; name: string; rxBytes: number; txBytes: number }>;
+  perClient: Array<{ mac: string; hostname: string; rxBytes: number; txBytes: number }>;
+}
+
+async function fetchRawTrafficCounters(site: string): Promise<RawTrafficCounters> {
+  const [devicesRes, clientsRes] = await Promise.all([
+    classicFetch<ClassicResponse<ClassicDevice[]>>(`/proxy/network/api/s/${site}/stat/device`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+    classicFetch<ClassicResponse<ClassicClientStation[]>>(`/proxy/network/api/s/${site}/stat/sta`),
+  ]);
+
+  return {
+    perDevice: devicesRes.data.map((device) => ({
+      mac: device.mac ?? '',
+      name: device.name ?? device.mac ?? 'Dispositivo desconhecido',
+      rxBytes: toNumber(device.rx_bytes),
+      txBytes: toNumber(device.tx_bytes),
+    })),
+    perClient: clientsRes.data.map((client) => ({
+      mac: client.mac ?? '',
+      hostname: client.hostname ?? client.name ?? client.mac ?? 'Cliente desconhecido',
+      rxBytes: toNumber(client.rx_bytes),
+      txBytes: toNumber(client.tx_bytes),
+    })),
+  };
+}
+
 export const unifiClassicService = {
   isConfigured: isClassicApiConfigured,
 
@@ -323,6 +523,14 @@ export const unifiClassicService = {
     opts: { enabled: boolean; ip?: string; networkId?: string },
     site = env.UNIFI_CONTROLLER_SITE,
   ) => setFixedIp(mac, site, opts),
+
+  getDeviceHealth: (site = env.UNIFI_CONTROLLER_SITE) => fetchDeviceHealth(site),
+
+  getClientSignalStrength: (site = env.UNIFI_CONTROLLER_SITE) => fetchClientSignalStrength(site),
+
+  getWanUptimeHistory: (site = env.UNIFI_CONTROLLER_SITE) => fetchWanUptimeHistory(site),
+
+  getRawTrafficCounters: (site = env.UNIFI_CONTROLLER_SITE) => fetchRawTrafficCounters(site),
 };
 
 export { UniFiClassicApiError, ClassicApiNotConfiguredError, UnknownClientError };

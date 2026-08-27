@@ -62,6 +62,11 @@ Vite + Tailwind) que consome essa API.
 | DELETE | /networks/:id?siteId=...          | Remove uma VLAN (API oficial) |
 | GET    | /networks/zones?siteId=...        | Lista as zonas de firewall do site (ex: Internal, External) (API oficial) |
 | PATCH  | /clients/:mac/fixed-ip            | Liga/desliga o IP fixo (reserva de DHCP) de um cliente (API clássica) |
+| GET    | /health/devices                   | Saúde dos APs/switches: CPU, memória, uptime, rádios (API clássica) |
+| GET    | /health/clients-signal             | Força de sinal dos clientes Wi-Fi conectados (API clássica) |
+| GET    | /health/wan-uptime                 | Histórico de disponibilidade do WAN nas últimas 24h (API clássica) |
+| GET    | /bandwidth/history                 | Buffer bruto (cumulativo) de amostras de uso de banda — ver seção abaixo |
+| GET    | /bandwidth/history/summary          | Mesmo buffer, já com a diferença de uso calculada por intervalo — ver seção abaixo |
 
 ### Renovando o token
 
@@ -136,6 +141,37 @@ Configuração (veja `.env.example`):
 **Não confunda** `UNIFI_CONTROLLER_USER`/`PASSWORD` com
 `ADMIN_USER`/`ADMIN_PASSWORD_HASH` — estes últimos são o login deste
 dashboard, não têm relação com o controller.
+
+### Histórico de uso de banda
+
+Diferente das rotas de `/health/*` (que buscam dado ao vivo na hora do
+request), `/bandwidth/history` e `/bandwidth/history/summary` são
+alimentadas por um **poller em segundo plano** (`src/services/bandwidth-
+history.service.ts`) que roda dentro do próprio processo do backend desde
+que ele sobe:
+
+- A cada **5 minutos**, coleta os contadores de tráfego (`tx_bytes`/
+  `rx_bytes`) de todos os devices (`stat/device`) e clientes (`stat/sta`)
+  via a API clássica, e guarda essa amostra num buffer em memória.
+- O buffer guarda até **288 amostras** (24h ÷ 5min), descartando a mais
+  antiga quando cheio.
+- É **em memória**, igual ao histórico de eventos do `/events/history` —
+  **não persiste em disco nem em banco**, então é perdido a cada restart
+  do backend. Isso também quer dizer que **a primeira amostra só aparece
+  depois de 5 minutos** do backend ter subido (o buffer começa vazio).
+- Uma falha pontual de coleta (controller fora do ar, etc.) é logada e
+  ignorada — o poller não para, só tenta de novo no próximo ciclo.
+
+`GET /bandwidth/history` devolve o buffer bruto: cada amostra tem os
+valores **cumulativos** de `rxBytes`/`txBytes` por device/cliente (o mesmo
+tipo de contador que só cresce enquanto o device está ligado/o cliente
+conectado). `GET /bandwidth/history/summary` devolve, em vez disso, a
+**diferença** de uso entre cada par de amostras consecutivas (quanto foi
+trafegado naquele intervalo de ~5min) — mais prático pra montar um
+gráfico/lista sem o frontend precisar fazer essa conta. Se o contador
+"zerou" entre duas amostras (o device reiniciou ou o cliente reconectou),
+a diferença dessa entrada vem como `null` em vez de um número negativo sem
+sentido.
 
 O comando clássico `block-sta`/`unblock-sta` não valida o MAC — se você
 mandar bloquear um MAC que o controller nunca viu na rede, ele cria um
@@ -254,6 +290,92 @@ nenhum endpoint confiável para consultar o histórico de login de
 administradores no controller (pesquisa extensiva, incluindo testes
 diretos contra um controller real). Não está disponível nesta versão do
 controller.
+
+### Saúde operacional (APs/switches, sinal Wi-Fi e uptime do WAN)
+
+Três rotas, todas via a mesma API clássica/privada usada nas seções acima
+(reaproveita a sessão por cookie+CSRF já existente). Testadas manualmente
+contra um controller real:
+
+```
+GET /health/devices
+```
+Saúde de cada AP/switch, lida de `POST /proxy/network/api/s/{site}/stat/device`
+(corpo `{}`, retorna todos os devices do site). `cpu`/`mem` são convertidos
+de string para number (o controller retorna algo como `"2.6"`, já em
+porcentagem); `uptimeSeconds` vem em segundos; `radios` só existe em APs
+(switches puros retornam array vazio) e traz canal, utilização do canal
+(`channelUtilizationPct`, em %) e um score de satisfação de 0–100
+(`satisfactionScore`, ou `-1` quando o controller não tem dados
+suficientes):
+```json
+{
+  "data": [
+    {
+      "mac": "aa:bb:cc:dd:ee:ff",
+      "name": "AP Sala",
+      "cpu": 2.6,
+      "mem": 32.9,
+      "uptimeSeconds": 208615,
+      "clientCount": 3,
+      "radios": [
+        { "name": "rai0", "channel": 157, "channelUtilizationPct": 4, "satisfactionScore": 95, "clientCount": 3 }
+      ]
+    }
+  ]
+}
+```
+
+```
+GET /health/clients-signal
+```
+Força de sinal de cada cliente Wi-Fi conectado agora, lida de
+`GET /proxy/network/api/s/{site}/stat/sta` (mesmo endpoint clássico de
+clientes, mas com muito mais detalhe que a Integration API). Filtra fora
+os clientes com fio (`is_wired: true`) — eles não têm campos de sinal.
+`signalDbm` é a métrica principal pra UI (dBm, negativo — mais perto de 0 é
+melhor); `rssi` é um valor relativo sem unidade padronizada, incluído só
+como dado bruto adicional:
+```json
+{ "data": [{ "mac": "11:22:33:44:55:66", "hostname": "iPhone", "signalDbm": -64, "rssi": 32, "satisfactionScore": 100, "channel": 60 }] }
+```
+
+```
+GET /health/wan-uptime
+```
+Histórico de saúde do WAN/gateway nas últimas 24h, lido do mesmo endpoint
+`GET /proxy/network/v2/api/site/{site}/aggregated-dashboard?historySeconds=86400`
+já usado em `GET /security/summary` (mas aqui extraindo `wan_history` em vez
+de `cybersecure`/`upgradable_device_count`). Retorna `wan_history_details`
+cru — um array (tipicamente um item por WAN, ex: WAN1/WAN2 em setups com
+failover) com `health_history` (~1 ponto a cada 5 minutos, já mantido pelo
+próprio controller) e `downtime_history` (períodos de queda real, se
+houver):
+```json
+{
+  "data": [
+    {
+      "downtime_history": [],
+      "health_history": [
+        { "timestamp": 1787770800000, "wan_downtime": false, "high_latency": false, "packet_loss": false }
+      ]
+    }
+  ]
+}
+```
+
+**Importante — sem persistência própria**: os três endpoints acima leem
+dados que o próprio controller já mantém internamente (o histórico de 24h
+do WAN, por exemplo, vem pronto do `aggregated-dashboard`). Nenhum dado é
+armazenado por este backend. Uma futura funcionalidade de **histórico de
+uso/banda por cliente ao longo do tempo** (além das últimas 24h que o
+controller guarda) exigiria persistência própria (ex: um job periódico
+salvando snapshots em um banco) — isso **não foi implementado** nesta
+etapa, fica para uma fase posterior.
+
+Assim como as rotas de segurança, as três retornam `503` se
+`UNIFI_CONTROLLER_USER`/`UNIFI_CONTROLLER_PASSWORD` não estiverem
+configurados no `.env`.
 
 ### Redes Wi-Fi (SSIDs), VLANs e IP fixo por cliente
 

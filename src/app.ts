@@ -6,9 +6,11 @@ import { env } from './config/env.js';
 import authPlugin from './plugins/auth.js';
 import websocketPlugin from './plugins/websocket.js';
 import authRoutes from './routes/auth.routes.js';
+import bandwidthRoutes from './routes/bandwidth.routes.js';
 import clientsRoutes from './routes/clients.routes.js';
 import devicesRoutes from './routes/devices.routes.js';
 import eventsRoutes from './routes/events.routes.js';
+import healthRoutes from './routes/health.routes.js';
 import networksRoutes from './routes/networks.routes.js';
 import securityRoutes from './routes/security.routes.js';
 import sitesRoutes from './routes/sites.routes.js';
@@ -71,6 +73,8 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(eventsRoutes);
   await app.register(securityRoutes);
   await app.register(networksRoutes);
+  await app.register(healthRoutes);
+  await app.register(bandwidthRoutes);
 
   app.get('/health', async () => ({ status: 'ok' }));
 
