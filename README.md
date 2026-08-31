@@ -749,6 +749,30 @@ app (ver comentário em `tests/integration/websocket.test.ts`). O
 fechamento por timeout de 5s sem mensagem não é coberto (exigiria esperar
 os 5s de verdade no teste).
 
+### Testes end-to-end (Playwright)
+
+```
+npx playwright install chromium   # só na primeira vez
+npm run test:e2e
+```
+
+Sobe três processos isolados dos de desenvolvimento normal (backend real na
+porta 3100, frontend real na porta 5273) apontando para um **controller
+UniFi fake local** (`e2e/fake-controller/server.mjs`, HTTPS autoassinado na
+porta 8443, estado em memória) — nunca para um controller de verdade. As
+env vars de `CONTROLLER_HOST` etc. são passadas explicitamente pelo
+`playwright.config.ts` e sempre vencem qualquer valor do `.env` real
+(dotenv não sobrescreve variáveis já presentes no ambiente do processo).
+
+Cobre um fluxo real por área sensível, clicando na UI de verdade (não
+chamando a API diretamente): login → bloquear/desbloquear um cliente
+(`e2e/tests/clients.spec.ts`), login → rotacionar credencial SSH e
+confirmar que o segredo some da tela e do storage ao navegar
+(`e2e/tests/ssh-rotation.spec.ts`), e criar → remover uma rede Wi-Fi
+(`e2e/tests/wifi.spec.ts`). O fake controller reproduz peculiaridades já
+confirmadas contra um controller real (ex: `DELETE /wifi/broadcasts/{id}`
+respondendo 200 com corpo vazio).
+
 ## Deploy com Docker
 
 ```
