@@ -7,6 +7,19 @@ checkpoint por PR). Ver `docs/printers-snmp-research.md` para a pesquisa técnic
 achados por fabricante) que embasa as decisões abaixo — carregar isso no contexto de qualquer par
 que mexa em SNMP/poller.
 
+### Marco: subtarefas 1-8 (backend CRUD/status/reconnect/poller/consumables/alias + frontend)
+### revisadas e MERGEADAS em master em 2026-08-31
+
+PRs #5, #6→#9 (recriada — base deletada), #7, #8→#10 (recriada — base deletada) todas squash-merged.
+**Lição operacional**: usar `--delete-branch` no merge de uma PR-base de uma PR empilhada FECHA a
+PR dependente automaticamente (GitHub não permite trocar a base de uma PR fechada) — precisou
+recriar 2 PRs direto contra `master` depois de sincronizar a branch. Da próxima vez que empilhar
+PRs neste projeto: ou não usar `--delete-branch` até TODAS as PRs da pilha estarem mergeadas, ou
+mergear sempre com `--base master` desde o início evitando o empilhamento.
+
+Estado verificado em `master` pós-merge: backend 240/240 testes (`tsc` limpo), frontend 25/25
+testes (`tsc` limpo), as 4 impressoras reais cadastradas e intactas no `printers.db` local.
+
 ### Impressoras reais confirmadas na rede (usar como alvo real, não mock, nas subtarefas que
 ### tocam SNMP/HTTP das impressoras)
 
