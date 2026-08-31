@@ -70,6 +70,17 @@ iPhone, um Watch e um Redmi antes).
    a rede da impressora na WBM/SWS dela mesma (mesma classe de risco/complexidade da troca de
    senha de admin, achado 7: escrita autenticada, específica por fabricante). Dobra na mesma
    investigação da subtarefa 10 (WBM/SWS), não é uma subtarefa isolada.
+10. **Nova subtarefa pedida pelo usuário (2026-08-31): descoberta automática de impressoras na
+    rede**. Decisão de arquitetura: NÃO fazer varredura de rede ativa (scan de portas/broadcast
+    SNMP) — arriscado, ruidoso, e desnecessário. Em vez disso, reusar dado que o projeto já tem
+    acesso: `GET /printers/discover-candidates` (novo) lista clientes conhecidos do UniFi (API
+    clássica, `rest/user`, que já expõe o campo `oui`/fabricante — confirmado nas investigações
+    reais desta sessão, ex: "Brother Industries, Ltd." apareceu no próprio painel) cujo
+    OUI/hostname bate com fabricantes/padrões conhecidos de impressora (HP Inc., Brother
+    Industries, e outros comuns tipo Canon/Epson/Samsung; hostname com prefixo `BRW`/`HLL`/`DCP`/
+    `MFC` — confirmado que Brother usa esse padrão) e que AINDA NÃO estão cadastrados no módulo
+    (cruza contra `printersRepository`). Retorna candidatos pro usuário confirmar/cadastrar
+    manualmente — nunca cadastra sozinho.
 
 ### Ordem de subtarefas da Onda 2 (fila sequencial, mesma regra de ≥47 pra avançar)
 
