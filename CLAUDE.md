@@ -69,12 +69,19 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
    já estavam corretos no código mas sem teste permanente — corrigido. Nota: o crítico original
    (Opus) bateu no rate limit de sessão a meio da avaliação; foi retomado diretamente a partir da
    sonda de investigação que ele já tinha rodado (4 casos, nenhum bug real encontrado).
-3. ⏳ PRÓXIMO: `POST /printers/:id/reconnect` — reaproveita block+unblock já existente.
+3. ✅ `POST /printers/:id/reconnect` — **47/50**. Mesma PR #5. Achado do crítico: erro genérico
+   de `blockClient` (ex: 502) já funcionava certo mas sem teste permanente — corrigido.
+4. ✅ IP fixo/dinâmico — **sem código novo necessário**. `PATCH /clients/:mac/fixed-ip` já é
+   genérico pra qualquer MAC (confirmado, sem allowlist de MAC no serviço/rota) — funciona pra
+   impressoras cadastradas sem nenhuma mudança. Fica só como item de UX pra expor no frontend
+   (subtarefa 11), não uma subtarefa de backend própria.
+5. ⏳ PRÓXIMO: Poller SNMP (consumíveis + contador de páginas), tratando os 3 sentinelas
+   (-1/-2/-3, achado da pesquisa). Tier Opus (toca segredo SNMP + lógica de rede real).
 
-**Restrição atual**: Opus bateu no limite de sessão (resetava ~12:10 America/Sao_Paulo no momento
-do achado). Subtarefas que exigem Opus (segredo SNMP, poller, spike de reboot) podem precisar
-esperar o reset ou usar outra combinação de modelo — checar com o usuário antes de prosseguir pra
-essas.
+**Nota sobre rate limit do Opus**: bateu o limite durante a subtarefa 2, voltou a funcionar antes
+da subtarefa 3 terminar. Se acontecer de novo numa subtarefa futura, o padrão que funcionou foi:
+usar a sonda/investigação que o crítico já tinha feito antes de cair, formalizar como teste
+permanente, validar por mutação — sem esperar o reset se o achado já está claro.
 
 ## Onda 1 (fechamento de cobertura de testes) — CONCLUÍDA — 4 PRs revisadas e mergeadas em 2026-08-31
 
