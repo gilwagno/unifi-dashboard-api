@@ -52,6 +52,7 @@ Vite + Tailwind) que consome essa API.
 | GET    | /security/summary               | Resumo de segurança: ameaças detectadas, status do IPS, firmware desatualizado (API clássica) |
 | GET    | /security/events                | Eventos/alarmes críticos do controller (API clássica) |
 | GET    | /security/admins                | Admins do controller e seus papéis/permissões por site (API clássica) |
+| GET    | /security/audit-log?limit=...   | Log de auditoria das ações feitas NESTE dashboard (não do controller) |
 | GET    | /wifi?siteId=...                 | Lista as redes Wi-Fi (SSIDs) do site (API oficial) |
 | POST   | /wifi?siteId=...                 | Cria uma rede Wi-Fi nova (WPA2_PERSONAL ou Enterprise/RADIUS, API oficial) |
 | GET    | /wifi/radius-profiles?siteId=...  | Lista os perfis RADIUS cadastrados no UniFi (somente leitura, API oficial) |
@@ -291,6 +292,42 @@ nenhum endpoint confiável para consultar o histórico de login de
 administradores no controller (pesquisa extensiva, incluindo testes
 diretos contra um controller real). Não está disponível nesta versão do
 controller.
+
+### Log de auditoria do dashboard
+
+```
+GET /security/audit-log?limit=...
+```
+
+Diferente de `/security/*` acima (que audita o **controller UniFi**), esta
+rota audita o **próprio dashboard**: quem fez o quê por aqui — bloqueio/
+desbloqueio de cliente, restart de device, power-cycle de porta, rotação de
+senha SSH, criação/remoção de rede Wi-Fi ou VLAN, IP fixo. Não depende da
+API clássica — funciona mesmo sem `UNIFI_CONTROLLER_USER`/`PASSWORD`
+configurados.
+
+Implementado como um hook global (`onResponse` em `src/app.ts`) em vez de
+instrumentar rota por rota: toda requisição autenticada com método
+diferente de `GET`/`OPTIONS` (exceto `/auth/*`, que ainda não tem um ator
+autenticado) é registrada automaticamente, sucesso ou falha. Cada entrada
+tem `{ timestamp, actor, method, route, params, statusCode }` — `actor` é
+o `sub` do JWT (hoje sempre o mesmo, já que só existe um usuário do
+dashboard; fica pronto para quando houver múltiplos), `route` é o padrão
+da rota (ex: `/clients/:mac/block`, não a URL com o MAC já preenchido
+embutido nela) e `params` traz só os parâmetros de **path** (ids/macs) —
+o corpo da requisição nunca é gravado, porque poderia conter senha/
+passphrase (ex: `POST /wifi`, `POST /ssh-credentials/rotate`).
+
+Ao contrário dos buffers de eventos (`/events/history`) e banda
+(`/bandwidth/history`), que são só em memória, este log também é
+persistido em disco (`AUDIT_LOG_FILE`, padrão `./audit.log`, uma linha
+JSON por entrada, append-only) — um log de auditoria que some a cada
+restart não serve pra investigar um incidente depois. Em memória, o
+buffer guarda até 500 entradas (o mesmo teto é aplicado ao reconstruir o
+buffer a partir do arquivo na subida do processo); no arquivo, o
+histórico cresce indefinidamente — não há rotação automática, se isso
+importar no seu ambiente, rotacione `AUDIT_LOG_FILE` externamente (ex:
+`logrotate`).
 
 ### Credencial de administração/SSH dos equipamentos (APs/switches)
 

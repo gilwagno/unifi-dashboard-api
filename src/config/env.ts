@@ -36,6 +36,12 @@ const envSchema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
   RATE_LIMIT_CLIENT_ACTION_MAX: z.coerce.number().int().positive().default(10),
   RATE_LIMIT_DEVICE_RESTART_MAX: z.coerce.number().int().positive().default(5),
+
+  // Arquivo onde o log de auditoria de ações do dashboard (quem bloqueou
+  // um cliente, reiniciou um device, rotacionou a senha SSH, etc.) é
+  // persistido (append-only, uma linha JSON por entrada). Ver
+  // src/services/audit-log.service.ts.
+  AUDIT_LOG_FILE: z.string().min(1).default('./audit.log'),
 });
 
 const parsed = envSchema.safeParse(process.env);
