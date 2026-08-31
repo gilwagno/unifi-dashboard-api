@@ -2,10 +2,17 @@ import { useEffect, useState } from 'react';
 import { Layout } from '../components/Layout';
 import { api, type UniFiEventRecord } from '../lib/api';
 
+// Nenhum campo do payload é confiável: `meta.message`/`key`/`type` podem vir
+// como objeto/array em schemas desconhecidos, e devolver isso pra JSX quebra a
+// página inteira ("Objects are not valid as a React child"). Só aceita valores
+// que dá pra renderizar como texto; qualquer outra coisa cai no resumo JSON.
 function summarize(raw: string): string {
   try {
     const parsed = JSON.parse(raw);
-    return parsed.meta?.message ?? parsed.key ?? parsed.type ?? JSON.stringify(parsed).slice(0, 120);
+    const candidate = parsed?.meta?.message ?? parsed?.key ?? parsed?.type;
+    if (typeof candidate === 'string') return candidate;
+    if (typeof candidate === 'number' || typeof candidate === 'boolean') return String(candidate);
+    return String(JSON.stringify(parsed) ?? raw).slice(0, 120);
   } catch {
     return raw.slice(0, 160);
   }
