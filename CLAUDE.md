@@ -14,7 +14,15 @@ que mexa em SNMP/poller.
 |---|---|---|---|---|
 | `HPLaserMFP135w` (FINANCEIRO) | HP Inc. | `50:81:40:d8:6c:7e` | `172.16.0.89` | Sim |
 | `HLL2360DWVENDAS` | Brother | `e8:6f:38:ba:b9:32` | `172.16.0.222` | Não |
-| `BRW849E567E0445` | Brother (modelo exato não confirmado) | `84:9e:56:7e:04:45` | `172.16.0.80` | Não |
+| `BRW849E567E0445` | Brother — confirmado DCP-L3560CDW colorida (sysDescr real, subtarefa 5) | `84:9e:56:7e:04:45` | `172.16.0.80` | Não |
+| Brother DCP-1610NW | Brother | `4c:82:a9:e0:ad:b4` | `172.16.0.85` (dinâmico) | Não |
+
+4ª impressora cadastrada em 2026-08-31 (id `0405c80b-cb9a-4325-a9e3-decf1cdb1499`, community
+`public` ainda não confirmada por SNMP nesta unidade especificamente — as outras 3 já foram
+confirmadas na subtarefa 5). MAC obtido direto da aba Network Status da própria WBM (não confiar
+em `last_ip` do `rest/user` do controller pra achar impressora por IP — é histórico, pode apontar
+pra outro dispositivo que já teve aquele IP via DHCP; confirmado que 172.16.0.85 já foi de um
+iPhone, um Watch e um Redmi antes).
 
 ### Achados que já corrigem o spec original do usuário (não redescobrir)
 
@@ -25,16 +33,30 @@ que mexa em SNMP/poller.
 2. **Sentinela do Printer-MIB tem 3 valores, não 2**: RFC 3805 (confirmado no texto oficial da
    IETF) define `other(-1)`, `unknown(-2)` **e `partial(-3)`** — o spec original só citava -1/-2.
    O poller precisa tratar os três.
-3. **Reboot remoto não é trivial em nenhum fabricante**: HP usa uma SPA ExtJS (SyncThru/SWS) sem
-   link estático de reboot — precisa mapear as chamadas JS internas. Brother WBM não expõe reboot
-   na aba sem-login (`General`); pode estar em `Administrator` (exige login) ou pode não existir
-   via WBM. SNMP padrão (RFC 3805) não define OID de reboot. **Virou subtarefa própria de
-   investigação (spike), não uma implementação garantida.**
+3. **Reboot remoto: CONFIRMADO INVIÁVEL via WBM na família Brother** (login real feito em
+   2026-08-31 na Brother DCP-1610NW, 172.16.0.85, com senha de admin fornecida pelo usuário — não
+   registrada em nenhum arquivo do repo). A aba Administrator só expõe 3 resets DESTRUTIVOS
+   (Machine/Network/All Settings — apagam configuração), nenhuma opção de reboot simples em
+   nenhuma aba. Isso fecha a investigação pra Brother: não implementar reboot remoto nessa família,
+   nem tentar automatizar os botões de reset (são destrutivos, não um reboot). HP (SyncThru/SWS,
+   SPA ExtJS) segue não investigado — ainda pendente pro spike.
 4. **IP fixo/dinâmico já está pronto**: `PATCH /clients/:mac/fixed-ip` (API clássica) já existe no
    projeto — o módulo de impressoras só precisa expor isso na UI/API nova, não reimplementar.
 5. **Otimização real já confirmada (Brother, sem login)**: "Sleep Time" e "Auto Power Off" existem
    de verdade na WBM da Brother (`/general/sleep.html`, `/general/powerdown.html`) — candidatos
-   reais a automação, ao contrário de "reboot" que ainda é incerto.
+   reais a automação, ao contrário de "reboot" que já foi descartado.
+6. **Notificação nativa por e-mail confirmada de verdade** na Brother DCP-1610NW
+   (`/net/net/notification.html`, campos SMTP Server Address/Device E-mail Address) — documentar
+   pro usuário como rede de segurança independente do poller, não implementar receptor.
+7. **Nova subtarefa pedida pelo usuário (2026-08-31): trocar a senha de admin dos painéis web**
+   (WBM da Brother, SWS da HP) — não é a mesma coisa que o segredo SNMP (subtarefa 1). Cada
+   fabricante tem seu próprio mecanismo de troca de senha autenticado (Brother: aba Administrator
+   → "Login Password", `/admin/password.html`, form POST autenticado; HP/SWS: ainda não mapeado,
+   é SPA ExtJS, precisa investigação como o spike de reboot). Risco alto: é a credencial mestra do
+   painel admin de cada impressora — um POST malformado pode trocar a senha errado e trancar o
+   acesso. Vira subtarefa própria (10), mesmo tier de risco do ssh-credentials do projeto original
+   (Opus obrigatório, nunca devolver a senha nova em log, mesmo padrão de "aceita na escrita, nunca
+   devolve na leitura" mas aqui não tem nem leitura possível — WBM não expõe a senha atual).
 
 ### Ordem de subtarefas da Onda 2 (fila sequencial, mesma regra de ≥47 pra avançar)
 
@@ -49,13 +71,14 @@ que mexa em SNMP/poller.
 6. `GET /printers/:id/consumables`.
 7. `GET /printers/:id/diagnostics` — somente leitura (firmware, erros ativos via SNMP).
 8. Agenda de manutenção (`POST/GET /printers/:id/maintenance*`).
-9. **Spike: reboot remoto + otimização (Sleep Time/Auto Power Off da Brother)** — investigação
-   dedicada contra as impressoras reais antes de comprometer implementação. Reporta o que é
-   possível de forma segura antes de codar.
-10. Histórico (opcional, só depois do essencial sólido).
-11. Frontend `Printers.tsx` — nova aba "Manutenção" no menu lateral (confirmado com o usuário,
-    ver print do Layout.tsx atual), padrão de Security.tsx/Events.tsx.
-12. e2e.
+9. **Spike: otimização (Sleep Time/Auto Power Off da Brother) + reboot HP (ainda pendente,
+   Brother já descartado)** — investigação dedicada contra as impressoras reais.
+10. **Trocar senha de admin dos painéis web** (WBM Brother + SWS HP) — pedido novo do usuário, ver
+    achado 7 acima. Requer par com Opus (risco alto, credencial mestra sem leitura possível).
+11. Histórico (opcional, só depois do essencial sólido).
+12. Frontend `Printers.tsx` — nova aba "Manutenção" no menu lateral (confirmado com o usuário,
+    ver print do Layout.tsx atual), padrão de Security.tsx/Events.tsx. Inclui as 4 impressoras.
+13. e2e.
 
 Regra de alocação de modelo: CRUD/merge simples = Sonnet nos dois papéis (diversidade). Qualquer
 coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel do par em Opus.
@@ -81,7 +104,21 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
    com level>maxCapacity) e o crítico corrigiu um vazamento real de segredo via erro nativo da
    lib `net-snmp`. `getLastReading(printerId)` exportado de `src/services/printer-snmp.service.ts`
    pronto pra subtarefa 6 usar.
-6. ⏳ PRÓXIMO: `GET /printers/:id/consumables` — expõe `getLastReading()` via API.
+6. ✅ `GET /printers/:id/consumables` — **47/50**. Branch `feat/printers-consumables`. Expõe
+   `getLastReading()` formatada (nome do suprimento, `levelPercent`, status). Sem threshold
+   configurado no registro, o status nunca vira `'low'` (decisão documentada em
+   `src/routes/printers.routes.ts`, junto de `resolveSupplyStatus`) — evita aplicar uma política de
+   negócio (ex.: 10% default) que ninguém pediu. **Achados do crítico (corrigidos):** (a) a validação
+   por mutação mostrou que 2 dos 7 status não tinham teste nenhum — `error` e o sentinela `other(-1)`
+   (cuja decisão é cair em `unknown`): trocar esses mapeamentos passava com a suíte verde. Também
+   faltavam o limite exato do threshold e o fallback de nome `Suprimento <index>`. Cobertos, todas as
+   mutações agora morrem. (b) `lowThresholdPct` passou a integrar a resposta: sem ele, um toner em 1%
+   chegava ao frontend como `status: 'ok'`, indistinguível de um toner cheio — o "nunca alerta sem
+   threshold" virava silêncio invisível num módulo cujo objetivo é alertar. Expor o valor mantém a
+   decisão de não inventar default sem esconder que a checagem está desligada. `pageCount` com
+   sentinela/erro foi verificado: vira `null` com `collectedAt` preenchido (distinguível de "nunca
+   coletada"), nunca NaN/undefined — estava correto, mas sem teste; agora tem. Suíte: 230/230.
+7. ⏳ PRÓXIMO: `GET /printers/:id/diagnostics` — somente leitura (firmware, erros ativos via SNMP).
 
 **Nota sobre rate limit do Opus**: bateu o limite durante a subtarefa 2, voltou a funcionar antes
 da subtarefa 3 terminar. Se acontecer de novo numa subtarefa futura, o padrão que funcionou foi:

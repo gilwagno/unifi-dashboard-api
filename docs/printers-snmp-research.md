@@ -153,6 +153,27 @@ unidade percent) e 59.700 páginas; HL-L2360D com drum em 69% (8278/12000) e 52.
 DCP-L3560CDW com `hrDeviceStatus = 3 (warning)` e `hrPrinterDetectedErrorState = 0x20`, que decodifica
 para **`lowToner`** — coerente com os 4 toners em `partial(-3)`.
 
+## 4ª impressora: Brother DCP-1610NW (172.16.0.85)
+
+Confirmada em 2026-08-31 via login real na WBM (senha de admin fornecida pelo usuário — não
+registrada em nenhum arquivo do repositório). MAC real obtido direto da própria impressora (aba
+Network Status, dois MACs — cabeado `94-dd-f8-23-a7-71` e Wi-Fi `4c-82-a9-e0-ad-b4`; conectada via
+Wi-Fi, confirmado pelo controller). Cadastrada no módulo com `mac: 4c:82:a9:e0:ad:b4`,
+`community: 'public'` (mesma das outras 3, ainda não confirmada por SNMP nesta unidade
+especificamente).
+
+**Achado definitivo sobre reboot remoto** (fecha a investigação da Seção 0 pra esta família de
+impressoras Brother): a aba Administrator da WBM só expõe três botões — **Machine Reset**,
+**Network Reset**, **All Settings Reset** — todos de RESET DESTRUTIVO (apagam configuração), não
+um reboot simples e reversível. Não há nenhuma opção de "restart"/"reboot" limpo em nenhuma aba
+(Administrator, Network, General) desta unidade. **Reboot remoto seguro não é viável via WBM nesta
+família Brother** — a subtarefa de spike (item 9 do plano) deve tratar isso como resultado
+negativo confirmado para Brother, não como pendência em aberto.
+
+**Confirmado**: a notificação nativa por e-mail existe de verdade nesta unidade
+(`/net/net/notification.html`, campos "SMTP Server Address"/"Device E-mail Address") — bate com o
+que a documentação geral da família SyncThru/WBM já sugeria.
+
 ## Consequência prática pro plano da Onda 2
 
 1. Subtarefa 2 (merge com status UniFi) precisa de fallback pra API clássica — 2 das 3
