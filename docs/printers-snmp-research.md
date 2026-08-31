@@ -174,6 +174,42 @@ negativo confirmado para Brother, não como pendência em aberto.
 (`/net/net/notification.html`, campos "SMTP Server Address"/"Device E-mail Address") — bate com o
 que a documentação geral da família SyncThru/WBM já sugeria.
 
+## Investigação da HP via SWS real (172.16.0.34) — achados críticos, 2026-08-31
+
+Login feito com Playwright (a SWS da HP usa criptografia AES do lado do cliente pra senha —
+biblioteca `gibberish-aes.pjs` — confirmado por leitura do JS servido; não dá pra fazer login via
+POST simples de curl como na Brother, só via navegador de verdade). Usuário `admin`, senha em
+branco (padrão de fábrica) — **funcionou**.
+
+**Achado 1 — não é uma 5ª impressora, é a HP já cadastrada, num IP inesperado.** Serial Number
+exibido (`BRBSP770DV`) bate exatamente com a etiqueta da impressora descrita na Seção 0 original,
+Host Name "Financeiro" bate com o registro do UniFi. Mas ela respondeu em `172.16.0.34`, não em
+`172.16.0.89` (o IP fixo registrado no `rest/user` do controller) — e a tela "Device Information"
+mostra `MAC Address: B0:22:7A:4F:63:80`, diferente do MAC cadastrado (`50:81:40:d8:6c:7e`).
+Hipótese mais provável: essa tela expõe a interface de Wi-Fi Direct (MAC próprio, separado da
+Wi-Fi de infraestrutura que o UniFi rastreia), não confirmado com certeza. **Consequência prática:
+o merge de status por MAC (subtarefa 2) e a resolução de IP do poller (subtarefa 5) continuam
+corretos usando o MAC/IP do UniFi — mas se o poller algum dia falhar em achar essa impressora,
+não assumir que ela sumiu da rede sem checar se o IP simplesmente mudou.**
+
+**Achado 2 — vulnerabilidade de segurança real, não corrigida (decisão do usuário: só documentar
+por enquanto).** A própria tela da impressora exibe o aviso: *"Currently, Web Interface ID and
+password are set to default. Please change your ID and password."* — o painel admin da SWS está
+com usuário/senha de fábrica (`admin`/em branco), acessível a qualquer um na rede local. Isso é
+justamente o tipo de achado que reforça a prioridade da subtarefa 11 (trocar senha de admin dos
+painéis web) — mas a implementação dessa troca ainda não está pronta, então por ora essa
+impressora fica exposta até o usuário trocar manualmente ou até a subtarefa 11 ser entregue.
+
+**Menu autenticado real (SWS/HP)**: Home, Information, **Settings**, **Security**, Maintenance —
+mais abas do que a versão sem-login (só Home/Information/Maintenance). Não encontrei nenhum item
+de menu ou texto visível de "Reboot"/"Restart" nas abas Maintenance/Settings exploradas (só
+"Control Panel Update" e o aviso de troca de senha) — a investigação de reboot da HP não está
+completa (o menu completo da SPA ExtJS não foi mapeado a fundo, só a navegação de topo), mas não
+há indício de um botão simples de reboot como se esperava. Combinado com o achado já confirmado da
+Brother (reboot inviável via WBM), a expectativa realista pra subtarefa 10 é que reboot remoto
+simples não seja viável em nenhum dos dois fabricantes — a confirmar com mais tempo de
+investigação se a subtarefa for adiante.
+
 ## Consequência prática pro plano da Onda 2
 
 1. Subtarefa 2 (merge com status UniFi) precisa de fallback pra API clássica — 2 das 3

@@ -57,6 +57,19 @@ iPhone, um Watch e um Redmi antes).
    acesso. Vira subtarefa própria (10), mesmo tier de risco do ssh-credentials do projeto original
    (Opus obrigatório, nunca devolver a senha nova em log, mesmo padrão de "aceita na escrita, nunca
    devolve na leitura" mas aqui não tem nem leitura possível — WBM não expõe a senha atual).
+8. **Nova subtarefa pedida pelo usuário (2026-08-31): renomear o "Apelido" da impressora no
+   UniFi**. Confirmado no `rest/user` da API clássica: cada cliente tem `name` (o Apelido exibido
+   no painel) separado de `hostname` (o que o dispositivo anuncia via DHCP/mDNS, só-leitura). Dá
+   pra implementar com o mesmo idioma GET+troca+PUT já usado em `setFixedIp`/SSH (`unifi-classic.
+   service.ts`) — baixo risco, reversível. Decisão: **genérico em `/clients`**
+   (`PATCH /clients/:mac/alias` ou nome similar), não específico do módulo de impressoras — mesmo
+   padrão de bloquear/desbloquear e IP fixo, que já são genéricos por MAC. O módulo de impressoras
+   só reaproveita a rota existente no frontend, sem código próprio.
+9. **Nova subtarefa pedida pelo usuário: trocar o HOSTNAME REAL que a impressora anuncia** (não o
+   apelido do UniFi — o que o próprio dispositivo relata via DHCP). Isso só é possível configurando
+   a rede da impressora na WBM/SWS dela mesma (mesma classe de risco/complexidade da troca de
+   senha de admin, achado 7: escrita autenticada, específica por fabricante). Dobra na mesma
+   investigação da subtarefa 10 (WBM/SWS), não é uma subtarefa isolada.
 
 ### Ordem de subtarefas da Onda 2 (fila sequencial, mesma regra de ≥47 pra avançar)
 
@@ -71,14 +84,17 @@ iPhone, um Watch e um Redmi antes).
 6. `GET /printers/:id/consumables`.
 7. `GET /printers/:id/diagnostics` — somente leitura (firmware, erros ativos via SNMP).
 8. Agenda de manutenção (`POST/GET /printers/:id/maintenance*`).
-9. **Spike: otimização (Sleep Time/Auto Power Off da Brother) + reboot HP (ainda pendente,
-   Brother já descartado)** — investigação dedicada contra as impressoras reais.
-10. **Trocar senha de admin dos painéis web** (WBM Brother + SWS HP) — pedido novo do usuário, ver
-    achado 7 acima. Requer par com Opus (risco alto, credencial mestra sem leitura possível).
-11. Histórico (opcional, só depois do essencial sólido).
-12. Frontend `Printers.tsx` — nova aba "Manutenção" no menu lateral (confirmado com o usuário,
+9. **`PATCH /clients/:mac/alias`** (genérico, achado 8) — renomeia o "Apelido" no UniFi via
+   GET+troca+PUT no `rest/user`, mesmo padrão de `setFixedIp`. Baixo risco, tier Sonnet.
+10. **Spike: otimização (Sleep Time/Auto Power Off da Brother) + reboot HP (ainda pendente,
+    Brother já descartado) + trocar hostname real da impressora (achado 9)** — investigação
+    dedicada contra as impressoras reais.
+11. **Trocar senha de admin dos painéis web** (WBM Brother + SWS HP) — achado 7. Requer par com
+    Opus (risco alto, credencial mestra sem leitura possível).
+12. Histórico (opcional, só depois do essencial sólido).
+13. Frontend `Printers.tsx` — nova aba "Manutenção" no menu lateral (confirmado com o usuário,
     ver print do Layout.tsx atual), padrão de Security.tsx/Events.tsx. Inclui as 4 impressoras.
-13. e2e.
+14. e2e.
 
 Regra de alocação de modelo: CRUD/merge simples = Sonnet nos dois papéis (diversidade). Qualquer
 coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel do par em Opus.
@@ -119,6 +135,19 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
    sentinela/erro foi verificado: vira `null` com `collectedAt` preenchido (distinguível de "nunca
    coletada"), nunca NaN/undefined — estava correto, mas sem teste; agora tem. Suíte: 230/230.
 7. ⏳ PRÓXIMO: `GET /printers/:id/diagnostics` — somente leitura (firmware, erros ativos via SNMP).
+8. ✅ `PATCH /clients/:mac/alias` (achado 8, genérico) — **47/50**. Branch `feat/clients-alias`,
+   PR a abrir. PUT parcial confirmado por teste (mesmo padrão de `setFixedIp`). Achado do crítico:
+   `.trim()` sem teste ancorando — corrigido.
+9. 🔍 Investigação HP/SWS real (172.16.0.34, login admin sem senha via Playwright — a SWS usa AES
+   client-side, não dá pra scriptar com curl puro): confirmado que é a MESMA HP já cadastrada
+   (serial `BRBSP770DV` bate), não uma 5ª impressora — só estava respondendo num IP diferente do
+   fixo registrado (`.34` vs `.89`), com um MAC diferente na tela (provavelmente Wi-Fi Direct, não
+   a Wi-Fi de infraestrutura que o UniFi rastreia). **Achado de segurança real, não corrigido por
+   decisão do usuário (só documentar por enquanto)**: a própria SWS avisa "ID e senha ainda no
+   padrão de fábrica, troque agora" — reforça a prioridade da subtarefa 11. Menu autenticado
+   (Settings/Security agora visíveis) não revelou nenhum botão óbvio de reboot — consistente com o
+   achado já confirmado da Brother. Ver `docs/printers-snmp-research.md`, seção "Investigação da HP
+   via SWS real".
 
 **Nota sobre rate limit do Opus**: bateu o limite durante a subtarefa 2, voltou a funcionar antes
 da subtarefa 3 terminar. Se acontecer de novo numa subtarefa futura, o padrão que funcionou foi:

@@ -235,6 +235,65 @@ describe('unifiClassicService', () => {
     });
   });
 
+  describe('setClientAlias() — Apelido do cliente (rest/user, campo name)', () => {
+    it('busca o _id pelo MAC e faz PUT parcial só com { name: alias }, sem os outros campos do cliente', async () => {
+      let putUrl: string | undefined;
+      let putBody: Record<string, unknown> | undefined;
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.endsWith('/api/auth/login')) return loginResponse();
+        if (init?.method === 'PUT' && url.includes('/rest/user/')) {
+          putUrl = url;
+          putBody = JSON.parse(String(init.body));
+          return jsonResponse({ meta: { rc: 'ok' }, data: [{ ...putBody, _id: 'client-id-1' }] });
+        }
+        if (url.includes('/rest/user')) {
+          return jsonResponse({
+            meta: { rc: 'ok' },
+            data: [
+              {
+                _id: 'client-id-1',
+                mac: 'aa:bb:cc:dd:ee:ff',
+                name: 'Nome antigo',
+                hostname: 'HP-LaserJet-1020',
+                blocked: false,
+                use_fixedip: true,
+                fixed_ip: '172.16.0.50',
+              },
+            ],
+          });
+        }
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService } = await import('../../src/services/unifi-classic.service.js');
+      await unifiClassicService.setClientAlias('aa:bb:cc:dd:ee:ff', 'Impressora Recepção');
+
+      expect(putUrl).toContain('/rest/user/client-id-1');
+      // Atualização parcial: só `name` vai no corpo, nenhum outro campo do
+      // cliente (hostname, blocked, use_fixedip, fixed_ip, mac...) é
+      // reenviado junto — diferente do PUT de SSH, que faz merge completo.
+      expect(putBody).toEqual({ name: 'Impressora Recepção' });
+    });
+
+    it('lança UnknownClientError (404) quando o MAC não é conhecido pelo controller', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url.endsWith('/api/auth/login')) return loginResponse();
+        if (url.includes('/rest/user')) return jsonResponse({ meta: { rc: 'ok' }, data: [] });
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService, UnknownClientError } = await import(
+        '../../src/services/unifi-classic.service.js'
+      );
+
+      await expect(unifiClassicService.setClientAlias('ff:ff:ff:ff:ff:ff', 'Novo apelido')).rejects.toBeInstanceOf(
+        UnknownClientError,
+      );
+    });
+  });
+
   describe('SSH dos equipamentos (get/setting mgmt)', () => {
     function mgmtSettingFixture(overrides: Record<string, unknown> = {}) {
       return {
