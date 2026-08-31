@@ -742,12 +742,16 @@ login/refresh, e as rotas de `/clients`, `/devices`, `/sites`,
 `/events/history` e `/security/*` com
 `unifiService`/`unifiEventsHub`/`unifiClassicService` mockados. O handshake
 de `/ws/events` também tem teste (token válido, token inválido, mensagem
-sem token, canal somente-leitura após autenticar), usando um socket TCP
-real (`app.listen()` + cliente `ws`) em vez do helper `app.injectWS()` do
+sem token, canal somente-leitura após autenticar, e o fechamento com `1008`
+por timeout de 5s sem nenhuma mensagem), usando um socket TCP real
+(`app.listen()` + cliente `ws`) em vez do helper `app.injectWS()` do
 `@fastify/websocket` — esse helper trava com a combinação de plugins deste
-app (ver comentário em `tests/integration/websocket.test.ts`). O
-fechamento por timeout de 5s sem mensagem não é coberto (exigiria esperar
-os 5s de verdade no teste).
+app (ver comentário em `tests/integration/websocket.test.ts`). O teste de
+timeout não espera 5s de verdade: usa fake timers do Vitest com
+`toFake: ['setTimeout', 'clearTimeout']` e `shouldAdvanceTime: true`
+(ativados antes de conectar, já que o timer nasce no servidor no momento da
+conexão) e avança o relógio com `vi.advanceTimersByTimeAsync(5000)`,
+deixando o I/O do socket real intacto.
 
 ## Deploy com Docker
 

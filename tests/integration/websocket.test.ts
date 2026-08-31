@@ -77,6 +77,29 @@ describe('/ws/events', () => {
     expect(code).toBe(1008);
   });
 
+  it('fecha com 1008 se a primeira mensagem (auth) não chegar em 5s', async () => {
+    // O setTimeout de auth é criado pelo servidor no momento da conexão, então
+    // os fake timers precisam estar ativos ANTES do connect() — senão o timer
+    // já nasce real e advanceTimersByTime não o alcança.
+    // `toFake: ['setTimeout','clearTimeout']` + `shouldAdvanceTime` mantêm o
+    // resto do event loop (I/O do socket TCP real, handshake do ws) funcionando.
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { ws } = await connect();
+
+      // listener de close registrado ANTES de avançar o relógio
+      const closed = waitForClose(ws);
+
+      // nenhuma mensagem é enviada: o servidor deve derrubar sozinho
+      await vi.advanceTimersByTimeAsync(5000);
+
+      expect(await closed).toBe(1008);
+    } finally {
+      // os outros testes do arquivo dependem de timers reais pro handshake TCP
+      vi.useRealTimers();
+    }
+  });
+
   it('ignora mensagens depois de autenticado (canal somente leitura pro cliente)', async () => {
     const { app, ws } = await connect();
     const token = app.jwt.sign({ sub: 'admin' });
