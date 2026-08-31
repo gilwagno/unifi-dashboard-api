@@ -2,16 +2,47 @@ import { rmSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 // Diferente do resto das rotas de teste do projeto (que mockam a camada de
-// serviço), aqui não há serviço externo nenhum — a rota fala direto com
-// src/db/printers.db.ts, que é banco de verdade (node:sqlite). Por isso o
-// mock certo aqui é NENHUM: sobrescreve PRINTERS_DB_FILE (o setup global
-// usa ':memory:', o que serviria, mas usamos um arquivo real num diretório
-// temporário para também validar que a rota funciona contra um arquivo em
-// disco de verdade, não só em memória) antes de importar o app, e limpa o
-// diretório no final.
+// serviço), aqui não há serviço externo nenhum pro CRUD em si — a rota fala
+// direto com src/db/printers.db.ts, que é banco de verdade (node:sqlite).
+// Por isso o mock certo pro banco é NENHUM: sobrescreve PRINTERS_DB_FILE (o
+// setup global usa ':memory:', o que serviria, mas usamos um arquivo real
+// num diretório temporário para também validar que a rota funciona contra
+// um arquivo em disco de verdade, não só em memória) antes de importar o
+// app, e limpa o diretório no final.
+//
+// GET /printers e GET /printers/:id, porém, desde a subtarefa 2 (merge com
+// status do UniFi), TAMBÉM chamam unifiService/unifiClassicService — esses
+// dois são mockados aqui (API clássica não configurada, Integration API sem
+// clientes) só pra essas rotas não fazerem uma chamada de rede de verdade
+// nestes testes de CRUD, que não são sobre o merge de status. A cobertura
+// dedicada do merge (integration/classic/unknown) está em
+// tests/integration/printers-network-status.test.ts.
+vi.mock('../../src/services/unifi.service.js', () => ({
+  unifiService: {
+    listClients: vi.fn(async () => ({ data: [] })),
+  },
+  UniFiApiError: class UniFiApiError extends Error {},
+}));
+
+vi.mock('../../src/services/unifi-classic.service.js', () => ({
+  unifiClassicService: {
+    isConfigured: vi.fn(() => false),
+    getKnownClientsNetworkInfo: vi.fn(async () => new Map()),
+  },
+  UniFiClassicApiError: class UniFiClassicApiError extends Error {
+    constructor(
+      public status: number,
+      message: string,
+    ) {
+      super(message);
+    }
+  },
+  ClassicApiNotConfiguredError: class ClassicApiNotConfiguredError extends Error {},
+}));
+
 const tmpDir = mkdtempSync(join(tmpdir(), 'printers-routes-test-'));
 process.env.PRINTERS_DB_FILE = join(tmpDir, 'printers.db');
 

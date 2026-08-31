@@ -170,6 +170,71 @@ describe('unifiClassicService', () => {
     expect(blocked).toEqual(new Set(['aa:aa:aa:aa:aa:aa']));
   });
 
+  describe('getKnownClientsNetworkInfo() — merge de status de rede do módulo de impressoras', () => {
+    it('reusa fetchKnownClients (/rest/user) e devolve um Map por MAC minúsculo com IP e tipo de conexão', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url.endsWith('/api/auth/login')) return loginResponse();
+        if (url.includes('/rest/user')) {
+          return jsonResponse({
+            meta: { rc: 'ok' },
+            data: [
+              // Cliente cabeado com IP dinâmico (last_ip).
+              { mac: 'AA:AA:AA:AA:AA:AA', is_wired: true, last_ip: '172.16.0.10' },
+              // Cliente sem fio com IP fixo ligado — deve priorizar fixed_ip
+              // sobre last_ip (que pode estar desatualizado).
+              {
+                mac: 'bb:bb:bb:bb:bb:bb',
+                is_wired: false,
+                use_fixedip: true,
+                fixed_ip: '172.16.0.89',
+                last_ip: '172.16.0.99',
+              },
+              // Cliente sem nenhum dado de IP conhecido.
+              { mac: 'cc:cc:cc:cc:cc:cc' },
+            ],
+          });
+        }
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService } = await import('../../src/services/unifi-classic.service.js');
+      const info = await unifiClassicService.getKnownClientsNetworkInfo();
+
+      // A chave é normalizada pra minúsculas mesmo quando o controller
+      // devolve em outra caixa (não deveria acontecer na prática, mas o
+      // merge do módulo de impressoras não deve depender de coincidência
+      // de caixa em nenhum dos dois lados).
+      expect(info.get('aa:aa:aa:aa:aa:aa')).toEqual({ ipAddress: '172.16.0.10', connectionType: 'WIRED' });
+      expect(info.get('bb:bb:bb:bb:bb:bb')).toEqual({ ipAddress: '172.16.0.89', connectionType: 'WIRELESS' });
+      expect(info.get('cc:cc:cc:cc:cc:cc')).toEqual({ ipAddress: null, connectionType: null });
+    });
+
+    it('não duplica a lógica de fetch/login — usa a mesma sessão já autenticada de outra chamada', async () => {
+      let loginCalls = 0;
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url.endsWith('/api/auth/login')) {
+          loginCalls += 1;
+          return loginResponse();
+        }
+        if (url.includes('/rest/user')) {
+          return jsonResponse({ meta: { rc: 'ok' }, data: [{ mac: 'aa:aa:aa:aa:aa:aa', is_wired: true }] });
+        }
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService } = await import('../../src/services/unifi-classic.service.js');
+      await unifiClassicService.getBlockedMacs();
+      await unifiClassicService.getKnownClientsNetworkInfo();
+
+      // Um único login pras duas chamadas — confirma que
+      // getKnownClientsNetworkInfo reaproveita a mesma sessão/infraestrutura
+      // de classicFetch, em vez de reimplementar login.
+      expect(loginCalls).toBe(1);
+    });
+  });
+
   describe('SSH dos equipamentos (get/setting mgmt)', () => {
     function mgmtSettingFixture(overrides: Record<string, unknown> = {}) {
       return {
