@@ -11,12 +11,12 @@ import {
 } from '../db/printers.db.js';
 import { printersRepository } from '../db/printers.instance.js';
 import { buildNetworkStatusResolver, withNetworkStatus } from '../services/printer-network-status.service.js';
-// Import com efeito colateral: carregar o módulo do poller SNMP inicia o
-// `setInterval` de coleta de consumíveis (mesmo padrão de
-// bandwidth-history.service.ts, que sobe junto com bandwidth.routes.ts). O
-// timer é unref()'d e não faz coleta imediata no boot, então isso não
-// atrasa a subida do app nem segura o processo/os testes.
-import '../services/printer-snmp.service.js';
+// Além do efeito colateral de iniciar o poller (setInterval unref()'d, sem
+// coleta imediata no boot — mesmo padrão de bandwidth-history.service.ts,
+// que sobe junto com bandwidth.routes.ts), este import também traz
+// `getLastReading` e os tipos usados por GET /printers/:id/consumables
+// (subtarefa 6) para formatar a última leitura SNMP bem-sucedida.
+import { getLastReading, type PrinterSnmpReading, type PrinterSupply, type SnmpMeasurement } from '../services/printer-snmp.service.js';
 
 // Cadastro (nome, MAC, segredo SNMP, política de manutenção) do módulo de
 // manutenção de impressoras — primeira rota do projeto com persistência em
@@ -131,6 +131,124 @@ function toSnmpSecretInput(snmp: z.infer<typeof snmpSchema>): SnmpSecretInput {
   return snmp.version === 'v3' ? { v3Auth: snmp.v3Auth! } : { community: snmp.community! };
 }
 
+// --- GET /printers/:id/consumables (Onda 2, subtarefa 6) ---
+//
+// Formata a última leitura SNMP bem-sucedida (printer-snmp.service.ts,
+// subtarefa 5) para o consumo do frontend: nome do suprimento, percentual
+// quando calculável, flag de baixo nível pelo threshold configurado, ou
+// "não suportado"/"desconhecido" quando o sentinela indicar isso.
+
+type ConsumableSupplyStatus = 'ok' | 'low' | 'unknown' | 'not-measured' | 'partial' | 'unsupported' | 'error';
+
+interface ConsumableSupply {
+  name: string;
+  levelPercent: number | null;
+  status: ConsumableSupplyStatus;
+}
+
+interface ConsumablesResponse {
+  printerId: string;
+  collectedAt: string | null;
+  pageCount: number | null;
+  // Threshold de "baixo" efetivamente em vigor nesta resposta, copiado do
+  // registro (`maintenance.consumableLowThresholdPct`). `null` = não
+  // configurado, e portanto NENHUM suprimento desta resposta pode ter vindo
+  // como 'low' (ver a DECISÃO em resolveSupplyStatus). Sem este campo, um
+  // toner em 1% chega ao frontend como `status: 'ok'` e é indistinguível de
+  // um toner realmente cheio — o consumidor não teria como saber que a
+  // checagem simplesmente não está ligada. Expor o threshold mantém a
+  // decisão de não inventar um default (o backend continua sem política
+  // própria) sem que "nunca alertar" vire um silêncio invisível num módulo
+  // cujo objetivo é justamente alertar sobre manutenção.
+  lowThresholdPct: number | null;
+  supplies: ConsumableSupply[];
+}
+
+// DECISÃO — threshold de manutenção não configurado no registro
+// (`maintenance.consumableLowThresholdPct`): sem um valor explícito, não há
+// como o backend saber o que o dono do cadastro considera "baixo" para
+// aquela impressora/suprimento — inventar um default (ex.: 10%) seria uma
+// política de negócio que ninguém pediu, e poderia disparar alertas de
+// "baixo" que o usuário não configurou para receber. Por isso: sem
+// threshold configurado, o status NUNCA vira 'low' — um nível numericamente
+// conhecido sempre mapeia para 'ok' nesse caso. Configurar o threshold (já
+// suportado desde a subtarefa 1, via POST/PATCH /printers) é o que liga a
+// checagem. Para que isso não vire um "nunca alerta" silencioso, a resposta
+// carrega `lowThresholdPct` — o consumidor consegue distinguir "cheio" de
+// "ninguém configurou o limite" sem o backend inventar política nenhuma.
+function resolveSupplyStatus(supply: PrinterSupply, thresholdPct: number | null): ConsumableSupplyStatus {
+  // Mapeamento de SnmpMeasurement.status (união discriminada da subtarefa 5)
+  // para o status de resposta:
+  //   'unknown'     -> 'unknown'      (RFC 3805: valor não pôde ser determinado)
+  //   'partial'     -> 'partial'      (RFC 3805: ainda há suprimento, quantidade indeterminada)
+  //   'unsupported' -> 'unsupported'  (OID não existe neste modelo)
+  //   'error'       -> 'error'        (falha pontual na leitura deste campo)
+  //   'other'       -> 'unknown'      (RFC 3805: "condição indeterminada/não-padrão" — não é
+  //                                    um dos 2 status "conhecidos" (unsupported/error), então
+  //                                    cai junto de 'unknown' em vez de ganhar um rótulo próprio
+  //                                    que o frontend precisaria tratar separadamente sem nunca
+  //                                    ter sido observado de verdade nas 3 impressoras reais)
+  if (supply.level.status !== 'ok') {
+    switch (supply.level.status) {
+      case 'unknown':
+        return 'unknown';
+      case 'partial':
+        return 'partial';
+      case 'unsupported':
+        return 'unsupported';
+      case 'error':
+        return 'error';
+      case 'other':
+        return 'unknown';
+    }
+  }
+
+  // level.status === 'ok': há um número de verdade, mas `levelPercent` ainda
+  // pode ser `null` (unidade incompatível, sem maxCapacity confiável, ou o
+  // bug real da HP de level > maxCapacity — ver computeLevelPercent). Nesse
+  // caso não dá pra afirmar "ok" nem "low" com segurança: 'not-measured'.
+  if (supply.levelPercent === null) return 'not-measured';
+
+  // Comparação estrita: 'low' é "ABAIXO do threshold". Um nível exatamente
+  // igual ao limite configurado (ex.: 20% com threshold 20) ainda é 'ok' —
+  // o limite é o piso aceitável, não o primeiro valor a alertar.
+  if (thresholdPct !== null && supply.levelPercent < thresholdPct) return 'low';
+  return 'ok';
+}
+
+function pageCountValue(pageCount: SnmpMeasurement): number | null {
+  return pageCount.status === 'ok' ? pageCount.value : null;
+}
+
+function toConsumablesResponse(
+  printerId: string,
+  reading: PrinterSnmpReading | undefined,
+  thresholdPct: number | null,
+): ConsumablesResponse {
+  if (!reading) {
+    // Cadastrada, mas o poller ainda não coletou nada dela (recém-criada ou
+    // sempre offline até agora) — estado válido, não um erro.
+    return { printerId, collectedAt: null, pageCount: null, lowThresholdPct: thresholdPct, supplies: [] };
+  }
+
+  return {
+    printerId,
+    collectedAt: reading.collectedAt,
+    // `pageCount` também é um SnmpMeasurement (subtarefa 5): o contador pode
+    // vir com sentinela (-1/-2/-3) ou falha de leitura, e nesses casos vira
+    // `null` — nunca NaN/undefined. `collectedAt` continua preenchido, então
+    // "coletei, mas o contador não é legível" segue distinguível de "nunca
+    // coletei" (que é collectedAt null + supplies vazio).
+    pageCount: pageCountValue(reading.pageCount),
+    lowThresholdPct: thresholdPct,
+    supplies: reading.supplies.map((supply) => ({
+      name: supply.description ?? supply.typeLabel ?? `Suprimento ${supply.index}`,
+      levelPercent: supply.levelPercent,
+      status: resolveSupplyStatus(supply, thresholdPct),
+    })),
+  };
+}
+
 
 export default async function printersRoutes(app: FastifyInstance) {
   app.addHook('preHandler', app.authenticate);
@@ -179,6 +297,15 @@ export default async function printersRoutes(app: FastifyInstance) {
     }
     const resolveNetwork = await buildNetworkStatusResolver(request.log);
     return withNetworkStatus(toPublic(record), resolveNetwork);
+  });
+
+  app.get('/printers/:id/consumables', async (request, reply) => {
+    const { id } = idParam.parse(request.params);
+    const record = printersRepository.getById(id);
+    if (!record) {
+      return reply.code(404).send({ error: 'Impressora não encontrada' });
+    }
+    return toConsumablesResponse(id, getLastReading(id), record.maintenance.consumableLowThresholdPct);
   });
 
   app.patch(
