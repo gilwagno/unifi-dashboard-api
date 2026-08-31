@@ -23,11 +23,18 @@ vi.mock('../../src/services/unifi.service.js', () => ({
     })),
     powerCyclePort: vi.fn(async () => undefined),
   },
-  UniFiApiError: class UniFiApiError extends Error {},
+  UniFiApiError: class UniFiApiError extends Error {
+    constructor(
+      public status: number,
+      message: string,
+    ) {
+      super(message);
+    }
+  },
 }));
 
 const { buildApp } = await import('../../src/app.js');
-const { unifiService } = await import('../../src/services/unifi.service.js');
+const { unifiService, UniFiApiError } = await import('../../src/services/unifi.service.js');
 
 async function authedApp() {
   const app = await buildApp();
@@ -128,6 +135,22 @@ describe('POST /devices/:id/restart', () => {
 
     await app.close();
   });
+
+  it('repassa o status de erro do serviço quando o device não existe', async () => {
+    const { app, token } = await authedApp();
+    vi.mocked(unifiService.restartDevice).mockRejectedValueOnce(new UniFiApiError(404, 'Device não encontrado'));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/devices/nao-existe/restart',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json().details).toBe('Device não encontrado');
+
+    await app.close();
+  });
 });
 
 describe('GET /devices/:id', () => {
@@ -225,6 +248,22 @@ describe('POST /devices/:id/ports/:portIdx/power-cycle', () => {
     const res = await app.inject({ method: 'POST', url: '/devices/dev-1/ports/1/power-cycle' });
 
     expect(res.statusCode).toBe(401);
+
+    await app.close();
+  });
+
+  it('repassa o status de erro do serviço quando a porta não existe', async () => {
+    const { app, token } = await authedApp();
+    vi.mocked(unifiService.powerCyclePort).mockRejectedValueOnce(new UniFiApiError(404, 'Porta não encontrada'));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/devices/dev-1/ports/99/power-cycle',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json().details).toBe('Porta não encontrada');
 
     await app.close();
   });
