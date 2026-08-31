@@ -75,8 +75,13 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
    genérico pra qualquer MAC (confirmado, sem allowlist de MAC no serviço/rota) — funciona pra
    impressoras cadastradas sem nenhuma mudança. Fica só como item de UX pra expor no frontend
    (subtarefa 11), não uma subtarefa de backend própria.
-5. ⏳ PRÓXIMO: Poller SNMP (consumíveis + contador de páginas), tratando os 3 sentinelas
-   (-1/-2/-3, achado da pesquisa). Tier Opus (toca segredo SNMP + lógica de rede real).
+5. ✅ Poller SNMP (consumíveis + contador de páginas) — **47/50**. Mesma PR #5. Investigado
+   contra as 3 impressoras reais (não mock) — identificou a 3ª como Brother DCP-L3560CDW
+   colorida, achou 3 problemas reais de design (getBulk não confiável, v1≠v2c em OID ausente, HP
+   com level>maxCapacity) e o crítico corrigiu um vazamento real de segredo via erro nativo da
+   lib `net-snmp`. `getLastReading(printerId)` exportado de `src/services/printer-snmp.service.ts`
+   pronto pra subtarefa 6 usar.
+6. ⏳ PRÓXIMO: `GET /printers/:id/consumables` — expõe `getLastReading()` via API.
 
 **Nota sobre rate limit do Opus**: bateu o limite durante a subtarefa 2, voltou a funcionar antes
 da subtarefa 3 terminar. Se acontecer de novo numa subtarefa futura, o padrão que funcionou foi:
