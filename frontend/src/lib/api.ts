@@ -186,6 +186,88 @@ export interface SshInfo {
   passwordAuthEnabled: boolean;
 }
 
+// --- Impressoras (módulo de manutenção) ---
+// Shapes espelhando exatamente src/db/printers.db.ts e
+// src/services/printer-network-status.service.ts do backend — nenhum campo
+// inventado aqui. `snmpSecret` nunca é devolvido em nenhuma resposta (GET
+// tanto quanto POST/PATCH), mesmo princípio de SshInfo acima.
+export type PrinterSnmpVersion = 'v1' | 'v2c' | 'v3';
+
+export interface PrinterMaintenancePolicy {
+  intervalDays: number | null;
+  intervalPages: number | null;
+  consumableLowThresholdPct: number | null;
+}
+
+export interface Printer {
+  id: string;
+  name: string;
+  mac: string;
+  ipOverride: string | null;
+  snmpVersion: PrinterSnmpVersion;
+  maintenance: PrinterMaintenancePolicy;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PrinterNetworkStatus {
+  source: 'integration' | 'classic' | 'unknown';
+  online: boolean | null;
+  ipAddress: string | null;
+  connectionType: 'WIRED' | 'WIRELESS' | null;
+}
+
+export type PrinterWithNetwork = Printer & { network: PrinterNetworkStatus };
+
+export interface PrinterSnmpV3Auth {
+  username: string;
+  authProtocol?: 'MD5' | 'SHA';
+  authPassword?: string;
+  privProtocol?: 'DES' | 'AES';
+  privPassword?: string;
+}
+
+// Mesmo shape condicional aceito por POST/PATCH /printers (ver
+// src/routes/printers.routes.ts, snmpSchema): community obrigatório em
+// v1/v2c, v3Auth obrigatório em v3.
+export type PrinterSnmpInput =
+  | { version: 'v1' | 'v2c'; community: string }
+  | { version: 'v3'; v3Auth: PrinterSnmpV3Auth };
+
+export interface CreatePrinterBody {
+  name: string;
+  mac: string;
+  ipOverride?: string;
+  snmp: PrinterSnmpInput;
+  maintenance?: Partial<PrinterMaintenancePolicy>;
+}
+
+// No PATCH `snmp` é opcional — omitir mantém o segredo/versão atuais (ver
+// updatePrinterBody no backend).
+export interface UpdatePrinterBody {
+  name?: string;
+  mac?: string;
+  ipOverride?: string | null;
+  snmp?: PrinterSnmpInput;
+  maintenance?: Partial<PrinterMaintenancePolicy>;
+}
+
+export type ConsumableSupplyStatus = 'ok' | 'low' | 'unknown' | 'not-measured' | 'partial' | 'unsupported' | 'error';
+
+export interface PrinterConsumableSupply {
+  name: string;
+  levelPercent: number | null;
+  status: ConsumableSupplyStatus;
+}
+
+export interface PrinterConsumablesResponse {
+  printerId: string;
+  collectedAt: string | null;
+  pageCount: number | null;
+  lowThresholdPct: number | null;
+  supplies: PrinterConsumableSupply[];
+}
+
 export interface Pagination {
   page: number;
   pageSize: number;
@@ -370,4 +452,20 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(opts),
     }),
+
+  // --- Apelido do cliente no UniFi (genérico por MAC, ver clients.routes.ts) ---
+  setClientAlias: (mac: string, alias: string) =>
+    request<{ ok: true }>(`/clients/${mac}/alias`, { method: 'PATCH', body: JSON.stringify({ alias }) }),
+
+  // --- Impressoras (módulo de manutenção) ---
+  listPrinters: () => request<PrinterWithNetwork[]>('/printers'),
+  getPrinter: (id: string) => request<PrinterWithNetwork>(`/printers/${id}`),
+  createPrinter: (body: CreatePrinterBody) =>
+    request<Printer>('/printers', { method: 'POST', body: JSON.stringify(body) }),
+  updatePrinter: (id: string, body: UpdatePrinterBody) =>
+    request<Printer>(`/printers/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deletePrinter: (id: string) => request<{ ok: true }>(`/printers/${id}`, { method: 'DELETE' }),
+  reconnectPrinter: (id: string) =>
+    request<{ ok: true; note: string }>(`/printers/${id}/reconnect`, { method: 'POST' }),
+  getPrinterConsumables: (id: string) => request<PrinterConsumablesResponse>(`/printers/${id}/consumables`),
 };

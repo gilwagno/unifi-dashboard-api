@@ -7,6 +7,7 @@ import { Health } from './pages/Health';
 import { Login } from './pages/Login';
 import { Networks } from './pages/Networks';
 import { Overview } from './pages/Overview';
+import { Printers } from './pages/Printers';
 import { Security } from './pages/Security';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -72,6 +73,14 @@ function AppRoutes() {
         element={
           <RequireAuth>
             <Health />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/printers"
+        element={
+          <RequireAuth>
+            <Printers />
           </RequireAuth>
         }
       />
