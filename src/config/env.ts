@@ -36,6 +36,12 @@ const envSchema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
   RATE_LIMIT_CLIENT_ACTION_MAX: z.coerce.number().int().positive().default(10),
   RATE_LIMIT_DEVICE_RESTART_MAX: z.coerce.number().int().positive().default(5),
+
+  // Arquivo do banco SQLite do módulo de manutenção de impressoras (ver
+  // src/db/printers.db.ts) — primeira persistência em disco do projeto
+  // (o resto do backend é tudo estado em memória). Caminho relativo ao
+  // diretório de onde o processo é iniciado.
+  PRINTERS_DB_FILE: z.string().min(1).default('./printers.db'),
 });
 
 const parsed = envSchema.safeParse(process.env);

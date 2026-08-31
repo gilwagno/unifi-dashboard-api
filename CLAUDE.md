@@ -1,6 +1,66 @@
-# Gauntlet Loop — Fechamento de cobertura de testes (unifi-dashboard-api)
+# Gauntlet Loop — unifi-dashboard-api
 
-## Estado: onda 1 CONCLUÍDA — 4 PRs revisadas e mergeadas em 2026-08-31
+## ONDA ATIVA: Módulo de Manutenção de Impressoras (iniciada 2026-08-31)
+
+Feature nova (não cobertura de teste), mesma metodologia (par executor/crítico, rubrica 0-50,
+checkpoint por PR). Ver `docs/printers-snmp-research.md` para a pesquisa técnica (SNMP, OIDs,
+achados por fabricante) que embasa as decisões abaixo — carregar isso no contexto de qualquer par
+que mexa em SNMP/poller.
+
+### Impressoras reais confirmadas na rede (usar como alvo real, não mock, nas subtarefas que
+### tocam SNMP/HTTP das impressoras)
+
+| Nome | Fabricante | MAC | IP | IP fixo |
+|---|---|---|---|---|
+| `HPLaserMFP135w` (FINANCEIRO) | HP Inc. | `50:81:40:d8:6c:7e` | `172.16.0.89` | Sim |
+| `HLL2360DWVENDAS` | Brother | `e8:6f:38:ba:b9:32` | `172.16.0.222` | Não |
+| `BRW849E567E0445` | Brother (modelo exato não confirmado) | `84:9e:56:7e:04:45` | `172.16.0.80` | Não |
+
+### Achados que já corrigem o spec original do usuário (não redescobrir)
+
+1. **Fallback de API obrigatório**: só a `BRW849E567E0445` aparece na Integration API oficial
+   (`GET /clients`) — as outras 2 só aparecem via API clássica (`rest/user`). A subtarefa de merge
+   de status precisa tentar a Integration API e cair pra API clássica, nunca confiar só na
+   primeira.
+2. **Sentinela do Printer-MIB tem 3 valores, não 2**: RFC 3805 (confirmado no texto oficial da
+   IETF) define `other(-1)`, `unknown(-2)` **e `partial(-3)`** — o spec original só citava -1/-2.
+   O poller precisa tratar os três.
+3. **Reboot remoto não é trivial em nenhum fabricante**: HP usa uma SPA ExtJS (SyncThru/SWS) sem
+   link estático de reboot — precisa mapear as chamadas JS internas. Brother WBM não expõe reboot
+   na aba sem-login (`General`); pode estar em `Administrator` (exige login) ou pode não existir
+   via WBM. SNMP padrão (RFC 3805) não define OID de reboot. **Virou subtarefa própria de
+   investigação (spike), não uma implementação garantida.**
+4. **IP fixo/dinâmico já está pronto**: `PATCH /clients/:mac/fixed-ip` (API clássica) já existe no
+   projeto — o módulo de impressoras só precisa expor isso na UI/API nova, não reimplementar.
+5. **Otimização real já confirmada (Brother, sem login)**: "Sleep Time" e "Auto Power Off" existem
+   de verdade na WBM da Brother (`/general/sleep.html`, `/general/powerdown.html`) — candidatos
+   reais a automação, ao contrário de "reboot" que ainda é incerto.
+
+### Ordem de subtarefas da Onda 2 (fila sequencial, mesma regra de ≥47 pra avançar)
+
+1. Schema + persistência + CRUD de registro de impressora (`node:sqlite`, built-in do Node 24 —
+   bump `engines.node` pra `>=22.5.0` no `package.json`). `POST/GET/PATCH/DELETE /printers`,
+   segredo SNMP nunca devolvido em GET (mesmo padrão do ssh-credentials).
+2. Merge com status UniFi — Integration API com fallback pra API clássica (achado 1 acima).
+3. `POST /printers/:id/reconnect` — reaproveita block+unblock já existente.
+4. Expor IP fixo/dinâmico da impressora via a rota já existente (achado 4).
+5. Poller SNMP (consumíveis + contador de páginas) — tratando os 3 sentinelas (achado 2), modelado
+   em `bandwidth-history.service.ts`.
+6. `GET /printers/:id/consumables`.
+7. `GET /printers/:id/diagnostics` — somente leitura (firmware, erros ativos via SNMP).
+8. Agenda de manutenção (`POST/GET /printers/:id/maintenance*`).
+9. **Spike: reboot remoto + otimização (Sleep Time/Auto Power Off da Brother)** — investigação
+   dedicada contra as impressoras reais antes de comprometer implementação. Reporta o que é
+   possível de forma segura antes de codar.
+10. Histórico (opcional, só depois do essencial sólido).
+11. Frontend `Printers.tsx` — nova aba "Manutenção" no menu lateral (confirmado com o usuário,
+    ver print do Layout.tsx atual), padrão de Security.tsx/Events.tsx.
+12. e2e.
+
+Regra de alocação de modelo: CRUD/merge simples = Sonnet nos dois papéis (diversidade). Qualquer
+coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel do par em Opus.
+
+## Onda 1 (fechamento de cobertura de testes) — CONCLUÍDA — 4 PRs revisadas e mergeadas em 2026-08-31
 
 Todas as 4 subtarefas de código do Gauntlet Loop foram aprovadas (47/50 cada), revisadas
 manualmente pelo usuário nesta conversa e mergeadas em `master` (squash). Suíte final verificada

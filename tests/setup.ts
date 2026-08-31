@@ -6,3 +6,9 @@ process.env.JWT_SECRET ??= 'test-secret-with-at-least-16-chars';
 process.env.ADMIN_USER ??= 'admin';
 process.env.ADMIN_PASSWORD_HASH ??= 'fake-hash-mocked-in-tests';
 process.env.PORT ??= '3000';
+// Banco em memória por padrão nos testes — evita que qualquer teste que
+// importe src/app.js (e portanto src/routes/printers.routes.ts) crie um
+// arquivo printers.db real no disco. Testes que precisam mesmo de um
+// arquivo real (ex: verificar persistência entre "restarts") sobrescrevem
+// esta variável explicitamente antes de importar o app.
+process.env.PRINTERS_DB_FILE ??= ':memory:';
