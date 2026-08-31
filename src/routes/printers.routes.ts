@@ -326,4 +326,55 @@ export default async function printersRoutes(app: FastifyInstance) {
     }
     return reply.send({ ok: true });
   });
+
+  // --- Reconectar impressora à rede (Onda 2, subtarefa 3) ---
+  //
+  // IMPORTANTE: isto NÃO é um reboot de hardware. Reaproveita exatamente o
+  // mesmo par block-sta/unblock-sta já usado em POST /clients/:mac/block e
+  // /unblock (ver clients.routes.ts e unifi-classic.service.ts) — o
+  // controller desassocia o cliente da rede e, em seguida, permite a
+  // reassociação, forçando o dispositivo a reconectar no Wi-Fi/rede
+  // cabeada. A impressora física nunca é desligada por isso: a HP
+  // (HPLaserMFP135w) nem tem PoE, liga direto na tomada — um "reconectar"
+  // de rede não tem como derrubar a energia dela. Um reboot de verdade do
+  // firmware da impressora é a subtarefa 9 (spike), ainda não implementada.
+  app.post(
+    '/printers/:id/reconnect',
+    { config: { rateLimit: { max: env.RATE_LIMIT_CLIENT_ACTION_MAX, timeWindow: env.RATE_LIMIT_WINDOW } } },
+    async (request, reply) => {
+      const { id } = idParam.parse(request.params);
+      const record = printersRepository.getById(id);
+      if (!record) {
+        return reply.code(404).send({ error: 'Impressora não encontrada' });
+      }
+
+      // Erros do serviço (UnknownClientError -> 404, ClassicApiNotConfiguredError
+      // -> 503, qualquer outro UniFiClassicApiError) NÃO são capturados aqui —
+      // propagam de propósito para o error handler central (src/app.ts), que já
+      // sabe mapear cada um pro status certo (mesmo padrão de /clients/:mac/block).
+      await unifiClassicService.blockClient(record.mac);
+
+      // Se blockClient funcionou mas isto falhar, a impressora fica bloqueada
+      // e presa sem rede — pior que o estado original antes do reconnect. Não
+      // fazemos retry automático (fora de escopo), mas registramos um warn
+      // explícito para não deixar esse estado intermediário silencioso: quem
+      // for investigar um erro 5xx/502 aqui sabe que precisa checar (ou
+      // chamar manualmente) POST /clients/:mac/unblock para essa impressora.
+      try {
+        await unifiClassicService.unblockClient(record.mac);
+      } catch (error) {
+        request.log.warn(
+          { err: error, printerId: id, mac: record.mac },
+          'unblockClient falhou após blockClient ter sido aplicado com sucesso — a impressora pode ter ' +
+            'ficado bloqueada/sem rede. Considere chamar POST /clients/:mac/unblock manualmente para este MAC.',
+        );
+        throw error;
+      }
+
+      return reply.send({
+        ok: true,
+        note: 'Reconexão de rede (bloqueia e desbloqueia o cliente no controller) — não reinicia o equipamento.',
+      });
+    },
+  );
 }
