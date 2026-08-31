@@ -30,6 +30,57 @@ testes (`tsc` limpo), as 4 impressoras reais cadastradas e intactas no `printers
 | `BRW849E567E0445` | Brother — confirmado DCP-L3560CDW colorida (sysDescr real, subtarefa 5) | `84:9e:56:7e:04:45` | `172.16.0.80` | Não |
 | Brother DCP-1610NW | Brother | `4c:82:a9:e0:ad:b4` | `172.16.0.85` (dinâmico) | Não |
 
+### Investigação dos painéis admin (WBM Brother / SWS HP) — 2026-08-31, sessão em andamento
+
+**Achado que explica horas de automação falhada**: a interface da SWS da HP no navegador do
+usuário está em **português** (pt-BR) — todos os scripts Playwright desta sessão procuravam pelo
+texto em inglês ("Settings"/"Security"/"Maintenance"), por isso o clique nunca acertava o elemento
+certo (não era bug da impressora nem bloqueio real, era mismatch de idioma). Confirmado com prints
+reais enviados pelo usuário. Qualquer automação futura da SWS precisa lidar com isso — ou fixar o
+idioma da sessão (tem seletor de idioma no canto superior direito, "Português do B...") antes de
+navegar, ou detectar dinamicamente os textos dos botões em vez de hardcodar em inglês.
+
+**Catálogo Brother (WBM) — completo**, confirmado por investigação real (login com senha fornecida
+pelo usuário, nunca registrada em arquivo):
+- Aba **Administrator**: Login Password (trocar senha admin), Reset Menu (Machine/Network/All
+  Settings — todos DESTRUTIVOS, não é reboot), Security Settings.
+- Aba **Network**: Network Status, **Interface** (IP estático vs DHCP — é aqui que fica IP fixo
+  direto na impressora), Protocol, **Notification** (SMTP nativo, alerta por e-mail sem depender
+  do nosso poller), Service.
+- Aba **General** (sem login): Status, Auto Refresh, Maintenance Information, Lists/Reports, Find
+  Device, Contact & Location, **Sleep Time**, **Auto Power Off**, Language, Panel, Replace Toner.
+- **Reboot: CONFIRMADO INVIÁVEL** — só existem os 3 resets destrutivos no Administrator, nenhuma
+  opção de restart simples em nenhuma aba.
+
+**Catálogo HP (SWS) — parcial, em andamento** (prints reais enviados pelo usuário em pt-BR):
+- Aba **Configurações → Configurações de rede**: Geral (Nome do host, Local, Contato), **TCP/IPv4**
+  e TCP/IPv6 (ainda não vimos o conteúdo — é aqui que deve ficar o IP estático, PRÓXIMO PASSO),
+  Raw TCP/IP/LPR/IPP, AirPrint, Impressão em nuvem do Google, WSD, SLP, UPnP, mDNS, **SNMP**
+  (sub-itens SNMPv1/v2 e SNMPv3 — community string do nosso poller fica aqui), HTTP, **Wi-Fi**
+  (Wi-Fi e Wi-Fi Direct), Restaurar padrão.
+- Aba **Segurança → Administrador do sistema**: campos **ID de logon** (hoje "admin") + **Senha** +
+  **Confirmar senha** + Aplicar — EXATAMENTE os campos pra implementar a troca de senha de admin
+  (achado 7/subtarefa 11). Também: Proteger endereço IPv4 de logon, Diretiva de falha de logon,
+  Logoff automático.
+- Menu lateral da aba Segurança tem **3 itens**: Administrador do sistema, Gerenciamento de
+  recursos (não visto ainda), e **Reiniciar dispositivo**.
+- **REVISÃO DO ACHADO ANTERIOR SOBRE REBOOT**: diferente da Brother, a **HP TEM uma opção de
+  reboot real** ("Reiniciar dispositivo", aba Segurança) — a CLAUDE.md anterior dizia "reboot não
+  encontrado em nenhuma aba" pra HP, isso estava incompleto (a busca automatizada nunca chegou lá
+  por causa do bug de idioma acima). **Ainda não confirmado** se é um botão simples (reboot limpo)
+  ou se pede confirmação/tem efeitos colaterais — PRÓXIMO PASSO antes de implementar.
+
+**Pendente pra próxima sessão** (nesta ordem):
+1. Ver o conteúdo de "Reiniciar dispositivo" (Segurança) — confirmar se é reboot simples.
+2. Ver o conteúdo de "TCP/IPv4" (Configurações → Rede) — confirmar campos de IP estático.
+3. Ver "Gerenciamento de recursos" (Segurança).
+4. Tentar documentação oficial da HP primeiro (EWS/SWS admin guide via hp.com/support) antes de
+   pedir mais prints ao usuário — ele pediu isso explicitamente ("pega isso na documentação").
+5. Repetir catalogação nas 2 Brother que ficaram inacessíveis durante a sessão (172.16.0.222 e
+   172.16.0.80 — offline no momento, tentar de novo).
+6. A Brother DCP-1610NW (172.16.0.85) caiu da rede durante a sessão (Wi-Fi desassociado) — usuário
+   tentou reconectar pelo painel físico, resultado não confirmado ainda.
+
 4ª impressora cadastrada em 2026-08-31 (id `0405c80b-cb9a-4325-a9e3-decf1cdb1499`, community
 `public` ainda não confirmada por SNMP nesta unidade especificamente — as outras 3 já foram
 confirmadas na subtarefa 5). MAC obtido direto da aba Network Status da própria WBM (não confiar
