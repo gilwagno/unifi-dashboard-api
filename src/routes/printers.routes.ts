@@ -1,28 +1,40 @@
-import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { env } from '../config/env.js';
 import { macAddressSchema } from '../validators/mac.js';
-import { unifiService } from '../services/unifi.service.js';
-import { unifiClassicService, type ClassicClientNetworkInfo } from '../services/unifi-classic.service.js';
+import { unifiClassicService } from '../services/unifi-classic.service.js';
 import {
-  createPrintersRepository,
   toPublic,
   type CreatePrinterInput,
-  type PrinterPublic,
   type SnmpSecretInput,
   type UpdatePrinterInput,
 } from '../db/printers.db.js';
+import { printersRepository } from '../db/printers.instance.js';
+import { buildNetworkStatusResolver, withNetworkStatus } from '../services/printer-network-status.service.js';
+// Import com efeito colateral: carregar o módulo do poller SNMP inicia o
+// `setInterval` de coleta de consumíveis (mesmo padrão de
+// bandwidth-history.service.ts, que sobe junto com bandwidth.routes.ts). O
+// timer é unref()'d e não faz coleta imediata no boot, então isso não
+// atrasa a subida do app nem segura o processo/os testes.
+import '../services/printer-snmp.service.js';
 
 // Cadastro (nome, MAC, segredo SNMP, política de manutenção) do módulo de
 // manutenção de impressoras — primeira rota do projeto com persistência em
 // disco (ver src/db/printers.db.ts). Esta subtarefa é só schema + CRUD:
 // merge com status do UniFi, poller SNMP de verdade, etc. ficam para as
 // subtarefas seguintes da Onda 2 (ver CLAUDE.md).
-// Exportado só para os testes de integração conseguirem fechar a conexão
-// antes de apagar o diretório temporário do banco (no Windows, apagar um
-// arquivo com um handle SQLite ainda aberto falha com EPERM). Nenhuma rota
-// deste arquivo usa o export — sempre usam a const local.
-export const printersRepository = createPrintersRepository(env.PRINTERS_DB_FILE);
+// Reexportado (a instância vive em src/db/printers.instance.ts) para os
+// testes de integração conseguirem fechar a conexão antes de apagar o
+// diretório temporário do banco (no Windows, apagar um arquivo com um
+// handle SQLite ainda aberto falha com EPERM).
+export { printersRepository };
+// Reexportados daqui por compatibilidade — a implementação do merge com o
+// status do UniFi mora em src/services/printer-network-status.service.ts
+// desde a subtarefa 5 (ver o comentário de topo daquele arquivo).
+export type {
+  PrinterNetworkStatus,
+  PrinterWithNetworkStatus,
+} from '../services/printer-network-status.service.js';
 
 const idParam = z.object({ id: z.string().min(1) });
 
@@ -119,119 +131,6 @@ function toSnmpSecretInput(snmp: z.infer<typeof snmpSchema>): SnmpSecretInput {
   return snmp.version === 'v3' ? { v3Auth: snmp.v3Auth! } : { community: snmp.community! };
 }
 
-// --- Merge com status ao vivo do UniFi (Onda 2, subtarefa 2) ---
-//
-// Sinal de REDE apenas (a impressora está associada ao controller agora,
-// com qual IP e por qual meio) — não confundir com o sinal de SNMP (a
-// impressora responde a SNMP), que é de uma subtarefa futura da Onda 2 e
-// não é implementado aqui (achado 5 do CLAUDE.md: são dois sinais de saúde
-// distintos, nunca conflacados).
-//
-// Achado crítico documentado em docs/printers-snmp-research.md: das 3
-// impressoras reais da rede, só UMA aparece na Integration API oficial
-// (unifiService.listClients()) — as outras 2 só aparecem via API clássica
-// (rest/user, via unifiClassicService.getKnownClientsNetworkInfo()). Por
-// isso o merge tenta a Integration API primeiro e cai pra API clássica
-// quando o MAC não é encontrado lá — nunca confia só na Integration API.
-export interface PrinterNetworkStatus {
-  source: 'integration' | 'classic' | 'unknown';
-  online: boolean | null;
-  ipAddress: string | null;
-  connectionType: 'WIRED' | 'WIRELESS' | null;
-}
-
-const UNKNOWN_NETWORK_STATUS: PrinterNetworkStatus = {
-  source: 'unknown',
-  online: null,
-  ipAddress: null,
-  connectionType: null,
-};
-
-export type PrinterWithNetworkStatus = PrinterPublic & { network: PrinterNetworkStatus };
-
-// Cria um resolvedor de status por MAC, buscando as duas fontes UMA vez só
-// (nunca por impressora) — mesmo padrão de `GET /clients` em
-// clients.routes.ts, que busca a lista de clientes uma vez e cruza
-// localmente. Usado tanto por GET /printers (N impressoras) quanto por
-// GET /printers/:id (uma só, mas o mesmo código evita duplicar a lógica de
-// merge em dois lugares).
-//
-// As duas fontes são ENRIQUECIMENTO de um cadastro que vive em SQLite
-// local: se o controller estiver fora do ar (ou as credenciais clássicas
-// inválidas), o cadastro em si — nome, MAC, versão de SNMP, política de
-// manutenção — continua perfeitamente legível. Por isso a falha de
-// qualquer uma das fontes é degradada pra "não sabemos" (o mesmo
-// `source: 'unknown'` de quando o MAC não é encontrado) em vez de derrubar
-// a resposta inteira: um `GET /printers` virar 502/503 só porque o UniFi
-// está indisponível seria o mesmo retrocesso que a guarda de
-// `isConfigured()` abaixo já evita pro caso "API clássica não
-// configurada". O erro é logado como warn (nunca engolido em silêncio).
-async function buildNetworkStatusResolver(log: FastifyBaseLogger): Promise<(mac: string) => PrinterNetworkStatus> {
-  async function tryFetch<T>(source: string, fetchSource: () => Promise<T>): Promise<T | null> {
-    try {
-      return await fetchSource();
-    } catch (error) {
-      log.warn(
-        { err: error, source },
-        `Não foi possível obter o status de rede das impressoras via ${source} — degradando para "desconhecido"`,
-      );
-      return null;
-    }
-  }
-
-  const [integrationResult, classicNetworkInfo] = await Promise.all([
-    tryFetch('Integration API', () => unifiService.listClients()),
-    unifiClassicService.isConfigured()
-      ? tryFetch('API clássica', () => unifiClassicService.getKnownClientsNetworkInfo())
-      : Promise.resolve(null as Map<string, ClassicClientNetworkInfo> | null),
-  ]);
-
-  // A Integration API (`GET /sites/{id}/clients`) só lista clientes
-  // CONECTADOS agora — presença nesta lista já significa "online". Quando
-  // a chamada falhou, `integrationResult` é null e o Map fica vazio: nada
-  // é dado como online (nunca afirma `false`, só cai pro fallback).
-  const integrationByMac = new Map(
-    (integrationResult?.data ?? []).map((client) => [client.macAddress.toLowerCase(), client]),
-  );
-
-  return (mac: string): PrinterNetworkStatus => {
-    const integrationClient = integrationByMac.get(mac);
-    if (integrationClient) {
-      return {
-        source: 'integration',
-        online: true,
-        ipAddress: integrationClient.ipAddress ?? null,
-        connectionType: integrationClient.type,
-      };
-    }
-
-    const classicInfo = classicNetworkInfo?.get(mac);
-    if (classicInfo) {
-      return {
-        source: 'classic',
-        // /rest/user (API clássica) é o registro de clientes CONHECIDOS
-        // pelo controller, não a lista de conectados agora (essa é
-        // /stat/sta) — por isso não dá pra afirmar online/offline a partir
-        // daqui, só o último IP/tipo de conexão conhecidos. `null` aqui é
-        // "não sabemos", propositalmente distinto de `false` ("sabemos que
-        // está offline").
-        online: null,
-        ipAddress: classicInfo.ipAddress,
-        connectionType: classicInfo.connectionType,
-      };
-    }
-
-    // Não encontrada em nenhuma das duas fontes (API clássica não
-    // configurada, uma das fontes indisponível, ou o MAC realmente não é
-    // conhecido pelo controller) — não é um erro: a impressora pode estar
-    // desligada há muito tempo ou o MAC pode estar errado no cadastro.
-    return UNKNOWN_NETWORK_STATUS;
-  };
-}
-
-function withNetworkStatus(printer: PrinterPublic, resolveNetwork: (mac: string) => PrinterNetworkStatus): PrinterWithNetworkStatus {
-  return { ...printer, network: resolveNetwork(printer.mac) };
-}
 
 export default async function printersRoutes(app: FastifyInstance) {
   app.addHook('preHandler', app.authenticate);

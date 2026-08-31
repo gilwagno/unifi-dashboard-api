@@ -99,6 +99,60 @@ sem teste):
 | `hrPrinterDetectedErrorState` | `1.3.6.1.2.1.25.3.5.1.2` | bitmap de erros ativos (RFC 2790) |
 | `hrDeviceStatus` | `1.3.6.1.2.1.25.3.2.1.5` | status geral do dispositivo (RFC 2790) |
 
+## CONFIRMAÇÃO EMPÍRICA contra as 3 impressoras reais (2026-08-31, subtarefa 5)
+
+Sonda SNMP descartável executada da máquina do dashboard contra os 3 IPs, com `net-snmp` 3.26.3,
+`community="public"`, timeout 2,5s, retries 1, em SNMP v1 e v2c. **As 3 responderam.** O que segue
+substitui a tabela "rascunho, a confirmar" acima como fonte de verdade.
+
+### Identificação real (via `sysDescr` / `hrDeviceDescr.1`)
+
+| Cadastro | `sysDescr` | Modelo real (`hrDeviceDescr.1`) |
+|---|---|---|
+| HPLaserMFP135w (`172.16.0.89`) | `HP Laser MFP 131 133 135-138; V3.82.01.10 DEC-09-2019; Engine V1.00.11; NIC 31.03.60_0.1; S/N BRBSQ2G13Q` | `HP Laser MFP 131 133 135-138` |
+| HLL2360DWVENDAS (`172.16.0.222`) | `Brother NC-8300w, Firmware Ver.Z ,MID 84U-F77` | `Brother HL-L2360D series` |
+| BRW849E567E0445 (`172.16.0.80`) | `Brother NC-9200w, Firmware Ver.1.46 ,MID 8CE-922FID 2` | **`Brother DCP-L3560CDW series`** |
+
+**O modelo antes desconhecido está identificado:** a `BRW849E567E0445` é uma **Brother
+DCP-L3560CDW**, multifuncional **colorida** — não uma mono como as outras duas. Ela expõe 10 linhas
+na `prtMarkerSuppliesTable` (4 toners CMYK, waste toner box, belt unit, 4 drums), contra 2 da
+HL-L2360D e 6 da HP.
+
+### OIDs confirmados (todos os 7 da tabela de rascunho responderam nas 3)
+
+Todos os OIDs listados na seção anterior existem e respondem nas 3 impressoras. Índices reais:
+`prtMarkerSuppliesTable` usa `<hrDeviceIndex>.<supplyIndex>` = `1.1`, `1.2`, … ;
+`prtMarkerLifeCount` responde em `1.3.6.1.2.1.43.10.2.1.4.1.1` (linha única nas 3);
+`hrDeviceStatus`/`hrPrinterDetectedErrorState` respondem no índice `.1` nas 3 (na HP o índice 1 é a
+impressora — os índices 2–7 são CPU, RAM, Wi-Fi, USB, copy service e scanner).
+
+### 3 achados novos que mudam o desenho do poller
+
+1. **`getBulk` não é confiável.** O `walk()`/`subtree()` do `net-snmp` usa GETBULK quando a versão
+   é v2c/v3 — e isso **falha em 2 das 3**: a HP responde `GeneralError` e a DCP-L3560CDW dá
+   timeout, ambas para *qualquer* subárvore. Um walk manual por **GETNEXT** funciona nas 3, em v1
+   **e** em v2c. O poller implementa o walk próprio (`walkColumn()`), não usa o da biblioteca.
+2. **Semântica de "OID não existe" difere entre v1 e v2c.** Em v2c o varbind volta como
+   `noSuchObject` e os demais varbinds do mesmo GET seguem válidos; em **v1 o PDU INTEIRO falha
+   com `NoSuchName`** (RFC 1157) — um único OID não suportado derrubaria todos os outros campos
+   pedidos junto. Por isso o poller busca **um escalar por requisição**.
+3. **A HP reporta nível maior que a capacidade.** Em 3 dos 6 suprimentos (Transfer Roller, Fuser
+   Life, Pick-up Roller) ela devolve `prtMarkerSuppliesLevel = 143066` com
+   `prtMarkerSuppliesMaxCapacity = 100` e unidade `percent(19)` — um valor incoerente do firmware.
+   Calcular percentual ingenuamente daria 143066%; o poller devolve `levelPercent: null` nesses
+   casos.
+
+### Os 3 sentinelas aparecem de verdade (não são hipótese)
+
+- `partial(-3)`: nível de **todos** os toners das duas Brother (`prtMarkerSuppliesLevel`).
+- `unknown(-2)`: `prtMarkerSuppliesMaxCapacity` dos toners das duas Brother.
+- `other(-1)`: não observado nas 3 nesta rodada, mas tratado igual aos outros dois no poller.
+
+Valores reais colhidos (amostra): HP com toner preto em **0%** (`level=0`, `max=100`,
+unidade percent) e 59.700 páginas; HL-L2360D com drum em 69% (8278/12000) e 52.994 páginas;
+DCP-L3560CDW com `hrDeviceStatus = 3 (warning)` e `hrPrinterDetectedErrorState = 0x20`, que decodifica
+para **`lowToner`** — coerente com os 4 toners em `partial(-3)`.
+
 ## Consequência prática pro plano da Onda 2
 
 1. Subtarefa 2 (merge com status UniFi) precisa de fallback pra API clássica — 2 das 3
