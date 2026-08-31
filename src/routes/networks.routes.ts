@@ -49,7 +49,7 @@ function intToIpv4(n: number): string {
 // broadcast. Genérico pra qualquer CIDR — não hardcoda nenhuma sub-rede
 // específica. Em sub-redes muito pequenas (prefixLength alto), o range
 // colapsa pro menor intervalo válido em vez de ficar invertido.
-function computeDhcpRange(hostIpAddress: string, prefixLength: number): { start: string; stop: string } {
+export function computeDhcpRange(hostIpAddress: string, prefixLength: number): { start: string; stop: string } {
   const hostInt = ipv4ToInt(hostIpAddress);
   const mask = prefixLength === 0 ? 0 : (0xffffffff << (32 - prefixLength)) >>> 0;
   const network = (hostInt & mask) >>> 0;
@@ -63,7 +63,17 @@ function computeDhcpRange(hostIpAddress: string, prefixLength: number): { start:
     stop = start;
   }
   // Evita que o range comece exatamente no IP do gateway/host informado.
-  if (start === hostInt && start < stop) start += 1;
+  // Compara contra `broadcast` (o limite real da sub-rede) em vez de
+  // `stop`: no caminho de colapso acima (sub-redes pequenas, ex: /30),
+  // `start` e `stop` já são iguais nesse ponto, então uma comparação
+  // `start < stop` nunca é verdadeira e o range acabava ficando igual ao
+  // IP do gateway (ex: hostIpAddress=X+1 numa /30 colapsava pro mesmo
+  // X+1). Usando `broadcast` como limite, ainda há espaço pra avançar
+  // pro próximo IP livre da sub-rede nesses casos.
+  if (start === hostInt && start < broadcast) {
+    start += 1;
+    if (stop < start) stop = start;
+  }
 
   return { start: intToIpv4(start), stop: intToIpv4(stop) };
 }
