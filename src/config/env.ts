@@ -48,6 +48,12 @@ const envSchema = z.object({
   // src/db/bandwidth-history.db.ts). Banco PRÓPRIO, separado de
   // PRINTERS_DB_FILE (domínios diferentes, sem relação um com o outro).
   BANDWIDTH_HISTORY_DB_FILE: z.string().min(1).default('./bandwidth-history.db'),
+
+  // Arquivo onde o log de auditoria de ações do dashboard (quem bloqueou
+  // um cliente, reiniciou um device, rotacionou a senha SSH, etc.) é
+  // persistido (append-only, uma linha JSON por entrada). Ver
+  // src/services/audit-log.service.ts.
+  AUDIT_LOG_FILE: z.string().min(1).default('./audit.log'),
 });
 
 const parsed = envSchema.safeParse(process.env);
