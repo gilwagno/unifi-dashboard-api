@@ -60,6 +60,22 @@ que mexa em SNMP/poller.
 Regra de alocação de modelo: CRUD/merge simples = Sonnet nos dois papéis (diversidade). Qualquer
 coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel do par em Opus.
 
+### Progresso da Onda 2
+
+1. ✅ Schema + persistência + CRUD — **47/50**. PR #5 (`feat/printers-registry`, aberta). Achado:
+   MAC duplicado/caixa-alta era aceito, corrigido com índice único + normalização.
+2. ✅ Merge com status UniFi (fallback API clássica) — **47/50**. Mesma PR #5 (commit seguinte).
+   Achado: os 2 casos de degradação graciosa por falha de API (Integration/classic fora do ar)
+   já estavam corretos no código mas sem teste permanente — corrigido. Nota: o crítico original
+   (Opus) bateu no rate limit de sessão a meio da avaliação; foi retomado diretamente a partir da
+   sonda de investigação que ele já tinha rodado (4 casos, nenhum bug real encontrado).
+3. ⏳ PRÓXIMO: `POST /printers/:id/reconnect` — reaproveita block+unblock já existente.
+
+**Restrição atual**: Opus bateu no limite de sessão (resetava ~12:10 America/Sao_Paulo no momento
+do achado). Subtarefas que exigem Opus (segredo SNMP, poller, spike de reboot) podem precisar
+esperar o reset ou usar outra combinação de modelo — checar com o usuário antes de prosseguir pra
+essas.
+
 ## Onda 1 (fechamento de cobertura de testes) — CONCLUÍDA — 4 PRs revisadas e mergeadas em 2026-08-31
 
 Todas as 4 subtarefas de código do Gauntlet Loop foram aprovadas (47/50 cada), revisadas
