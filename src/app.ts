@@ -12,6 +12,7 @@ import devicesRoutes from './routes/devices.routes.js';
 import eventsRoutes from './routes/events.routes.js';
 import healthRoutes from './routes/health.routes.js';
 import networksRoutes from './routes/networks.routes.js';
+import printersRoutes from './routes/printers.routes.js';
 import securityRoutes from './routes/security.routes.js';
 import sitesRoutes from './routes/sites.routes.js';
 import sshRoutes from './routes/ssh.routes.js';
@@ -77,6 +78,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(healthRoutes);
   await app.register(bandwidthRoutes);
   await app.register(sshRoutes);
+  await app.register(printersRoutes);
 
   app.get('/health', async () => ({ status: 'ok' }));
 

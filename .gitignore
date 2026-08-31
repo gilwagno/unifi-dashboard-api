@@ -3,6 +3,13 @@ dist/
 .env
 *.log
 
+# Banco SQLite do módulo de impressoras (dev local e arquivos temporários
+# de teste — ver src/db/printers.db.ts / PRINTERS_DB_FILE)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
 # Playwright (e2e)
 test-results/
 playwright-report/

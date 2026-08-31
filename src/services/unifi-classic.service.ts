@@ -134,6 +134,20 @@ async function classicFetch<T>(path: string, init: RequestInit = {}): Promise<T>
 interface ClassicClient {
   mac: string;
   blocked?: boolean;
+  // Campos usados pelo merge de status de rede do módulo de impressoras
+  // (ver src/routes/printers.routes.ts): `is_wired` distingue cabeado/
+  // sem-fio, `use_fixedip`/`fixed_ip` são o IP fixo (reserva de DHCP, mesmo
+  // conceito de setClientFixedIp abaixo) e `last_ip` é o último IP dinâmico
+  // observado quando o cliente NÃO usa IP fixo. Nenhum desses é a fonte de
+  // verdade sobre o cliente estar online agora — /rest/user é o registro de
+  // clientes CONHECIDOS pelo controller (histórico), não a lista de
+  // conectados agora (essa é /stat/sta, usada em fetchClientSignalStrength/
+  // fetchDeviceHealth acima). Por isso o merge de impressoras nunca deriva
+  // "online" a partir daqui.
+  is_wired?: boolean;
+  use_fixedip?: boolean;
+  fixed_ip?: string;
+  last_ip?: string;
   [key: string]: unknown;
 }
 
@@ -167,6 +181,42 @@ async function assertKnownClient(mac: string, site: string, knownClients?: Class
   const clients = knownClients ?? (await fetchKnownClients(site));
   const isKnown = clients.some((client) => client.mac.toLowerCase() === mac.toLowerCase());
   if (!isKnown) throw new UnknownClientError(mac);
+}
+
+// --- Merge de status de rede do módulo de impressoras (Onda 2, subtarefa 2) ---
+//
+// Reaproveita fetchKnownClients (mesma função já usada por getBlockedMacs)
+// em vez de duplicar a lógica de fetch/login — só reprocessa o array cru de
+// /rest/user num formato mais útil pro merge: um Map por MAC (minúsculo,
+// mesma normalização usada no cadastro de impressoras) com IP e tipo de
+// conexão. Uma chamada só, reaproveitada por todas as impressoras da
+// listagem em GET /printers — igual ao padrão de getBlockedMacs em
+// clients.routes.ts, que também busca uma vez e cruza localmente.
+export interface ClassicClientNetworkInfo {
+  ipAddress: string | null;
+  connectionType: 'WIRED' | 'WIRELESS' | null;
+}
+
+function toNetworkInfo(client: ClassicClient): ClassicClientNetworkInfo {
+  // Prioriza o IP fixo quando ligado (é o IP que o cliente de fato tem
+  // enquanto use_fixedip estiver ativo) — senão cai pro último IP dinâmico
+  // conhecido. Nenhum dos dois garante que o IP ainda está em uso agora
+  // (ver nota em ClassicClient acima sobre `/rest/user` não ser a lista de
+  // conectados).
+  const ip = client.use_fixedip ? client.fixed_ip : client.last_ip;
+  return {
+    ipAddress: typeof ip === 'string' && ip.length > 0 ? ip : null,
+    connectionType: typeof client.is_wired === 'boolean' ? (client.is_wired ? 'WIRED' : 'WIRELESS') : null,
+  };
+}
+
+async function fetchKnownClientsNetworkInfo(site: string): Promise<Map<string, ClassicClientNetworkInfo>> {
+  const clients = await fetchKnownClients(site);
+  const info = new Map<string, ClassicClientNetworkInfo>();
+  for (const client of clients) {
+    info.set(client.mac.toLowerCase(), toNetworkInfo(client));
+  }
+  return info;
 }
 
 async function findClientByMac(mac: string, site: string): Promise<ClassicClient> {
@@ -611,6 +661,12 @@ export const unifiClassicService = {
   blockClient: (mac: string, site = env.UNIFI_CONTROLLER_SITE) => setBlockedState(mac, site, 'block-sta'),
 
   unblockClient: (mac: string, site = env.UNIFI_CONTROLLER_SITE) => setBlockedState(mac, site, 'unblock-sta'),
+
+  // Usada pelo merge de status de rede do módulo de impressoras
+  // (src/routes/printers.routes.ts) como fallback quando o MAC não aparece
+  // na Integration API — ver `fetchKnownClientsNetworkInfo` acima.
+  getKnownClientsNetworkInfo: (site = env.UNIFI_CONTROLLER_SITE): Promise<Map<string, ClassicClientNetworkInfo>> =>
+    fetchKnownClientsNetworkInfo(site),
 
   getBlockedMacs: async (site = env.UNIFI_CONTROLLER_SITE): Promise<Set<string>> => {
     const clients = await fetchKnownClients(site);
