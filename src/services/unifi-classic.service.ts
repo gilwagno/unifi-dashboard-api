@@ -254,6 +254,27 @@ async function setFixedIp(
   });
 }
 
+// "Apelido" do cliente, exibido no painel do UniFi — campo `name` do
+// registro em /rest/user. Não confundir com `hostname`, que é anunciado
+// pelo próprio dispositivo via DHCP/mDNS e não é editável por aqui (isso é
+// escopo de outra subtarefa, específica por fabricante). Mesmo padrão de
+// setFixedIp acima: busca o cliente por MAC pra pegar o `_id` e faz um PUT
+// parcial só com o campo que muda — confirmado contra um controller real
+// que /rest/user/{id} aceita atualização parcial (diferente do PUT de SSH
+// em /set/setting/mgmt/{id}, que exige o objeto completo).
+async function setAlias(mac: string, site: string, alias: string): Promise<ClassicResponse<unknown[]>> {
+  const client = await findClientByMac(mac, site);
+  const clientId = client._id as string | undefined;
+  if (!clientId) {
+    throw new UniFiClassicApiError(502, `Registro do cliente ${mac} não tem campo _id — resposta inesperada do controller`);
+  }
+
+  return classicFetch<ClassicResponse<unknown[]>>(`/proxy/network/api/s/${site}/rest/user/${clientId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ name: alias }),
+  });
+}
+
 async function setBlockedState(
   mac: string,
   site: string,
@@ -688,6 +709,8 @@ export const unifiClassicService = {
     opts: { enabled: boolean; ip?: string; networkId?: string },
     site = env.UNIFI_CONTROLLER_SITE,
   ) => setFixedIp(mac, site, opts),
+
+  setClientAlias: (mac: string, alias: string, site = env.UNIFI_CONTROLLER_SITE) => setAlias(mac, site, alias),
 
   getDeviceHealth: (site = env.UNIFI_CONTROLLER_SITE) => fetchDeviceHealth(site),
 

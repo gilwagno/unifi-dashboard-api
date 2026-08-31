@@ -14,6 +14,7 @@ vi.mock('../../src/services/unifi-classic.service.js', () => ({
     blockClient: vi.fn(async () => undefined),
     unblockClient: vi.fn(async () => undefined),
     setClientFixedIp: vi.fn(async () => undefined),
+    setClientAlias: vi.fn(async () => undefined),
   },
   UniFiClassicApiError: class UniFiClassicApiError extends Error {
     constructor(
@@ -37,6 +38,8 @@ beforeEach(() => {
   vi.mocked(unifiClassicService.getBlockedMacs).mockClear();
   vi.mocked(unifiClassicService.blockClient).mockClear();
   vi.mocked(unifiClassicService.unblockClient).mockClear();
+  vi.mocked(unifiClassicService.setClientFixedIp).mockClear();
+  vi.mocked(unifiClassicService.setClientAlias).mockClear();
 });
 
 async function authedApp() {
@@ -334,6 +337,137 @@ describe('PATCH /clients/:mac/fixed-ip', () => {
       method: 'PATCH',
       url: '/clients/aa:bb:cc:dd:ee:ff/fixed-ip',
       payload: { enabled: false },
+    });
+
+    expect(res.statusCode).toBe(401);
+
+    await app.close();
+  });
+});
+
+describe('PATCH /clients/:mac/alias', () => {
+  it('renomeia o apelido do cliente', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/alias',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { alias: 'Impressora Recepção' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+    expect(unifiClassicService.setClientAlias).toHaveBeenCalledWith('aa:bb:cc:dd:ee:ff', 'Impressora Recepção');
+
+    await app.close();
+  });
+
+  it('retorna 404 quando o MAC não é conhecido pelo controller', async () => {
+    const { app, token } = await authedApp();
+    vi.mocked(unifiClassicService.setClientAlias).mockRejectedValueOnce(
+      new UniFiClassicApiError(404, 'Cliente ff:ff:ff:ff:ff:ff não é conhecido pelo controller'),
+    );
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/ff:ff:ff:ff:ff:ff/alias',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { alias: 'Novo apelido' },
+    });
+
+    expect(res.statusCode).toBe(404);
+
+    await app.close();
+  });
+
+  it('retorna 503 quando a API clássica não está configurada', async () => {
+    const { app, token } = await authedApp();
+    vi.mocked(unifiClassicService.setClientAlias).mockRejectedValueOnce(new ClassicApiNotConfiguredError());
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/alias',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { alias: 'Novo apelido' },
+    });
+
+    expect(res.statusCode).toBe(503);
+
+    await app.close();
+  });
+
+  it('rejeita alias vazio', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/alias',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { alias: '' },
+    });
+
+    expect(res.statusCode).toBe(400);
+
+    await app.close();
+  });
+
+  it('rejeita alias só com espaços (o trim roda antes do min(1))', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/alias',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { alias: '   ' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(unifiClassicService.setClientAlias).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it('repassa o alias já sem os espaços das pontas pro controller', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/alias',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { alias: '  Impressora Recepção  ' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    // O apelido é exibido no painel do UniFi — espaço nas pontas iria junto
+    // se o trim não fosse aplicado ao valor repassado, não só à validação.
+    expect(unifiClassicService.setClientAlias).toHaveBeenCalledWith('aa:bb:cc:dd:ee:ff', 'Impressora Recepção');
+
+    await app.close();
+  });
+
+  it('rejeita alias maior que 128 caracteres', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/alias',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { alias: 'a'.repeat(129) },
+    });
+
+    expect(res.statusCode).toBe(400);
+
+    await app.close();
+  });
+
+  it('retorna 401 sem token', async () => {
+    const app = await buildApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/alias',
+      payload: { alias: 'Novo apelido' },
     });
 
     expect(res.statusCode).toBe(401);

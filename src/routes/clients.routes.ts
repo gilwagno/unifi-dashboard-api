@@ -26,6 +26,13 @@ const fixedIpBody = z
     }
   });
 
+// Apelido do cliente (campo `name` em /rest/user, ver unifi-classic.service.ts)
+// — mesmo limite de tamanho usado pro `name` de outros cadastros do projeto
+// (ex.: networks.routes.ts, printers.routes.ts).
+const aliasBody = z.object({
+  alias: z.string().trim().min(1, 'alias é obrigatório').max(128, 'alias deve ter no máximo 128 caracteres'),
+});
+
 const listClientsQuery = z
   .object({
     siteId: z.string().min(1).optional(),
@@ -98,6 +105,21 @@ export default async function clientsRoutes(app: FastifyInstance) {
       const { mac } = macParamSchema.parse(request.params);
       const { enabled, ip, networkId } = fixedIpBody.parse(request.body);
       await unifiClassicService.setClientFixedIp(mac, { enabled, ip, networkId });
+      return reply.send({ ok: true });
+    },
+  );
+
+  // Apelido ("Apelido") do cliente exibido no painel do UniFi — rota
+  // genérica, reaproveitável em qualquer tela (não específica de
+  // impressora). Não confundir com o hostname anunciado pelo próprio
+  // dispositivo (não editável por aqui).
+  app.patch(
+    '/clients/:mac/alias',
+    { config: { rateLimit: { max: env.RATE_LIMIT_CLIENT_ACTION_MAX, timeWindow: env.RATE_LIMIT_WINDOW } } },
+    async (request, reply) => {
+      const { mac } = macParamSchema.parse(request.params);
+      const { alias } = aliasBody.parse(request.body);
+      await unifiClassicService.setClientAlias(mac, alias);
       return reply.send({ ok: true });
     },
   );
