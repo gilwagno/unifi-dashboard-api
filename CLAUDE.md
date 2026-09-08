@@ -205,7 +205,8 @@ iPhone, um Watch e um Redmi antes).
     credencial mestra sem leitura possível). Usuário decidiu explicitamente não trocar a senha via
     automação — item considerado concluído/encerrado como está, não uma pendência. Não redescobrir
     nem reabrir sem pedido explícito novo.
-12. Histórico (opcional, só depois do essencial sólido).
+12. ✅ Histórico de leituras SNMP — **47/50**. Implementado em 2026-09-08 (decisão do usuário de
+    retomar o item opcional). Branch `feat/printers-snmp-history`, PR a abrir.
 13. ✅ Frontend `Printers.tsx` — nova aba "Manutenção" no menu lateral. PR #10, **já mergeada em
     2026-08-31** (fazia parte do "Marco: subtarefas 1-8" no topo deste arquivo — esta linha
     numerada estava sem o status marcado; corrigido em 2026-09-08).
@@ -337,6 +338,30 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
     `command` do webServer antes do `tsx src/server.ts`. Suíte e2e: 5/5, rodada 2x seguidas sem
     flake (mais 4x durante a investigação do crítico). Backend: 281/281. `printers.db` real
     confirmado intacto (mtime inalterado) antes e depois de 6 execuções da suíte.
+15. ✅ Histórico de leituras SNMP (item 12, opcional — retomado por decisão do usuário em
+    2026-09-08, depois da onda já fechada) — **47/50**. Branch `feat/printers-snmp-history`, PR a
+    abrir. Nova tabela `printer_snmp_history` (mesmo banco `printers.db`, sem domínio próprio —
+    dado da mesma entidade, ao contrário do histórico de banda). O poller de 15 min já existente
+    (subtarefa 5) passa a gravar cada leitura bem-sucedida (contador de páginas + suprimentos),
+    além de manter `lastReadings` em memória sem mudança nenhuma. Retenção: 90 dias, descarte direto
+    por idade (sem rollup — diferente do histórico de banda, aqui não há "balde parcial" pra
+    perder). Novo `GET /printers/:id/history` (filtros `from`/`to`, canonicalizados pra UTC antes de
+    comparar no SQLite — mesmo cuidado de fuso já aprendido na subtarefa anterior). **Achado sério
+    do crítico (corrigido): o próprio ajuste de mock nos testes de rota tinha desarmado um teste de
+    regressão de uma subtarefa anterior** — ao compartilhar `pageCountValue` entre rota e serviço, os
+    testes de `/consumables` e `/maintenance` passaram a mockar uma CÓPIA da função em vez de
+    exercitar a de produção; um sentinela SNMP virando `pageCount: 0` (em vez de `null`) ficava
+    verde nos dois arquivos — a mesma classe de "invisibilidade silenciosa" da rodada anterior.
+    Corrigido: os testes voltam a importar a função real via `importOriginal`, só os efeitos
+    colaterais (rede/timer) continuam mockados. Também completou a blindagem de fuso: a
+    canonicalização de `from`/`to` só tinha teste pro caso de offset (`-03:00`), não pro caso de ISO
+    sem milissegundos (que também quebra por comparação lexicográfica) — adicionado. Suíte final:
+    336/336, `tsc` limpo. **Achado não corrigido, documentado, afeta os DOIS módulos de histórico**
+    (banda e SNMP): nenhum dos dois roda a limpeza por retenção uma vez no boot — só agendam o
+    `setInterval` diário. Num processo que reinicia mais de uma vez por dia, a poda nunca executa e
+    as tabelas crescem sem limite (volume ainda seria modesto no cenário real, mas é uma decisão de
+    afinação, não um bug). Fica pra próxima sessão, se o usuário quiser: aplicar nos dois módulos
+    juntos (rodar a limpeza uma vez no import, antes de agendar o timer), não só num.
 
 **Nota sobre rate limit do Opus**: bateu o limite durante a subtarefa 2, voltou a funcionar antes
 da subtarefa 3 terminar. Se acontecer de novo numa subtarefa futura, o padrão que funcionou foi:

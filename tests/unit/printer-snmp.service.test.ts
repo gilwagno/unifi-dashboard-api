@@ -161,9 +161,27 @@ interface FakePrinter {
 
 let registeredPrinters: FakePrinter[] = [];
 
+// Registra cada chamada de gravação de histórico (subtarefa 12), sem
+// persistir de verdade — o repositório em si já tem cobertura própria
+// (tests/unit/printers.db.test.ts). O que este arquivo testa é que o
+// POLLER chama o repositório com os dados certos, no momento certo, e que
+// uma falha nessa escrita não derruba nada.
+const recordSnmpHistoryEntryMock = vi.fn();
+let recordSnmpHistoryEntryShouldThrow = false;
+const deleteSnmpHistoryOlderThanMock = vi.fn(() => 0);
+let deleteSnmpHistoryOlderThanShouldThrow = false;
+
 vi.mock('../../src/db/printers.instance.js', () => ({
   printersRepository: {
     listAll: () => registeredPrinters,
+    recordSnmpHistoryEntry: (...args: unknown[]) => {
+      if (recordSnmpHistoryEntryShouldThrow) throw new Error('falha ao gravar histórico (simulado)');
+      return recordSnmpHistoryEntryMock(...args);
+    },
+    deleteSnmpHistoryOlderThan: (...args: unknown[]) => {
+      if (deleteSnmpHistoryOlderThanShouldThrow) throw new Error('falha ao limpar histórico (simulado)');
+      return deleteSnmpHistoryOlderThanMock(...args);
+    },
   },
 }));
 
@@ -180,9 +198,8 @@ vi.mock('../../src/services/printer-network-status.service.js', () => ({
   }),
 }));
 
-const { collectAllReadings, getLastReading, computeLevelPercent, toMeasurement } = await import(
-  '../../src/services/printer-snmp.service.js'
-);
+const { collectAllReadings, getLastReading, computeLevelPercent, toMeasurement, runSnmpHistoryCleanup } =
+  await import('../../src/services/printer-snmp.service.js');
 
 // --- Dados de referência (colhidos das impressoras reais) ----------------
 
@@ -243,6 +260,10 @@ beforeEach(() => {
   networkIpByMac = {};
   consoleErrors = [];
   consoleWarns = [];
+  recordSnmpHistoryEntryMock.mockClear();
+  recordSnmpHistoryEntryShouldThrow = false;
+  deleteSnmpHistoryOlderThanMock.mockClear();
+  deleteSnmpHistoryOlderThanShouldThrow = false;
   vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
     consoleErrors.push(args.map((a) => (a instanceof Error ? a.stack ?? a.message : String(a))).join(' '));
   });
@@ -565,5 +586,111 @@ describe('poller SNMP — segredo nunca vaza em log', () => {
 
     expect(sessionCalls[0].user).toMatchObject({ name: 'somente-usuario', level: 1 });
     expect(getLastReading('p-v3-noauth')).toBeDefined();
+  });
+});
+
+// --- Histórico de leituras SNMP (Onda 2, subtarefa 12) ---------------------
+
+describe('poller SNMP — persistência do histórico', () => {
+  it('grava no histórico após uma leitura bem-sucedida, com o MESMO collectedAt do buffer em memória', async () => {
+    registeredPrinters = [printer({ id: 'p-hist' })];
+    devices.set('10.0.0.10', { entries: brotherHlEntries(), noSuchOidStyle: 'v2c' });
+
+    await collectAllReadings();
+
+    const reading = getLastReading('p-hist')!;
+    expect(recordSnmpHistoryEntryMock).toHaveBeenCalledTimes(1);
+    expect(recordSnmpHistoryEntryMock).toHaveBeenCalledWith('p-hist', {
+      collectedAt: reading.collectedAt,
+      pageCount: 52994,
+      supplies: [
+        { name: 'Black Toner Cartridge', levelPercent: null },
+        { name: 'Drum Unit', levelPercent: 69 },
+      ],
+      partial: false,
+    });
+  });
+
+  it('pageCount com sentinela vira null no histórico, igual a /consumables (mesma pageCountValue)', async () => {
+    const entries = brotherHlEntries();
+    delete entries[OID.lifeCount]; // -> pageCount 'unsupported'
+    registeredPrinters = [printer({ id: 'p-hist-sentinela' })];
+    devices.set('10.0.0.10', { entries, noSuchOidStyle: 'v2c' });
+
+    await collectAllReadings();
+
+    expect(recordSnmpHistoryEntryMock).toHaveBeenCalledWith(
+      'p-hist-sentinela',
+      expect.objectContaining({ pageCount: null }),
+    );
+  });
+
+  it('impressora nunca lida com sucesso (offline) nunca grava histórico', async () => {
+    registeredPrinters = [printer({ id: 'p-hist-offline' })];
+    devices.set('10.0.0.10', { entries: {}, unreachable: true });
+
+    await collectAllReadings();
+
+    expect(recordSnmpHistoryEntryMock).not.toHaveBeenCalled();
+  });
+
+  it('falha ao gravar histórico NÃO impede getLastReading de funcionar nem derruba o poller', async () => {
+    registeredPrinters = [
+      printer({ id: 'p-hist-falha', mac: 'e8:6f:38:ba:b9:32', ipOverride: '10.0.0.10' }),
+      printer({ id: 'p-hist-ok', mac: 'bb:bb:bb:bb:bb:bb', ipOverride: '10.0.0.11' }),
+    ];
+    devices.set('10.0.0.10', { entries: brotherHlEntries(), noSuchOidStyle: 'v2c' });
+    devices.set('10.0.0.11', { entries: brotherHlEntries(), noSuchOidStyle: 'v2c' });
+    recordSnmpHistoryEntryShouldThrow = true;
+
+    await expect(collectAllReadings()).resolves.toBeUndefined();
+
+    // O buffer em memória (o que /consumables e /diagnostics consultam)
+    // continua funcionando normalmente, para as DUAS impressoras — a falha
+    // de escrita em disco não contamina o resto do ciclo.
+    expect(getLastReading('p-hist-falha')).toBeDefined();
+    expect(getLastReading('p-hist-ok')).toBeDefined();
+    expect(consoleErrors.join('\n')).toContain('falha ao persistir histórico');
+  });
+
+  it('não expõe o segredo SNMP no log de falha de persistência do histórico', async () => {
+    const secret = 'community-do-historico-secreta';
+    registeredPrinters = [printer({ snmpSecret: JSON.stringify({ community: secret }) })];
+    devices.set('10.0.0.10', { entries: brotherHlEntries(), noSuchOidStyle: 'v2c' });
+    recordSnmpHistoryEntryShouldThrow = true;
+
+    await collectAllReadings();
+
+    expect(consoleErrors.join('\n')).not.toContain(secret);
+  });
+});
+
+describe('runSnmpHistoryCleanup — retenção de 90 dias', () => {
+  it('calcula o corte como exatamente now - 90 dias e delega ao repositório', () => {
+    const now = new Date('2026-09-01T00:00:00.000Z');
+    runSnmpHistoryCleanup(now);
+
+    expect(deleteSnmpHistoryOlderThanMock).toHaveBeenCalledTimes(1);
+    expect(deleteSnmpHistoryOlderThanMock).toHaveBeenCalledWith('2026-06-03T00:00:00.000Z');
+  });
+
+  it('a fronteira de 90 dias é exata (não 89 nem 91)', () => {
+    const now = new Date('2026-01-01T12:34:56.789Z');
+    const expectedCutoff = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString();
+
+    runSnmpHistoryCleanup(now);
+
+    expect(deleteSnmpHistoryOlderThanMock).toHaveBeenCalledWith(expectedCutoff);
+    // Ancora a fronteira exata contra um valor cru calculado à mão, não só
+    // contra a mesma fórmula usada pela implementação (que esconderia um
+    // "off by 1 dia" se os dois lados repetissem o mesmo erro).
+    expect(expectedCutoff).toBe('2025-10-03T12:34:56.789Z');
+  });
+
+  it('falha no job não derruba o processo — só loga e devolve na próxima execução', () => {
+    deleteSnmpHistoryOlderThanShouldThrow = true;
+
+    expect(() => runSnmpHistoryCleanup(new Date('2026-09-05T00:00:00.000Z'))).not.toThrow();
+    expect(consoleErrors.join('\n')).toContain('falha no job de limpeza do histórico SNMP');
   });
 });

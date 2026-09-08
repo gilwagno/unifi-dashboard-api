@@ -12,6 +12,14 @@ import { buildNetworkStatusResolver } from './printer-network-status.service.js'
 // ÚLTIMA leitura bem-sucedida por impressora (`getLastReading`), que é o que
 // `GET /printers/:id/consumables` (subtarefa 6) vai expor.
 //
+// Onda 2, subtarefa 12: além do buffer em memória acima, cada leitura
+// bem-sucedida TAMBÉM é persistida em `printer_snmp_history` (ver
+// src/db/printers.db.ts) — a série temporal que o buffer em memória nunca
+// guardou. Ver `persistReadingToHistory` e o job de retenção
+// `runSnmpHistoryCleanup` mais abaixo, ambos modelados em
+// bandwidth-history.service.ts (persistSnapshotToDb / runRollupAndCleanup):
+// falha de escrita isolada por try/catch próprio, nunca derruba o poller.
+//
 // ============================================================================
 // ACHADOS REAIS (sonda executada em 2026-08-31 contra as 3 impressoras da
 // rede — HP Laser MFP 135w 172.16.0.89, Brother HL-L2360D 172.16.0.222,
@@ -54,6 +62,20 @@ const SNMP_RETRIES = 1;
 // devolver OIDs fora de ordem. A impressora com mais suprimentos da rede
 // real tem 10 linhas (DCP-L3560CDW).
 const WALK_MAX_ROWS = 64;
+
+// Retenção do histórico de leituras SNMP (subtarefa 12) — decisão do
+// usuário: 90 dias é uma janela generosa sem custo real de armazenamento,
+// dado o volume baixo (poucas impressoras, uma leitura a cada 15 min).
+// Diferente de bandwidth-history.service.ts, não há rollup/agregação aqui —
+// é descarte direto por idade, então (ao contrário do corte de banda) não
+// precisa ser arredondado para uma fronteira de hora: não existe uma
+// "janela" sendo resumida cujo corte no meio perderia dado, só linhas
+// individuais sendo apagadas por estarem velhas demais.
+const SNMP_HISTORY_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+// Job de limpeza próprio, independente do poller de 15 min — mesmo espírito
+// de rollupTimer em bandwidth-history.service.ts (intervalo bem diferente,
+// propósito diferente, então timer separado).
+const SNMP_HISTORY_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 // --- OIDs (confirmados empiricamente contra as 3 impressoras, ver acima) ---
 const OID = {
@@ -144,6 +166,7 @@ export interface PrinterSnmpReading {
 // --- Buffer em memória (não persiste entre restarts, igual bandwidth-history) ---
 const lastReadings = new Map<string, PrinterSnmpReading>();
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let snmpHistoryCleanupTimer: ReturnType<typeof setInterval> | null = null;
 let collecting = false;
 
 // Última leitura BEM-SUCEDIDA da impressora, ou `undefined` se o poller
@@ -534,6 +557,53 @@ async function readPrinter(record: PrinterRecord, ipAddress: string): Promise<Pr
 
 // --- Ciclo de coleta ---
 
+// `pageCount` de uma leitura como número utilizável — só quando o
+// SnmpMeasurement tem status 'ok'; sentinela/erro/OID não suportado viram
+// `null` (nunca NaN/undefined). Mesma regra usada pela rota
+// (pageCountValue em printers.routes.ts) — reexportada aqui para o
+// histórico usar exatamente a mesma definição em vez de duplicá-la.
+export function pageCountValue(pageCount: SnmpMeasurement): number | null {
+  return pageCount.status === 'ok' ? pageCount.value : null;
+}
+
+// Formata os suprimentos de uma leitura no mesmo shape que
+// `toConsumablesResponse` (printers.routes.ts) já usa para o snapshot atual
+// — nome (com o mesmo fallback `Suprimento <index>`) + levelPercent. O
+// histórico reaproveita esta função para que a série temporal e o snapshot
+// atual nunca divirjam silenciosamente em como nomeiam um suprimento.
+export function suppliesForHistory(supplies: PrinterSupply[]): Array<{ name: string; levelPercent: number | null }> {
+  return supplies.map((supply) => ({
+    name: supply.description ?? supply.typeLabel ?? `Suprimento ${supply.index}`,
+    levelPercent: supply.levelPercent,
+  }));
+}
+
+// Grava a leitura recém-coletada em `printer_snmp_history` — chamada depois
+// que `lastReadings` JÁ foi atualizado (ver collectAllReadings): uma falha
+// aqui não pode desfazer isso nem impedir o próximo ciclo do poller, por
+// isso tem seu próprio try/catch, separado do try/catch da coleta em si.
+// Mesmo padrão de persistSnapshotToDb em bandwidth-history.service.ts.
+function persistReadingToHistory(reading: PrinterSnmpReading): void {
+  try {
+    printersRepository.recordSnmpHistoryEntry(reading.printerId, {
+      collectedAt: reading.collectedAt,
+      pageCount: pageCountValue(reading.pageCount),
+      supplies: suppliesForHistory(reading.supplies),
+      partial: reading.partial,
+    });
+  } catch (err) {
+    // Mesma filosofia de resiliência do resto do arquivo: uma falha de
+    // ESCRITA NO BANCO não pode derrubar `lastReadings` (já atualizado antes
+    // desta chamada) nem o poller de 15 minutos — só esta leitura deixa de
+    // ser persistida em disco (getLastReading continua funcionando normal).
+    console.error(
+      `[printer-snmp] falha ao persistir histórico da impressora ${reading.printerId} em disco ` +
+        '(última leitura em memória segue intacta):',
+      err,
+    );
+  }
+}
+
 // Resolve o IP: `ipOverride` do cadastro tem precedência; senão usa
 // exatamente o mesmo merge de status da subtarefa 2
 // (printer-network-status.service.ts), sem duplicar a lógica.
@@ -568,6 +638,11 @@ export async function collectAllReadings(): Promise<void> {
       try {
         const reading = await readPrinter(printer, ipAddress);
         lastReadings.set(printer.id, reading);
+        // Persistência do histórico (subtarefa 12) SÓ depois que o buffer em
+        // memória já foi atualizado — getLastReading nunca fica bloqueado
+        // nem prejudicado por uma falha de escrita em disco (ver
+        // persistReadingToHistory).
+        persistReadingToHistory(reading);
       } catch (err) {
         // Impressora desligada, IP trocado, firewall bloqueando UDP 161,
         // SNMP desabilitado no equipamento: loga e segue para a PRÓXIMA
@@ -591,6 +666,23 @@ export async function collectAllReadings(): Promise<void> {
   }
 }
 
+// Apaga entradas de `printer_snmp_history` mais antigas que a janela de
+// retenção (90 dias). Recebe `now` como parâmetro (em vez de sempre usar
+// `new Date()`) para ser testável sem depender do timer real — mesmo
+// espírito de runRollupAndCleanup em bandwidth-history.service.ts. Chamável
+// diretamente pelos testes, sem depender de `setInterval`.
+export function runSnmpHistoryCleanup(now: Date = new Date()): void {
+  try {
+    const cutoffIso = new Date(now.getTime() - SNMP_HISTORY_RETENTION_MS).toISOString();
+    printersRepository.deleteSnmpHistoryOlderThan(cutoffIso);
+  } catch (err) {
+    // Mesma filosofia de resiliência do resto do arquivo: uma falha aqui
+    // (banco indisponível, etc.) não pode derrubar o processo — só tenta de
+    // novo na próxima execução do job (1x/dia).
+    console.error('[printer-snmp] falha no job de limpeza do histórico SNMP:', err);
+  }
+}
+
 function startPolling(): void {
   if (pollTimer) return;
   pollTimer = setInterval(() => {
@@ -601,12 +693,22 @@ function startPolling(): void {
   pollTimer.unref?.();
 }
 
+function startSnmpHistoryCleanupJob(): void {
+  if (snmpHistoryCleanupTimer) return;
+  snmpHistoryCleanupTimer = setInterval(() => {
+    runSnmpHistoryCleanup();
+  }, SNMP_HISTORY_CLEANUP_INTERVAL_MS);
+  snmpHistoryCleanupTimer.unref?.();
+}
+
 // Sem coleta imediata no boot (mesma escolha de bandwidth-history): a
 // primeira leitura aparece depois do primeiro intervalo, para não disparar
 // tráfego de rede antes do app terminar de subir.
 startPolling();
+startSnmpHistoryCleanupJob();
 
 export const printerSnmpService = {
   getLastReading,
   collectAllReadings,
+  runSnmpHistoryCleanup,
 };

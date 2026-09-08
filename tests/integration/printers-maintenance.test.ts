@@ -36,13 +36,27 @@ vi.mock('../../src/services/unifi-classic.service.js', () => ({
 
 // A ROTA importa `getLastReading` de printer-snmp.service.js — mock na
 // camada de serviço (nunca a implementação interna da rota), igual ao resto
-// do projeto.
+// do projeto. `pageCountValue` (subtarefa 12) também é importado pela rota
+// diretamente do serviço — precisa estar no mock com o comportamento real
+// (SnmpMeasurement 'ok' -> number, qualquer outro status -> null), senão
+// toMaintenanceResponse quebra em runtime chamando algo `undefined`.
 const getLastReadingMock = vi.fn<(printerId: string) => PrinterSnmpReading | undefined>(() => undefined);
 
-vi.mock('../../src/services/printer-snmp.service.js', () => ({
-  getLastReading: (printerId: string) => getLastReadingMock(printerId),
-  collectAllReadings: vi.fn(async () => undefined),
-}));
+vi.mock('../../src/services/printer-snmp.service.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/services/printer-snmp.service.js')>();
+  return {
+    getLastReading: (printerId: string) => getLastReadingMock(printerId),
+    collectAllReadings: vi.fn(async () => undefined),
+    // Função PURA (não toca rede/banco/timer) — vem do módulo REAL, nunca
+    // reimplementada aqui. Ver o comentário equivalente em
+    // printers-consumables.test.ts: uma cópia no mock faria o teste
+    // 'currentPageCount fica null quando o poller retorna um sentinela'
+    // validar a cópia em vez da produção, deixando passar verde um
+    // `pageCount` sentinela virando `0` — que contaminaria `pagesOverdue`
+    // com "imprimiu 0 páginas" em vez de "contador ilegível".
+    pageCountValue: actual.pageCountValue,
+  };
+});
 
 const tmpDir = mkdtempSync(join(tmpdir(), 'printers-maintenance-test-'));
 process.env.PRINTERS_DB_FILE = join(tmpDir, 'printers.db');
