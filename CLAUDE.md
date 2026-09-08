@@ -181,11 +181,15 @@ iPhone, um Watch e um Redmi antes).
 10. **Spike: otimização (Sleep Time/Auto Power Off da Brother) + reboot HP (ainda pendente,
     Brother já descartado) + trocar hostname real da impressora (achado 9)** — investigação
     dedicada contra as impressoras reais.
-11. **Trocar senha de admin dos painéis web** (WBM Brother + SWS HP) — achado 7. Requer par com
-    Opus (risco alto, credencial mestra sem leitura possível).
+11. ❌ **FECHADO por decisão do usuário (2026-09-08), não será implementado.** Trocar senha de
+    admin dos painéis web (WBM Brother + SWS HP) — achado 7. Requer par com Opus (risco alto,
+    credencial mestra sem leitura possível). Usuário decidiu explicitamente não trocar a senha via
+    automação — item considerado concluído/encerrado como está, não uma pendência. Não redescobrir
+    nem reabrir sem pedido explícito novo.
 12. Histórico (opcional, só depois do essencial sólido).
-13. Frontend `Printers.tsx` — nova aba "Manutenção" no menu lateral (confirmado com o usuário,
-    ver print do Layout.tsx atual), padrão de Security.tsx/Events.tsx. Inclui as 4 impressoras.
+13. ✅ Frontend `Printers.tsx` — nova aba "Manutenção" no menu lateral. PR #10, **já mergeada em
+    2026-08-31** (fazia parte do "Marco: subtarefas 1-8" no topo deste arquivo — esta linha
+    numerada estava sem o status marcado; corrigido em 2026-09-08).
 14. e2e.
 
 Regra de alocação de modelo: CRUD/merge simples = Sonnet nos dois papéis (diversidade). Qualquer
