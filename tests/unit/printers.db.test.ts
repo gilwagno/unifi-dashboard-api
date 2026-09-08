@@ -2,7 +2,20 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createPrintersRepository, toPublic, type PrintersRepository } from '../../src/db/printers.db.js';
+import { createRequire } from 'node:module';
+import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
+import {
+  createPrintersRepository,
+  parseWbmCredentials,
+  toPublic,
+  type PrintersRepository,
+} from '../../src/db/printers.db.js';
+
+// Mesmo motivo documentado em src/db/printers.db.ts: o vitest não resolve
+// `node:sqlite` num import estático.
+const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
+  DatabaseSync: typeof DatabaseSyncType;
+};
 
 // Testes de repositório contra um arquivo SQLite real (não `:memory:`) num
 // diretório temporário criado por teste — diferente do resto do backend
@@ -380,5 +393,159 @@ describe('PrintersRepository — histórico de leituras SNMP', () => {
 
     expect(repo.listSnmpHistory(printerA.id)).toHaveLength(0);
     expect(repo.listSnmpHistory(printerB.id)).toHaveLength(0);
+  });
+});
+
+// --- Credencial do painel web (WBM/SWS) + migração da coluna nova ---
+//
+// A coluna `wbm_credentials` nasceu DEPOIS do `printers.db` real em disco (que
+// já tem as 4 impressoras da fábrica cadastradas). Estes testes provam que
+// abrir um banco antigo não quebra nem perde dado — se a migração falhasse, o
+// primeiro INSERT/UPDATE depois do deploy morreria com "no such column".
+
+// Cria um arquivo SQLite com o schema ANTERIOR (sem `wbm_credentials`) e uma
+// impressora já cadastrada, simulando o banco que existe em produção.
+function legacyDbFileWithOnePrinter(): { dbFile: string; id: string } {
+  tmpDir = mkdtempSync(join(tmpdir(), 'printers-db-legacy-'));
+  const dbFile = join(tmpDir, 'printers.db');
+  const db = new DatabaseSync(dbFile);
+  db.exec(`
+    CREATE TABLE printers (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      mac TEXT NOT NULL,
+      ip_override TEXT,
+      snmp_version TEXT NOT NULL,
+      snmp_secret TEXT NOT NULL,
+      maintenance_interval_days INTEGER,
+      maintenance_interval_pages INTEGER,
+      consumable_low_threshold_pct REAL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+  const id = 'impressora-antiga';
+  db.prepare(
+    `INSERT INTO printers (id, name, mac, ip_override, snmp_version, snmp_secret, created_at, updated_at)
+     VALUES ($id, $name, $mac, $ip, $v, $s, $c, $u)`,
+  ).run({
+    id,
+    name: 'HPLaserMFP135w',
+    mac: '50:81:40:d8:6c:7e',
+    ip: '172.16.0.89',
+    v: 'v2c',
+    s: JSON.stringify({ community: 'segredo-antigo' }),
+    c: '2026-08-31T00:00:00.000Z',
+    u: '2026-08-31T00:00:00.000Z',
+  });
+  db.close();
+  return { dbFile, id };
+}
+
+describe('PrintersRepository — migração da coluna wbm_credentials', () => {
+  it('abre um banco EXISTENTE sem a coluna, preserva o dado e passa a aceitar a credencial', () => {
+    const { dbFile, id } = legacyDbFileWithOnePrinter();
+
+    const repo = createPrintersRepository(dbFile);
+    openRepos.push(repo);
+
+    // Dado antigo intacto (nada de recriar tabela/apagar linha).
+    const existing = repo.getById(id);
+    expect(existing?.name).toBe('HPLaserMFP135w');
+    expect(existing?.snmpSecret).toBe(JSON.stringify({ community: 'segredo-antigo' }));
+    // Registro anterior à coluna: sem credencial, nunca `undefined`.
+    expect(existing?.wbmCredentials).toBeNull();
+
+    // E a coluna nova de fato existe agora: um UPDATE que a menciona
+    // falharia com "no such column" se o ALTER TABLE não tivesse rodado.
+    const updated = repo.update(id, { wbmCredentials: { username: 'admin', password: 'senha-nova' } });
+    expect(updated?.wbmCredentials).toBe(JSON.stringify({ username: 'admin', password: 'senha-nova' }));
+    expect(repo.getById(id)?.wbmCredentials).toBe(JSON.stringify({ username: 'admin', password: 'senha-nova' }));
+
+    // E um INSERT novo também (o INSERT lista a coluna explicitamente).
+    const created = repo.create({ ...baseInput, mac: 'aa:bb:cc:dd:ee:01' });
+    expect(created.wbmCredentials).toBeNull();
+  });
+
+  it('a migração é idempotente: reabrir o mesmo arquivo várias vezes não falha nem apaga dado', () => {
+    const { dbFile, id } = legacyDbFileWithOnePrinter();
+
+    for (let i = 0; i < 3; i += 1) {
+      const repo = createPrintersRepository(dbFile);
+      expect(repo.getById(id)?.name).toBe('HPLaserMFP135w');
+      repo.close();
+    }
+
+    const finalRepo = createPrintersRepository(dbFile);
+    openRepos.push(finalRepo);
+    expect(finalRepo.listAll()).toHaveLength(1);
+  });
+});
+
+describe('PrintersRepository — credencial do painel web', () => {
+  it('grava a credencial no create e NUNCA a devolve em toPublic', () => {
+    const { repo } = newRepo();
+
+    const created = repo.create({ ...baseInput, wbmCredentials: { username: 'admin', password: 'senha-secreta' } });
+    expect(created.wbmCredentials).toBe(JSON.stringify({ username: 'admin', password: 'senha-secreta' }));
+
+    const publico = toPublic(created);
+    expect(publico).not.toHaveProperty('wbmCredentials');
+    expect(JSON.stringify(publico)).not.toContain('senha-secreta');
+    // O segredo SNMP continua fora também (regressão da subtarefa 1).
+    expect(publico).not.toHaveProperty('snmpSecret');
+  });
+
+  it('update sem o campo MANTÉM a credencial; com null APAGA', () => {
+    const { repo } = newRepo();
+    const created = repo.create({ ...baseInput, wbmCredentials: { username: 'admin', password: 'senha-secreta' } });
+
+    const renamed = repo.update(created.id, { name: 'outro nome' });
+    expect(renamed?.wbmCredentials).toBe(JSON.stringify({ username: 'admin', password: 'senha-secreta' }));
+
+    const cleared = repo.update(created.id, { wbmCredentials: null });
+    expect(cleared?.wbmCredentials).toBeNull();
+    expect(repo.getById(created.id)?.wbmCredentials).toBeNull();
+  });
+
+  it('sobrevive a um restart (a credencial é persistida em disco, não em memória)', () => {
+    const { repo, dbFile } = newRepo();
+    const created = repo.create({ ...baseInput, wbmCredentials: { username: 'admin', password: 'senha-secreta' } });
+    repo.close();
+
+    const reopened = createPrintersRepository(dbFile);
+    openRepos.push(reopened);
+    expect(parseWbmCredentials(reopened.getById(created.id)!.wbmCredentials)).toEqual({
+      username: 'admin',
+      password: 'senha-secreta',
+    });
+  });
+});
+
+describe('parseWbmCredentials', () => {
+  it('interpreta o JSON gravado', () => {
+    expect(parseWbmCredentials(JSON.stringify({ username: 'admin', password: 'x' }))).toEqual({
+      username: 'admin',
+      password: 'x',
+    });
+  });
+
+  it('aceita senha VAZIA (padrão de fábrica da HP real)', () => {
+    expect(parseWbmCredentials(JSON.stringify({ username: 'admin', password: '' }))).toEqual({
+      username: 'admin',
+      password: '',
+    });
+  });
+
+  it.each([
+    ['coluna vazia', null],
+    ['string vazia', ''],
+    ['JSON corrompido', '{nao-e-json'],
+    ['sem username', JSON.stringify({ password: 'x' })],
+    ['sem password', JSON.stringify({ username: 'admin' })],
+    ['username vazio', JSON.stringify({ username: '', password: 'x' })],
+    ['tipos errados', JSON.stringify({ username: 1, password: 2 })],
+  ])('degrada para null (%s) em vez de lançar', (_label, raw) => {
+    expect(parseWbmCredentials(raw)).toBeNull();
   });
 });

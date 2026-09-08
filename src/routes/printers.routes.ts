@@ -4,6 +4,7 @@ import { env } from '../config/env.js';
 import { macAddressSchema } from '../validators/mac.js';
 import { unifiClassicService } from '../services/unifi-classic.service.js';
 import {
+  parseWbmCredentials,
   toPublic,
   type CreatePrinterInput,
   type CreateMaintenanceEventInput,
@@ -39,6 +40,16 @@ import {
   AUTO_POWER_OFF_HOURS_TO_INDEX,
   type AutoPowerOffHours,
 } from '../services/printer-brother-wbm.service.js';
+// Reboot remoto via SWS da HP (painel web autenticado) — ESPECÍFICO da
+// família HP, ver o comentário de topo do serviço. Nada disto é compartilhado
+// com a automação Brother acima: são fabricantes, protocolos e classes de
+// erro diferentes.
+import {
+  rebootHpPrinter,
+  PrinterSwsAuthenticationError,
+  PrinterSwsRequestError,
+  PrinterSwsUnreachableError,
+} from '../services/printer-hp-sws.service.js';
 
 // Cadastro (nome, MAC, segredo SNMP, política de manutenção) do módulo de
 // manutenção de impressoras — primeira rota do projeto com persistência em
@@ -123,6 +134,18 @@ const snmpSchema = z
     }
   });
 
+// Credencial de admin do PAINEL WEB (WBM/SWS) — aceita na escrita, NUNCA
+// devolvida em leitura (toPublic remove). Não confundir com o segredo SNMP
+// acima: o SNMP só lê contadores, esta credencial administra o firmware.
+const wbmCredentialsSchema = z.object({
+  username: z.string().min(1).max(64),
+  // `min(0)` implícito de propósito: a HP real do Financeiro está com a senha
+  // de fábrica EM BRANCO (ver docs/printers-snmp-research.md). Exigir
+  // `min(1)` aqui impediria de cadastrar exatamente a impressora que motivou
+  // esta feature. O teto de 128 é só sanidade de tamanho.
+  password: z.string().max(128),
+});
+
 const maintenanceSchema = z.object({
   intervalDays: z.number().int().positive().optional(),
   intervalPages: z.number().int().positive().optional(),
@@ -134,6 +157,7 @@ const createPrinterBody = z.object({
   mac: printerMacSchema,
   ipOverride: z.string().min(1).optional(),
   snmp: snmpSchema,
+  wbmCredentials: wbmCredentialsSchema.optional(),
   maintenance: maintenanceSchema.optional(),
 });
 
@@ -146,6 +170,11 @@ const updatePrinterBody = z.object({
   mac: printerMacSchema.optional(),
   ipOverride: z.string().min(1).nullable().optional(),
   snmp: snmpSchema.optional(),
+  // `.nullable()`: omitir mantém a credencial atual, `null` explícito a
+  // APAGA (ver UpdatePrinterInput em printers.db.ts). Como a credencial nunca
+  // é devolvida em leitura, sem o `null` não haveria como desconfigurá-la
+  // depois de cadastrada.
+  wbmCredentials: wbmCredentialsSchema.nullable().optional(),
   maintenance: maintenanceSchema.optional(),
 });
 
@@ -686,6 +715,7 @@ export default async function printersRoutes(app: FastifyInstance) {
         ipOverride: body.ipOverride ?? null,
         snmpVersion: body.snmp.version,
         snmpSecret: toSnmpSecretInput(body.snmp),
+        wbmCredentials: body.wbmCredentials,
         maintenance: body.maintenance,
       };
       const record = printersRepository.create(input);
@@ -777,6 +807,7 @@ export default async function printersRoutes(app: FastifyInstance) {
         ipOverride: body.ipOverride,
         snmpVersion: body.snmp?.version,
         snmpSecret: body.snmp ? toSnmpSecretInput(body.snmp) : undefined,
+        wbmCredentials: body.wbmCredentials,
         maintenance: body.maintenance,
       };
 
@@ -888,6 +919,114 @@ export default async function printersRoutes(app: FastifyInstance) {
       const target = await resolvePrinterIp(record, request.log);
       const index = AUTO_POWER_OFF_HOURS_TO_INDEX[body.hours as AutoPowerOffHours];
       return handleWbmAction(reply, target, id, request.log, (ip) => setAutoPowerOff(ip, index));
+    },
+  );
+
+  // --- POST /printers/:id/reboot — reboot REAL do equipamento (HP/SWS) ---
+  //
+  // ATENÇÃO: isto REINICIA A IMPRESSORA FÍSICA (firmware), ao contrário de
+  // /reconnect logo acima, que só desassocia/reassocia o cliente no
+  // controller UniFi. Um job em impressão morre. O frontend confirma com o
+  // usuário antes de chamar.
+  //
+  // ESPECÍFICO DA FAMÍLIA HP (SWS) — ver o comentário de topo de
+  // printer-hp-sws.service.ts. Reboot remoto na família Brother foi
+  // investigado e CONFIRMADO INVIÁVEL (a WBM só expõe resets destrutivos, ver
+  // CLAUDE.md, achado 3), então não há rota equivalente para ela: chamar esta
+  // rota apontando para uma Brother resulta em 502 (a WBM não tem /sws/*),
+  // nunca num sucesso enganoso.
+  //
+  // DECISÃO — códigos HTTP (parte segue a mesma lógica já documentada em
+  // handleWbmAction, parte é específica desta rota):
+  //   - credencial do painel web não configurada no cadastro: 409 Conflict.
+  //     Mesmo raciocínio do "sem IP conhecido": nenhuma chamada de rede foi
+  //     tentada, é estado do próprio recurso e a ação corretiva é do
+  //     operador (PATCH /printers/:id com `wbmCredentials`). Um 5xx faria um
+  //     cliente com retry automático insistir num estado que retry nunca
+  //     resolve.
+  //   - sem IP conhecido: 409, idêntico às rotas Brother.
+  //   - PrinterSwsUnreachableError (timeout/rede): 504.
+  //   - PrinterSwsAuthenticationError (a SWS recusou a credencial): 403
+  //     Forbidden. Escolhido em vez de 401 por um motivo concreto, não
+  //     estético: 401 é o status que ESTA API usa para o próprio JWT
+  //     (app.authenticate), e o cliente do frontend trata 401 como "token
+  //     expirado" — ele chama /auth/refresh e REEXECUTA a requisição
+  //     original (ver `request()` em frontend/src/lib/api.ts). Numa rota de
+  //     reboot isso significaria disparar o comando DUAS vezes por causa de
+  //     uma senha de painel errada. 403 comunica "autenticado neste
+  //     dashboard, porém a credencial guardada não foi aceita pelo
+  //     equipamento" sem colidir com o fluxo de sessão. Não é 502 (que
+  //     usamos para "a impressora recusou a requisição" genérico) porque
+  //     aqui a causa é conhecida e acionável: a credencial cadastrada está
+  //     errada.
+  //   - PrinterSwsRequestError (não-2xx, corpo inutilizável, dispositivo que
+  //     não é uma SWS): 502.
+  // Nenhum destes erros é registrado no error handler central de src/app.ts,
+  // pelo mesmo motivo já documentado para os erros da Brother: são
+  // exclusivos desta rota.
+  app.post(
+    '/printers/:id/reboot',
+    { config: { rateLimit: { max: env.RATE_LIMIT_CLIENT_ACTION_MAX, timeWindow: env.RATE_LIMIT_WINDOW } } },
+    async (request, reply) => {
+      const { id } = idParam.parse(request.params);
+      const record = printersRepository.getById(id);
+      if (!record) {
+        return reply.code(404).send({ error: 'Impressora não encontrada' });
+      }
+
+      // Credencial ANTES de resolver o IP: sem ela a ação é impossível, e
+      // resolver o IP custa uma (ou duas) chamadas ao controller UniFi que
+      // seriam desperdiçadas.
+      const credentials = parseWbmCredentials(record.wbmCredentials);
+      if (!credentials) {
+        return reply.code(409).send({
+          error: 'Credencial do painel web não configurada',
+          details:
+            'Configure a credencial do painel web desta impressora (campo wbmCredentials em ' +
+            'PATCH /printers/:id) antes de reiniciar remotamente.',
+        });
+      }
+
+      const target = await resolvePrinterIp(record, request.log);
+      if (!target) {
+        return reply.code(409).send({
+          error: 'IP da impressora desconhecido',
+          details: `Impressora ${id} não tem ipOverride configurado e não foi encontrada pelo controller UniFi.`,
+        });
+      }
+
+      // Mesmo risco de IP histórico já documentado em handleWbmAction, porém
+      // com consequência PIOR: aqui o efeito colateral de acertar o
+      // dispositivo errado é reiniciar um equipamento que ninguém pediu. Não
+      // bloqueamos (as impressoras em DHCP ficariam sem a feature), mas o
+      // aviso é explícito e o alvo real volta na resposta. Note que, na
+      // prática, o passo de identidade (`fetchDeviceIdentity`) já protege
+      // bastante: um dispositivo que não seja uma HP/SWS falha com 502 antes
+      // de qualquer POST de escrita.
+      if (target.origin === 'classic') {
+        request.log.warn(
+          { printerId: id, ipAddress: target.ipAddress, ipOrigin: target.origin },
+          'REBOOT usando IP HISTÓRICO da API clássica (last_ip) — não há garantia de que este IP ainda ' +
+            'pertence a esta impressora. Configure ipOverride no cadastro para ações de escrita confiáveis.',
+        );
+      }
+
+      try {
+        await rebootHpPrinter(target.ipAddress, record.mac, credentials);
+      } catch (error) {
+        if (error instanceof PrinterSwsUnreachableError) {
+          return reply.code(504).send({ error: 'Impressora não respondeu', details: error.message });
+        }
+        if (error instanceof PrinterSwsAuthenticationError) {
+          return reply.code(403).send({ error: 'Credencial do painel web recusada', details: error.message });
+        }
+        if (error instanceof PrinterSwsRequestError) {
+          return reply.code(502).send({ error: 'Painel da impressora recusou a requisição', details: error.message });
+        }
+        throw error;
+      }
+
+      return reply.send({ ok: true, ipAddress: target.ipAddress, ipOrigin: target.origin });
     },
   );
 

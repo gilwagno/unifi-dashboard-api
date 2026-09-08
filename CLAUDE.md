@@ -437,21 +437,35 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
       `Layout` compartilhado seria a forma barata de resolver isso numa subtarefa futura, se pedido.
     Suíte final: frontend 46/46 (8 arquivos), backend 370/370 intacto (não deveria ter sido tocado,
     confirmado), `tsc` limpo nos dois, lint sem warning novo.
-18. 🔍 Payload do reboot HP — **capturado, implementação ainda pendente**. Ver
-    `docs/printers-snmp-research.md`, seção "Payload exato do reboot HP — capturado via DevTools,
-    sessão 2026-09-08 (continuação)". O clique automatizado seguiu bloqueado pelo classificador
-    (mesmo interceptando/abortando a requisição de rede pra nunca reiniciar o equipamento de
-    verdade) — o usuário capturou manualmente via DevTools, sem precisar clicar no botão real.
-    **Achado**: `POST /sws/app/security/general/reboot/RestartSystem.jsp`, parâmetro `pinCode` =
-    o próprio MAC da impressora em maiúsculas (`50:81:40:D8:6C:7E`, já temos esse MAC cadastrado
-    minúsculo — não precisa nem consultar `reboot.json`, dá pra calcular direto). Tem uma
-    confirmação nativa do ExtJS antes (não é `window.confirm`, é modal HTML próprio — o
-    `page.on('dialog')` do Playwright não pega isso). **Bloqueio real pra implementar como endpoint
-    do backend**: o login da SWS criptografa a senha no cliente (AES, `gibberish-aes.pjs`) — não dá
-    pra logar via `fetch` cru do Node como fizemos com a Brother (que não pede login nenhum). Fica
-    pendente decidir entre reimplementar essa criptografia em Node, usar Playwright como dependência
-    de produção (fora do padrão do projeto), ou manter como ação manual sem endpoint. Nenhuma opção
-    escolhida ainda — decisão fica pra quando o usuário quiser retomar.
+18. ✅ Reboot remoto da HP via SWS — **47/50**. Branch `feat/printers-hp-reboot`, PR a abrir —
+    **checkpoint feito, mas NÃO mergeada sozinha**: é a feature de maior risco do projeto até agora
+    (credencial de admin + comando que reinicia equipamento físico real), fica pra revisão explícita
+    do usuário antes de ir pra `master`. Payload capturado via DevTools (usuário, manualmente, sem
+    precisar clicar no botão real) e login programático (`Ext1`/`GibberishAES`, AES-256-CBC formato
+    OpenSSL, `crypto` nativo do Node, sem navegador) confirmados AO VIVO contra a impressora real
+    nesta sessão — ver `docs/printers-snmp-research.md`, seções "Payload exato do reboot HP" e
+    "Login programático — RESOLVIDO". Implementação: campo novo `wbmCredentials` no cadastro
+    (mesmo regime do segredo SNMP — nunca devolvido em leitura), `printer-hp-sws.service.ts`
+    (`fetchDeviceIdentity`/`loginToSws`/`rebootHpPrinter`), `POST /printers/:id/reboot`, botão no
+    frontend com `window.confirm` bem distinto do "Reconectar" (rede) já existente. **Verbo HTTP
+    exato do `RestartSystem.jsp` documentado como SUPOSIÇÃO, não confirmado** — nenhuma chamada real
+    foi feita contra o endpoint de reboot em si durante todo o desenvolvimento/revisão (só o login
+    foi testado ao vivo, antes desta subtarefa formal). **2 achados críticos do crítico, corrigidos:**
+    - Uma comparação frouxa (`!success` em vez de `success !== true`) não tinha teste ancorando — um
+      firmware devolvendo `success` truthy-mas-não-`true` (ex: a string `"false"`) faria o backend
+      achar que o login foi aceito e mandar o reboot mesmo assim, sem autorização real da impressora.
+    - Editar só o campo "usuário" do painel (deixando senha em branco) **apagava a senha salva em
+      silêncio** — sem aviso nenhum, o erro só apareceria depois, na próxima tentativa de reboot.
+      Corrigido com confirmação explícita na edição quando isso for acontecer.
+    - Nota técnica registrada (não é bug, é limitação aceita): as chamadas do serviço usam HTTP, não
+      HTTPS, porque o `fetch` nativo do Node não tem como aceitar certificado autoassinado por
+      requisição sem uma dependência nova (`undici` explícito) ou uma env var global — a senha vai
+      dentro do blob AES (não em claro), mas o tráfego observável revela endpoint/timing/MAC-alvo
+      pra qualquer um no mesmo segmento de rede. Aceitável na LAN administrativa, registrado como
+      ponto a revisar se a rede mudar de perfil de confiança.
+    Suíte final: backend 441/441 (36 arquivos), frontend 57/57 (8 arquivos), `tsc` limpo nos dois.
+    **Confirmado nas duas rodadas (executor e crítico): nenhuma chamada de rede real foi feita
+    contra qualquer impressora real durante todo o desenvolvimento e revisão.**
 
 **Nota sobre rate limit do Opus**: bateu o limite durante a subtarefa 2, voltou a funcionar antes
 da subtarefa 3 terminar. Se acontecer de novo numa subtarefa futura, o padrão que funcionou foi:

@@ -18,6 +18,7 @@ vi.mock('../lib/api', async (importOriginal) => {
       updatePrinter: vi.fn(),
       deletePrinter: vi.fn(),
       reconnectPrinter: vi.fn(),
+      rebootPrinter: vi.fn(),
       getPrinterConsumables: vi.fn(),
       setClientAlias: vi.fn(),
     },
@@ -25,7 +26,7 @@ vi.mock('../lib/api', async (importOriginal) => {
   };
 });
 
-import { api } from '../lib/api';
+import { api, ApiError } from '../lib/api';
 
 function renderPrinters() {
   return render(
@@ -244,9 +245,17 @@ describe('Printers page', () => {
     await user.type(screen.getByPlaceholderText('aa:bb:cc:dd:ee:ff'), '22:33:44:55:66:77');
     await user.selectOptions(screen.getByDisplayValue('v2c'), 'v3');
     await user.type(screen.getByPlaceholderText('usuário'), 'snmpuser');
-    // Em v3 o campo `community` não é renderizado: os campos de senha são a
-    // senha de autenticação e a de privacidade, nessa ordem.
-    const v3PasswordFields = document.querySelectorAll<HTMLInputElement>('input[type="password"]');
+    // Em v3 o campo `community` não é renderizado: os campos de senha do
+    // SNMP são a senha de autenticação e a de privacidade, nessa ordem. A
+    // senha do PAINEL WEB (wbmCredentials) também é um input[type=password]
+    // do mesmo formulário, mas é de outro domínio (credencial de admin da
+    // impressora, não segredo SNMP) e tem cobertura própria mais abaixo —
+    // filtramos por aria-label em vez de aumentar o número esperado, para
+    // este teste continuar falhando se um campo de segredo SNMP aparecer ou
+    // desaparecer.
+    const v3PasswordFields = Array.from(
+      document.querySelectorAll<HTMLInputElement>('input[type="password"]'),
+    ).filter((input) => input.getAttribute('aria-label') !== 'Senha do painel web');
     expect(v3PasswordFields).toHaveLength(2);
     await user.type(v3PasswordFields[0], 'Unique-V3-Auth-Secret-88');
     await user.click(screen.getByRole('button', { name: 'Cadastrar impressora' }));
@@ -450,5 +459,251 @@ describe('Printers page', () => {
     // O polling ficou desligado o tempo todo com o formulário aberto — nenhuma
     // nova chamada de listagem aconteceu além da carga inicial.
     expect(api.listPrinters).toHaveBeenCalledTimes(1);
+  });
+
+  // --- Reboot remoto (HP/SWS) + credencial do painel web ---
+
+  it('calls rebootPrinter only after confirming, with a warning that says it restarts the physical device', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    vi.mocked(api.rebootPrinter).mockResolvedValue({ ok: true, ipAddress: '172.16.0.89', ipOrigin: 'override' });
+
+    const user = userEvent.setup();
+    renderPrinters();
+    await screen.findByText('HPLaserMFP135w');
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    await user.click(screen.getByRole('button', { name: /Reiniciar remotamente/ }));
+    expect(api.rebootPrinter).not.toHaveBeenCalled();
+
+    // O texto do aviso é a única proteção contra confundir este botão com o
+    // "Reconectar" vizinho, que NÃO desliga nada — se ele deixar de dizer
+    // que reinicia o equipamento físico, este teste falha.
+    const message = String(confirmSpy.mock.calls[0][0]);
+    expect(message).toMatch(/REINICIA O EQUIPAMENTO FÍSICO/);
+    expect(message).toMatch(/Reconectar/);
+    expect(message).toContain('HPLaserMFP135w');
+
+    confirmSpy.mockReturnValue(true);
+    await user.click(screen.getByRole('button', { name: /Reiniciar remotamente/ }));
+    await waitFor(() => expect(api.rebootPrinter).toHaveBeenCalledWith('p1'));
+
+    // Mostra o alvo real da ação (o IP pode ter vindo do histórico do
+    // controller — ver ipOrigin).
+    expect(await screen.findByText(/Comando de reinício enviado.*172\.16\.0\.89.*override/)).toBeInTheDocument();
+  });
+
+  it('mostra o erro da API quando o reboot falha (ex.: 409 sem credencial cadastrada)', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    vi.mocked(api.rebootPrinter).mockRejectedValue(new ApiError(409, 'Credencial do painel web não configurada'));
+
+    const user = userEvent.setup();
+    renderPrinters();
+    await screen.findByText('HPLaserMFP135w');
+
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await user.click(screen.getByRole('button', { name: /Reiniciar remotamente/ }));
+
+    expect(await screen.findByText('Credencial do painel web não configurada')).toBeInTheDocument();
+  });
+
+  it('envia wbmCredentials no cadastro quando usuário e senha do painel são informados', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([]);
+    vi.mocked(api.createPrinter).mockResolvedValue({ ...PRINTER_INTEGRATION });
+
+    const user = userEvent.setup();
+    renderPrinters();
+
+    await user.click(await screen.findByRole('button', { name: 'Nova impressora' }));
+    await user.type(screen.getByPlaceholderText('ex: HPLaserMFP135w'), 'Nova Impressora');
+    await user.type(screen.getByPlaceholderText('aa:bb:cc:dd:ee:ff'), '11:22:33:44:55:66');
+    await user.type(screen.getByPlaceholderText('ex: public'), 'public');
+    await user.type(screen.getByPlaceholderText('ex: admin'), 'admin');
+    await user.type(screen.getByLabelText('Senha do painel web'), 'senha-do-painel');
+
+    await user.click(screen.getByRole('button', { name: 'Cadastrar impressora' }));
+
+    await waitFor(() =>
+      expect(api.createPrinter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          wbmCredentials: { username: 'admin', password: 'senha-do-painel' },
+        }),
+      ),
+    );
+  });
+
+  it('aceita usuário do painel com senha em branco (padrão de fábrica da HP real)', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([]);
+    vi.mocked(api.createPrinter).mockResolvedValue({ ...PRINTER_INTEGRATION });
+
+    const user = userEvent.setup();
+    renderPrinters();
+
+    await user.click(await screen.findByRole('button', { name: 'Nova impressora' }));
+    await user.type(screen.getByPlaceholderText('ex: HPLaserMFP135w'), 'Nova Impressora');
+    await user.type(screen.getByPlaceholderText('aa:bb:cc:dd:ee:ff'), '11:22:33:44:55:66');
+    await user.type(screen.getByPlaceholderText('ex: public'), 'public');
+    await user.type(screen.getByPlaceholderText('ex: admin'), 'admin');
+
+    await user.click(screen.getByRole('button', { name: 'Cadastrar impressora' }));
+
+    await waitFor(() =>
+      expect(api.createPrinter).toHaveBeenCalledWith(
+        expect.objectContaining({ wbmCredentials: { username: 'admin', password: '' } }),
+      ),
+    );
+  });
+
+  it('não envia wbmCredentials quando nenhum dos dois campos foi preenchido', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([]);
+    vi.mocked(api.createPrinter).mockResolvedValue({ ...PRINTER_INTEGRATION });
+
+    const user = userEvent.setup();
+    renderPrinters();
+
+    await user.click(await screen.findByRole('button', { name: 'Nova impressora' }));
+    await user.type(screen.getByPlaceholderText('ex: HPLaserMFP135w'), 'Nova Impressora');
+    await user.type(screen.getByPlaceholderText('aa:bb:cc:dd:ee:ff'), '11:22:33:44:55:66');
+    await user.type(screen.getByPlaceholderText('ex: public'), 'public');
+    await user.click(screen.getByRole('button', { name: 'Cadastrar impressora' }));
+
+    await waitFor(() => expect(api.createPrinter).toHaveBeenCalled());
+    // `undefined` (e não `null`): omitir é o que o backend interpreta como
+    // "sem credencial" no POST.
+    expect(vi.mocked(api.createPrinter).mock.calls[0][0].wbmCredentials).toBeUndefined();
+  });
+
+  it('recusa senha do painel sem usuário, sem chamar a API (a senha não pode ser descartada em silêncio)', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([]);
+
+    const user = userEvent.setup();
+    renderPrinters();
+
+    await user.click(await screen.findByRole('button', { name: 'Nova impressora' }));
+    await user.type(screen.getByPlaceholderText('ex: HPLaserMFP135w'), 'Nova Impressora');
+    await user.type(screen.getByPlaceholderText('aa:bb:cc:dd:ee:ff'), '11:22:33:44:55:66');
+    await user.type(screen.getByPlaceholderText('ex: public'), 'public');
+    await user.type(screen.getByLabelText('Senha do painel web'), 'senha-orfa');
+    await user.click(screen.getByRole('button', { name: 'Cadastrar impressora' }));
+
+    expect(await screen.findByText(/Informe o usuário do painel web/)).toBeInTheDocument();
+    expect(api.createPrinter).not.toHaveBeenCalled();
+  });
+
+  it('na edição, os campos do painel web nascem VAZIOS e omitir mantém a credencial atual', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    vi.mocked(api.updatePrinter).mockResolvedValue({ ...PRINTER_INTEGRATION });
+
+    const user = userEvent.setup();
+    renderPrinters();
+    await screen.findByText('HPLaserMFP135w');
+
+    await user.click(screen.getByRole('button', { name: /Editar/ }));
+
+    // O backend nunca devolve a credencial, então não há como repopular —
+    // os campos precisam estar vazios (e não com um valor falso qualquer).
+    expect(screen.getByPlaceholderText('deixe em branco para manter o atual')).toHaveValue('');
+    expect(screen.getByLabelText('Senha do painel web')).toHaveValue('');
+
+    await user.click(screen.getByRole('button', { name: 'Salvar alterações' }));
+
+    await waitFor(() => expect(api.updatePrinter).toHaveBeenCalled());
+    expect(vi.mocked(api.updatePrinter).mock.calls[0][1].wbmCredentials).toBeUndefined();
+  });
+
+  // ACHADO DO CRÍTICO: na edição, preencher SÓ o usuário do painel mandava
+  // `password: ''` e apagava em silêncio a senha guardada (o backend aceita
+  // senha vazia de propósito, e nunca devolve a credencial em leitura, então
+  // nada nem ninguém percebia — a falha só apareceria depois, como um 403 no
+  // reboot). Agora exige confirmação explícita.
+  it('na edição, preencher só o usuário do painel exige confirmação antes de gravar senha em branco', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    vi.mocked(api.updatePrinter).mockResolvedValue({ ...PRINTER_INTEGRATION });
+
+    const user = userEvent.setup();
+    renderPrinters();
+    await screen.findByText('HPLaserMFP135w');
+    await user.click(screen.getByRole('button', { name: /Editar/ }));
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    await user.type(screen.getByPlaceholderText('deixe em branco para manter o atual'), 'operador');
+    await user.click(screen.getByRole('button', { name: 'Salvar alterações' }));
+
+    // Cancelou: nada foi salvo (nem o resto do formulário, para não deixar a
+    // impressão de que só a credencial ficou de fora).
+    expect(api.updatePrinter).not.toHaveBeenCalled();
+    const message = String(confirmSpy.mock.calls[0][0]);
+    expect(message).toMatch(/SENHA EM BRANCO/);
+    expect(message).toMatch(/perdida/);
+
+    // Confirmou: aí sim grava a senha vazia (caso legítimo — o painel da HP
+    // real está sem senha de fábrica).
+    confirmSpy.mockReturnValue(true);
+    await user.click(screen.getByRole('button', { name: 'Salvar alterações' }));
+    await waitFor(() => expect(api.updatePrinter).toHaveBeenCalled());
+    expect(vi.mocked(api.updatePrinter).mock.calls[0][1].wbmCredentials).toEqual({
+      username: 'operador',
+      password: '',
+    });
+  });
+
+  it('na edição, trocar usuário E senha do painel salva direto, sem confirmação', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    vi.mocked(api.updatePrinter).mockResolvedValue({ ...PRINTER_INTEGRATION });
+
+    const user = userEvent.setup();
+    renderPrinters();
+    await screen.findByText('HPLaserMFP135w');
+    await user.click(screen.getByRole('button', { name: /Editar/ }));
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    await user.type(screen.getByPlaceholderText('deixe em branco para manter o atual'), 'operador');
+    await user.type(screen.getByLabelText('Senha do painel web'), 'senha-nova');
+    await user.click(screen.getByRole('button', { name: 'Salvar alterações' }));
+
+    await waitFor(() => expect(api.updatePrinter).toHaveBeenCalled());
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(vi.mocked(api.updatePrinter).mock.calls[0][1].wbmCredentials).toEqual({
+      username: 'operador',
+      password: 'senha-nova',
+    });
+  });
+
+  it('no CADASTRO, senha em branco não pede confirmação (não há nada a sobrescrever)', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([]);
+    vi.mocked(api.createPrinter).mockResolvedValue({ ...PRINTER_INTEGRATION });
+
+    const user = userEvent.setup();
+    renderPrinters();
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    await user.click(await screen.findByRole('button', { name: 'Nova impressora' }));
+    await user.type(screen.getByPlaceholderText('ex: HPLaserMFP135w'), 'Nova Impressora');
+    await user.type(screen.getByPlaceholderText('aa:bb:cc:dd:ee:ff'), '11:22:33:44:55:66');
+    await user.type(screen.getByPlaceholderText('ex: public'), 'public');
+    await user.type(screen.getByPlaceholderText('ex: admin'), 'admin');
+    await user.click(screen.getByRole('button', { name: 'Cadastrar impressora' }));
+
+    await waitFor(() => expect(api.createPrinter).toHaveBeenCalled());
+    expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
+  it('SEGURANÇA: a senha do painel web nunca é gravada em localStorage/sessionStorage', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([]);
+    vi.mocked(api.createPrinter).mockResolvedValue({ ...PRINTER_INTEGRATION });
+
+    const user = userEvent.setup();
+    renderPrinters();
+
+    await user.click(await screen.findByRole('button', { name: 'Nova impressora' }));
+    await user.type(screen.getByPlaceholderText('ex: HPLaserMFP135w'), 'Nova Impressora');
+    await user.type(screen.getByPlaceholderText('aa:bb:cc:dd:ee:ff'), '11:22:33:44:55:66');
+    await user.type(screen.getByPlaceholderText('ex: public'), 'public');
+    await user.type(screen.getByPlaceholderText('ex: admin'), 'admin');
+    await user.type(screen.getByLabelText('Senha do painel web'), 'senha-do-painel-secreta');
+    expectNoSecretInStorage('senha-do-painel-secreta');
+
+    await user.click(screen.getByRole('button', { name: 'Cadastrar impressora' }));
+    await waitFor(() => expect(api.createPrinter).toHaveBeenCalled());
+    expectNoSecretInStorage('senha-do-painel-secreta');
   });
 });
