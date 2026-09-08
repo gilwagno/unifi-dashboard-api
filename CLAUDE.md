@@ -1,6 +1,19 @@
 # Gauntlet Loop — unifi-dashboard-api
 
-## ONDA ATIVA: Módulo de Manutenção de Impressoras (iniciada 2026-08-31)
+## Onda 2 (Módulo de Manutenção de Impressoras) — CONCLUÍDA — iniciada 2026-08-31, fechada 2026-09-08
+
+Todas as subtarefas de código planejadas foram aprovadas (47-48/50 cada), revisadas por par
+executor/crítico e mergeadas em `master` (squash) — CRUD/status/reconnect/IP fixo (PR #5), poller
+SNMP + consumíveis (PRs #5/#9), diagnostics (PR #11), agenda de manutenção (PR #12), alias (PR #7),
+frontend (PR #10) e e2e (PR #13). Subtarefa 11 (trocar senha de admin dos painéis web) foi FECHADA
+por decisão explícita do usuário — não implementada, não é uma pendência. Subtarefa 12 (histórico
+de leituras SNMP) segue em aberto por ser opcional; retomar só se o usuário pedir. Ver "Progresso da
+Onda 2" abaixo para o detalhe de cada subtarefa e achados, e `docs/printers-snmp-research.md` para a
+pesquisa técnica completa (SNMP, OIDs, achados por fabricante, investigação dos painéis WBM/SWS).
+
+Estado verificado em `master` pós-fechamento (2026-09-08): backend 281/281 testes (`tsc` limpo),
+frontend 25/25 testes (`tsc` limpo), e2e 5/5 (rodado 2x sem flake), as 4 impressoras reais
+cadastradas e intactas no `printers.db` local. Nenhuma PR aberta, nenhuma branch órfã.
 
 Feature nova (não cobertura de teste), mesma metodologia (par executor/crítico, rubrica 0-50,
 checkpoint por PR). Ver `docs/printers-snmp-research.md` para a pesquisa técnica (SNMP, OIDs,
@@ -351,9 +364,14 @@ jsdom — só não quebrava antes porque o frontend não tinha testes ainda. Cor
 
 ## Se retomar este loop numa sessão futura
 
-A onda 1 está fechada. O que resta é o gate humano já respondido (ver abaixo) — planejar (não
-implementar sem planejamento) a persistência de histórico de banda por cliente além de 24h. Não
-há mais subtarefas de teste pendentes desta onda.
+Ondas 1 e 2 estão fechadas. Duas linhas em aberto, nenhuma delas subtarefa pendente de código:
+1. Gate humano já respondido (ver abaixo) — planejar (não implementar sem planejamento) a
+   persistência de histórico de banda por cliente além de 24h. Prioridade confirmada pelo usuário,
+   mas ainda não tem plano nenhum feito.
+2. Subtarefa 12 da Onda 2 (histórico de leituras SNMP ao longo do tempo) — opcional, deliberadamente
+   deixada de fora por decisão do usuário em 2026-09-08. Só retomar se pedido explicitamente.
+
+Nenhuma outra pendência de código conhecida em nenhuma das duas ondas.
 
 ## Decisão do gate humano (respondida em 2026-08-31)
 
