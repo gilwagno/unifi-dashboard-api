@@ -1,9 +1,12 @@
 import { Activity, ArrowDownUp, Cpu, Signal, Wifi } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Badge } from '../components/Badge';
 import { Layout } from '../components/Layout';
 import { StatCard } from '../components/StatCard';
+import { usePolling } from '../hooks/usePolling';
 import { api, type BandwidthDelta, type ClientSignal, type DeviceHealth, type WanHistoryDetail } from '../lib/api';
+
+const POLL_INTERVAL_MS = 60_000;
 
 // Formata bytes crus de forma legível ("1.2 GB" em vez de "1288490188") —
 // mesmo espírito de formatUptime abaixo, sem precisar de lib externa.
@@ -95,7 +98,10 @@ export function Health() {
   const [expandedMac, setExpandedMac] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  // `silent = true` (polling em segundo plano) nunca reseta os states pra `null` — é esse
+  // `null` que cada seção usa como sinal de "carregando". Falha silenciosa só loga no console e
+  // mantém os dados antigos na tela, em vez de substituir por erro a cada ciclo de 60s.
+  const load = useCallback((silent = false) => {
     Promise.all([
       api.getDeviceHealth(),
       api.getClientSignalStrength(),
@@ -108,8 +114,20 @@ export function Health() {
         setWanHistory(w.data);
         setBandwidthDeltas(b.data);
       })
-      .catch((err) => setError(err instanceof Error ? err.message : 'Erro ao carregar dados de saúde da rede'));
+      .catch((err) => {
+        if (silent) {
+          console.error('Falha ao atualizar dados de saúde da rede em segundo plano', err);
+          return;
+        }
+        setError(err instanceof Error ? err.message : 'Erro ao carregar dados de saúde da rede');
+      });
   }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  usePolling(() => load(true), POLL_INTERVAL_MS);
 
   const deviceBandwidth = bandwidthDeltas ? sumBandwidth(bandwidthDeltas, 'perDevice') : null;
   const clientBandwidth = bandwidthDeltas ? sumBandwidth(bandwidthDeltas, 'perClient') : null;

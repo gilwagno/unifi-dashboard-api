@@ -1,9 +1,12 @@
 import { AlertTriangle, KeyRound, ShieldAlert, ShieldCheck, UserCog } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Badge } from '../components/Badge';
 import { Layout } from '../components/Layout';
 import { StatCard } from '../components/StatCard';
+import { usePolling } from '../hooks/usePolling';
 import { api, type Admin, type AdminRole, type CriticalEvent, type SecuritySummary, type SshInfo } from '../lib/api';
+
+const POLL_INTERVAL_MS = 60_000;
 
 // O formato exato de cada evento crítico não é conhecido (o endpoint
 // /security/events nunca teve um evento real pra observar no ambiente de
@@ -37,24 +40,51 @@ export function Security() {
   // igual ao aviso mostrado na tela.
   const [newPassword, setNewPassword] = useState<{ username: string; password: string } | null>(null);
 
-  function loadSshInfo() {
+  // `silent = true` (usado pelo refresh silencioso via polling) nunca reseta `sshInfo` pra
+  // `null`. Falha silenciosa só loga no console — nunca troca `newPassword`/o aviso na tela por
+  // um erro, e nunca limpa a senha recém-gerada que ainda está visível.
+  const loadSshInfo = useCallback((silent = false) => {
     api
       .getSshInfo()
       .then(setSshInfo)
-      .catch((err) => setSshError(err instanceof Error ? err.message : 'Erro ao carregar credencial SSH'));
-  }
+      .catch((err) => {
+        if (silent) {
+          console.error('Falha ao atualizar credencial SSH em segundo plano', err);
+          return;
+        }
+        setSshError(err instanceof Error ? err.message : 'Erro ao carregar credencial SSH');
+      });
+  }, []);
+
+  // `silent = true` (polling em segundo plano) nunca reseta `summary`/`events`/`admins` pra
+  // `null` — é esse `null` que cada seção usa como sinal de "carregando". Falha silenciosa só
+  // loga no console e mantém os dados antigos na tela, em vez de trocar por erro a cada minuto.
+  const load = useCallback(
+    (silent = false) => {
+      Promise.all([api.getSecuritySummary(), api.getSecurityEvents(), api.getAdmins()])
+        .then(([s, e, a]) => {
+          setSummary(s);
+          setEvents(e.data);
+          setAdmins(a.data);
+        })
+        .catch((err) => {
+          if (silent) {
+            console.error('Falha ao atualizar dados de segurança em segundo plano', err);
+            return;
+          }
+          setError(err instanceof Error ? err.message : 'Erro ao carregar dados de segurança');
+        });
+
+      loadSshInfo(silent);
+    },
+    [loadSshInfo],
+  );
 
   useEffect(() => {
-    Promise.all([api.getSecuritySummary(), api.getSecurityEvents(), api.getAdmins()])
-      .then(([s, e, a]) => {
-        setSummary(s);
-        setEvents(e.data);
-        setAdmins(a.data);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : 'Erro ao carregar dados de segurança'));
+    load();
+  }, [load]);
 
-    loadSshInfo();
-  }, []);
+  usePolling(() => load(true), POLL_INTERVAL_MS);
 
   async function handleRotateSsh() {
     const confirmed = window.confirm(

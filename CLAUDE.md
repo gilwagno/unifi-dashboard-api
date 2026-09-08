@@ -400,6 +400,43 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
     - Guardas de `minutes` (inteiro, teto 99) e a tradução hours→índice dentro da ROTA (não só a
       tabela isolada) não tinham teste ancorando — cobertos.
     Suíte final: 370/370 (34 arquivos), `tsc` limpo, mutações re-executadas sem sobrevivente.
+17. ✅ Atualização automática (polling) no frontend — **47/50**. Branch
+    `feat/frontend-auto-refresh`, PR a abrir. Pedido do usuário: renomeou 2 APs direto no
+    controller e o dashboard não refletiu sem F5 (nenhuma das 9 páginas reconsultava sozinha, só no
+    carregamento inicial — confirmado no código antes de codar). Hook compartilhado
+    `frontend/src/hooks/usePolling.ts` (pausa com aba oculta, retoma com chamada imediata ao voltar,
+    sempre usa o callback mais recente via ref) aplicado nas 8 páginas de dados (60s, decisão do
+    usuário), com refresh SILENCIOSO (nunca reativa o spinner "Carregando…" nem apaga dado já
+    exibido; falha do ciclo silencioso só loga no console, mantém o dado antigo na tela). **2 bugs
+    reais do crítico, corrigidos:**
+    - **Corrida de resposta atrasada fazia item removido "ressuscitar" na tela.** Nenhum `load()`
+      guardava ordem de resposta — um refresh de 60s em voo no momento em que o usuário troca de
+      página/filtro, ou remove um item (impressora, VLAN), podia responder DEPOIS da ação do
+      usuário e sobrescrever a tela com o retrato antigo: item deletado reaparecendo, paginação
+      "voltando sozinha" com o número da página mentindo. Provado por teste antes da correção.
+      Corrigido com contador monotônico de requisição em `Clients.tsx`/`Devices.tsx`/
+      `Networks.tsx`/`Printers.tsx` (as 4 páginas com mutação que dispara recarga) — só a resposta
+      mais recente escreve no estado.
+    - **Editores inline perdendo o que o usuário estava digitando.** `Printers.tsx` já tinha sido
+      protegido (polling desligado com formulário aberto), mas o mesmo padrão existia sem proteção
+      em MAIS DUAS páginas: o editor de IP fixo em `Clients.tsx` e o editor de senha Wi-Fi em
+      `Networks.tsx` — ambos vivem dentro da linha da lista (`key={id}`), então um refresh que
+      reordene/remova a linha desmonta o input e apaga o que estava sendo digitado. Corrigido com
+      `enabled: false` granular enquanto cada editor está aberto (não trava o polling da página
+      inteira por causa de um campo de formulário de CRIAÇÃO, só do editor inline específico —
+      distinção documentada no código).
+    - Lacuna de teste no hook: faltava travar que o cleanup remove o listener de `visibilitychange`
+      (sem isso, cada página visitada acumularia um listener que sobrevive ao unmount) — coberto.
+    - Warning novo de lint (atualizar a ref direto no corpo do render) — corrigido, ref atualizada
+      em efeito de commit.
+    - Senha SSH mostrada só uma vez (`Security.tsx`) verificada e travada por teste: sobrevive a
+      ciclos de polling, mesmo com o ciclo silencioso falhando.
+    - **Decisão registrada, não implementada** (fora do pedido original): não há hoje nenhum sinal
+      de "frescor" do dado (distinguir "nada mudou" de "paramos de escutar o controller") — silêncio
+      total no erro está certo pro escopo pedido, mas um indicador único "Atualizado às HH:MM" no
+      `Layout` compartilhado seria a forma barata de resolver isso numa subtarefa futura, se pedido.
+    Suíte final: frontend 46/46 (8 arquivos), backend 370/370 intacto (não deveria ter sido tocado,
+    confirmado), `tsc` limpo nos dois, lint sem warning novo.
 
 **Nota sobre rate limit do Opus**: bateu o limite durante a subtarefa 2, voltou a funcionar antes
 da subtarefa 3 terminar. Se acontecer de novo numa subtarefa futura, o padrão que funcionou foi:

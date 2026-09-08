@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Badge } from '../components/Badge';
 import { Layout } from '../components/Layout';
+import { usePolling } from '../hooks/usePolling';
 import { api, ApiError, type FirewallZone, type RadiusProfile, type UniFiNetwork, type WifiBroadcast } from '../lib/api';
 
 type WifiSecurityType = 'WPA2_PERSONAL' | 'WPA2_ENTERPRISE' | 'WPA3_ENTERPRISE' | 'WPA2_WPA3_ENTERPRISE';
+
+const POLL_INTERVAL_MS = 60_000;
 
 // Zona usada como default no seletor de VLAN, quando existir — mesma zona
 // usada como fallback no backend quando `zoneId` não é informado (ver
@@ -36,11 +39,27 @@ export function Networks() {
   const [newZoneId, setNewZoneId] = useState('');
   const [creatingNetwork, setCreatingNetwork] = useState(false);
 
-  const load = useCallback(() => {
-    setLoading(true);
-    setError(null);
+  // Contador monotônico de requisições: só a resposta da requisição MAIS RECENTE escreve no
+  // estado. Sem isso, um refresh silencioso do polling que já estava em voo quando o usuário
+  // cria/remove uma rede pode resolver DEPOIS do `load()` disparado pela própria mutação e
+  // repintar a lista com o retrato anterior — a VLAN recém-criada desaparece (ou a recém-
+  // removida reaparece) por até 60s, o pior tipo de mentira num painel de rede. Também
+  // descarta respostas que chegam depois do unmount.
+  const requestSeqRef = useRef(0);
+
+  // `silent = true` é usado pelo polling em segundo plano: nunca ativa `loading` (senão as duas
+  // listas piscam "Carregando…" a cada minuto). Falha silenciosa só loga no console e mantém os
+  // dados antigos na tela, em vez de trocar por uma mensagem de erro a cada ciclo.
+  const load = useCallback((silent = false) => {
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
+    const seq = (requestSeqRef.current += 1);
     Promise.all([api.listWifi(), api.listNetworks(), api.listFirewallZones(), api.listRadiusProfiles()])
       .then(([w, n, z, r]) => {
+        // `loading`/`error` seguem desguardados de propósito (ver Clients.tsx/Devices.tsx).
+        if (seq !== requestSeqRef.current) return;
         setWifis(w.data);
         setNetworks(n.data);
         setZones(z.data);
@@ -52,13 +71,32 @@ export function Networks() {
         });
         setNewWifiRadiusProfileId((current) => current || r.data[0]?.id || '');
       })
-      .catch((err) => setError(err instanceof Error ? err.message : 'Erro ao carregar redes'))
-      .finally(() => setLoading(false));
+      .catch((err) => {
+        if (silent) {
+          console.error('Falha ao atualizar redes em segundo plano', err);
+          return;
+        }
+        setError(err instanceof Error ? err.message : 'Erro ao carregar redes');
+      })
+      .finally(() => {
+        if (!silent) setLoading(false);
+      });
   }, []);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // Proteção deliberadamente GRANULAR (diferente de Printers.tsx, que desliga o polling com o
+  // formulário aberto): os campos dos dois formulários de criação são estado próprio e o
+  // refresh silencioso provadamente não os sobrescreve (`newZoneId`/`newWifiRadiusProfileId`
+  // usam updater com `current ||`), então travar o polling só porque há texto digitado num
+  // formulário deixaria a página sem atualizar por tempo indefinido sem ganho nenhum.
+  // O que SIM precisa de pausa é o editor inline de senha do Wi-Fi: ele vive DENTRO da linha
+  // da rede (`key={w.id}`), então um refresh que reordene ou remova aquela linha desmonta o
+  // campo e joga fora a passphrase que o admin está digitando (e o `autoFocus` perde o foco
+  // quando o React só reordena a linha). Mesma razão da pausa em Clients.tsx.
+  usePolling(() => load(true), POLL_INTERVAL_MS, { enabled: editingPasswordId === null });
 
   async function createWifi(e: React.FormEvent) {
     e.preventDefault();

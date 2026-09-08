@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Layout } from '../components/Layout';
+import { usePolling } from '../hooks/usePolling';
 import { api, type UniFiEventRecord } from '../lib/api';
+
+const POLL_INTERVAL_MS = 60_000;
 
 // Nenhum campo do payload é confiável: `meta.message`/`key`/`type` podem vir
 // como objeto/array em schemas desconhecidos, e devolver isso pra JSX quebra a
@@ -26,12 +29,28 @@ export function Events() {
   const [events, setEvents] = useState<UniFiEventRecord[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  // `silent = true` (usado pelo polling em segundo plano) nunca reseta `events` para `null` —
+  // é esse `null` que a UI usa como sinal de "carregando", então mantê-lo intacto evita que a
+  // lista pisque "Carregando…" a cada minuto. Falha silenciosa só loga no console e mantém o
+  // buffer antigo na tela, em vez de substituir por uma mensagem de erro a cada ciclo.
+  const load = useCallback((silent = false) => {
     api
       .eventsHistory(200)
       .then((res) => setEvents(res.data))
-      .catch((err) => setError(err instanceof Error ? err.message : 'Erro ao carregar eventos'));
+      .catch((err) => {
+        if (silent) {
+          console.error('Falha ao atualizar eventos em segundo plano', err);
+          return;
+        }
+        setError(err instanceof Error ? err.message : 'Erro ao carregar eventos');
+      });
   }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  usePolling(() => load(true), POLL_INTERVAL_MS);
 
   return (
     <Layout title="Eventos">
