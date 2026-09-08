@@ -12,3 +12,7 @@ process.env.PORT ??= '3000';
 // arquivo real (ex: verificar persistência entre "restarts") sobrescrevem
 // esta variável explicitamente antes de importar o app.
 process.env.PRINTERS_DB_FILE ??= ':memory:';
+// Mesma lógica de PRINTERS_DB_FILE acima, para o segundo banco SQLite do
+// projeto (histórico de banda de longo prazo — ver
+// src/db/bandwidth-history.db.ts).
+process.env.BANDWIDTH_HISTORY_DB_FILE ??= ':memory:';

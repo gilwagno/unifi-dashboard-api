@@ -156,9 +156,9 @@ que ele sobe:
   via a API clássica, e guarda essa amostra num buffer em memória.
 - O buffer guarda até **288 amostras** (24h ÷ 5min), descartando a mais
   antiga quando cheio.
-- É **em memória**, igual ao histórico de eventos do `/events/history` —
-  **não persiste em disco nem em banco**, então é perdido a cada restart
-  do backend. Isso também quer dizer que **a primeira amostra só aparece
+- É **em memória** (o buffer em si, ver `/bandwidth/history/long-range`
+  abaixo para o histórico persistido) — o buffer some a cada restart do
+  backend. Isso também quer dizer que **a primeira amostra só aparece
   depois de 5 minutos** do backend ter subido (o buffer começa vazio).
 - Uma falha pontual de coleta (controller fora do ar, etc.) é logada e
   ignorada — o poller não para, só tenta de novo no próximo ciclo.
@@ -173,6 +173,61 @@ gráfico/lista sem o frontend precisar fazer essa conta. Se o contador
 "zerou" entre duas amostras (o device reiniciou ou o cliente reconectou),
 a diferença dessa entrada vem como `null` em vez de um número negativo sem
 sentido.
+
+#### Histórico de longo prazo (`GET /bandwidth/history/long-range`)
+
+O buffer em memória acima só guarda 24h — para consultar uso de banda além
+disso, cada amostra coletada pelo mesmo poller de 5 minutos TAMBÉM é
+gravada num banco SQLite próprio (`src/db/bandwidth-history.db.ts`, arquivo
+configurado por `BANDWIDTH_HISTORY_DB_FILE`, separado do banco de
+impressoras). Política de retenção (decisão de produto, não um limite
+técnico do SQLite):
+
+- **Pelo menos 48h de grão fino** (`bandwidth_samples`): uma linha por
+  device/cliente a cada ciclo de 5 min, igual ao buffer em memória, só que
+  persistida. "Pelo menos" porque o job só resume/apaga **horas completas**:
+  uma hora que o corte de 48h parte no meio espera fechar, então na prática
+  o grão fino vive entre 48h e 48h59min. Isso é intencional — resumir meia
+  hora e apagar as amostras perderia a outra metade para sempre.
+- **30 dias de grão por hora** (`bandwidth_hourly_rollup`): um job diário
+  em segundo plano resume cada hora completa com mais de 48h num único
+  delta de `rxBytes`/`txBytes` (a diferença entre a última e a primeira
+  amostra daquela hora) e depois apaga as amostras finas de origem. Rollups
+  com mais de 30 dias também são apagados. O delta vem como `null` (nunca
+  como `0`) quando não há uso mensurável confiável: contador reiniciado no
+  meio da hora, ou hora com uma única amostra (o poller esteve de pé só uma
+  fração dela) — `0` ali afirmaria "não trafegou nada", que é diferente de
+  "não foi medido".
+- Uma falha de escrita no banco (poller ou job de rollup) é logada e
+  ignorada — nunca derruba o buffer em memória nem o processo.
+
+`GET /bandwidth/history/long-range` combina os dois trechos (fino + rollup)
+numa única lista ordenada por tempo, no MESMO formato de
+`/bandwidth/history/summary` (`{ intervalStart, intervalEnd, perDevice,
+perClient }`, com `rxBytes`/`txBytes` já como diferença/uso, não valor
+cumulativo) — o frontend consegue tratar os dois endpoints com o mesmo
+parsing. Query params, todos opcionais:
+
+| Param | Formato | Descrição |
+|-------|---------|-----------|
+| `mac` | MAC (`aa:bb:cc:dd:ee:ff`) | Filtra por um device/cliente específico. Sem ele, devolve todos. |
+| `from` | ISO 8601 com offset | Início da janela. Sem ele, assume 30 dias atrás (a retenção inteira). |
+| `to` | ISO 8601 com offset | Fim da janela. Sem ele, assume agora. |
+
+`from`/`to` aceitam qualquer ISO 8601 válido, inclusive com offset de fuso
+(`2026-05-01T08:00:00-03:00`) — são convertidos para UTC antes da consulta,
+já que os timestamps são gravados e comparados em UTC.
+
+> **Sem paginação (limitação conhecida).** Sem `mac`/`from`/`to`, a resposta
+> é a janela inteira de 30 dias para TODOS os devices e clientes: na ordem
+> de 720 intervalos horários + ~576 intervalos finos, cada um carregando uma
+> entrada por device/cliente. Numa rede de algumas dezenas de dispositivos
+> isso já é uma resposta de vários MB. É aceitável no escopo atual (rede
+> pequena, uso interno, endpoint autenticado), mas quem consome deve
+> **sempre mandar `from`/`to` e, de preferência, `mac`**. Se a rede crescer
+> ou o frontend começar a chamar isso sem filtro, o próximo passo é
+> paginação/agregação server-side — não foi implementado aqui de propósito,
+> para não inventar um contrato de paginação que ninguém pediu ainda.
 
 O comando clássico `block-sta`/`unblock-sta` não valida o MAC — se você
 mandar bloquear um MAC que o controller nunca viu na rede, ele cria um
