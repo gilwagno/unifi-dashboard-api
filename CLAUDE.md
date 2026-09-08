@@ -226,7 +226,7 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
    decisão de não inventar default sem esconder que a checagem está desligada. `pageCount` com
    sentinela/erro foi verificado: vira `null` com `collectedAt` preenchido (distinguível de "nunca
    coletada"), nunca NaN/undefined — estava correto, mas sem teste; agora tem. Suíte: 230/230.
-7. ✅ `GET /printers/:id/diagnostics` — **47/50**. Branch `feat/printers-diagnostics`, PR a abrir.
+7. ✅ `GET /printers/:id/diagnostics` — **47/50**. Branch `feat/printers-diagnostics`, PR #11 aberta.
    Formata `getLastReading()` (já existente desde a subtarefa 5) em `model` (`hrDeviceDescr`),
    `systemInfo` (`sysDescr` cru — formato livre por fabricante, não vale a pena parsear versão de
    firmware sem pedido explícito), `deviceStatus` (um dos 5 rótulos RFC 2790 ou `'not-measured'`),
@@ -237,13 +237,13 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
    contrato documentado sem quebrar `tsc` nem teste nenhum. Trocado por tabela de tradução explícita
    sem `as`, com 3 testes novos ancorando (rótulo fora de 1..5, rótulo desconhecido do serviço,
    leitura internamente inconsistente entre `status` e `label`). Suíte do backend: 262/262 (22 testes
-   novos no arquivo da subtarefa), `tsc` limpo. Nota lateral do crítico (não corrigida, é config
-   compartilhada): `vitest.config.ts` na raiz não exclui `.claude/**` — um worktree de agente órfão
-   em disco faz `vitest run` duplicar a suíte e importar testes de frontend/e2e, mesmo sintoma já
-   registrado no `workbench.md` da Onda 1 pra `frontend/**`/`e2e/**`. Considerar excluir também.
-8a. ✅ `PATCH /clients/:mac/alias` (achado 8, genérico) — **47/50**. Branch `feat/clients-alias`,
-   PR a abrir. PUT parcial confirmado por teste (mesmo padrão de `setFixedIp`). Achado do crítico:
-   `.trim()` sem teste ancorando — corrigido.
+   novos no arquivo da subtarefa), `tsc` limpo. Nota lateral do crítico: `vitest.config.ts` na raiz
+   não excluía `.claude/**` — corrigido direto em `master` em 2026-09-08 (worktree órfão limpo na
+   mesma sessão), não é mais pendência.
+8a. ✅ `PATCH /clients/:mac/alias` (achado 8, genérico) — **47/50**. PR #7, **mergeada em
+   2026-08-31** (esta linha estava desatualizada dizendo "PR a abrir" — corrigido em 2026-09-08).
+   PUT parcial confirmado por teste (mesmo padrão de `setFixedIp`). Achado do crítico: `.trim()`
+   sem teste ancorando — corrigido.
 8b. ✅ Agenda de manutenção (`POST/GET /printers/:id/maintenance`) — **48/50**. Branch
    `feat/printers-maintenance`, empilhada sobre `feat/printers-diagnostics` (PR #11, ainda aberta —
    mesmo arquivo `printers.routes.ts`; **lição do CLAUDE.md sobre `--delete-branch` em pilha se
