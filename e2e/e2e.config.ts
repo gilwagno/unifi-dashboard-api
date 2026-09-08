@@ -38,3 +38,15 @@ export const SEEDED_CLIENT = {
   name: 'Notebook Financeiro',
   mac: 'aa:bb:cc:dd:ee:01',
 };
+
+/**
+ * Segundo cliente semeado, usado SÓ pelo fluxo de impressoras. É um cliente
+ * separado de propósito: esse fluxo RENOMEIA o apelido no controller fake
+ * (cujo estado é compartilhado por toda a run, workers: 1), e mexer no
+ * `SEEDED_CLIENT` acoplaria clients.spec.ts à ordem de execução dos arquivos
+ * — clients.spec.ts afirma o nome original do cliente dele.
+ */
+export const SEEDED_PRINTER_CLIENT = {
+  name: 'Impressora Recepcao',
+  mac: 'aa:bb:cc:dd:ee:02',
+};

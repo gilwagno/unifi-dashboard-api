@@ -190,7 +190,7 @@ iPhone, um Watch e um Redmi antes).
 13. ✅ Frontend `Printers.tsx` — nova aba "Manutenção" no menu lateral. PR #10, **já mergeada em
     2026-08-31** (fazia parte do "Marco: subtarefas 1-8" no topo deste arquivo — esta linha
     numerada estava sem o status marcado; corrigido em 2026-09-08).
-14. e2e.
+14. ✅ e2e — **47/50**. Branch `e2e/printers-flows`, PR a abrir.
 
 Regra de alocação de modelo: CRUD/merge simples = Sonnet nos dois papéis (diversidade). Qualquer
 coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel do par em Opus.
@@ -296,6 +296,28 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
     - Nota operacional: o classificador de modo automático do Claude Code bloqueou a mesma
       navegação 2x numa sessão anterior no mesmo dia, e não bloqueou nesta retomada — não é
       determinístico, não assumir que ficou liberado permanentemente.
+11. ❌ Trocar senha de admin dos painéis web — **FECHADO por decisão do usuário (2026-09-08), não
+    será implementado.** Ver item 11 da "Ordem de subtarefas" acima.
+14. ✅ e2e — **47/50**. Branch `e2e/printers-flows`, PR a abrir. Fluxo real completo pela UI:
+    cadastra impressora (MAC = `SEEDED_CLIENT.mac`, exercita merge de status de rede de verdade),
+    confere consumíveis ("nunca coletado" — esperado, sem SNMP real no e2e), renomeia apelido no
+    UniFi, edita nome (Fluxo A, serial); reconecta (2 chamadas `/cmd/stamgr`, block+unblock) e
+    remove (Fluxo B, depende de A via `describe.configure({mode:'serial'})`). **Achado sério do
+    próprio executor, corrigido antes de rodar qualquer teste**: sem isolar `PRINTERS_DB_FILE` no
+    `playwright.config.ts`, a suíte e2e escreveria no `printers.db` de produção local — o mesmo
+    banco com as 4 impressoras reais. Isolado em `e2e/.printers-e2e.db` (coberto pelo `.gitignore`
+    `*.db` existente). **2 achados do crítico, ambos corrigidos:** (a) a asserção de "renomear
+    apelido" era vazia — o `fake-controller/server.mjs` aplicava `use_fixedip`/`fixed_ip` no PUT
+    `rest/user/:id` mas descartava `name` em silêncio; provado por mutação (a suíte continuava verde
+    mesmo mandando `hostname`, campo só-leitura, em vez de `name` — o erro exato que o achado 9 do
+    plano se propôs a evitar). Corrigido: o fake agora aplica `name` de verdade, e o teste verifica
+    o EFEITO navegando até Clientes e conferindo o apelido novo na linha do MAC. (b) o SQLite de e2e
+    nunca era resetado entre execuções — uma run interrompida (ex: `--grep` parcial) deixava a
+    impressora no banco e envenenava a run completa seguinte (`Nenhuma impressora cadastrada.`
+    falhava sem indicar a causa real). Corrigido com `e2e/reset-printers-db.mjs`, encadeado no
+    `command` do webServer antes do `tsx src/server.ts`. Suíte e2e: 5/5, rodada 2x seguidas sem
+    flake (mais 4x durante a investigação do crítico). Backend: 281/281. `printers.db` real
+    confirmado intacto (mtime inalterado) antes e depois de 6 execuções da suíte.
 
 **Nota sobre rate limit do Opus**: bateu o limite durante a subtarefa 2, voltou a funcionar antes
 da subtarefa 3 terminar. Se acontecer de novo numa subtarefa futura, o padrão que funcionou foi:

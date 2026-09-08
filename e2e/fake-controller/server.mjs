@@ -391,6 +391,12 @@ async function handleClassic(req, res, path, body) {
     if (!client) return send(res, 404, { meta: { rc: 'error', msg: 'api.err.NoSuchUser' }, data: [] });
     if (typeof body.use_fixedip === 'boolean') client.use_fixedip = body.use_fixedip;
     if (body.fixed_ip !== undefined) client.fixed_ip = body.fixed_ip;
+    // `name` é o "Apelido" exibido no painel (PATCH /clients/:mac/alias). Sem
+    // aplicá-lo aqui o fake aceitava o PUT e descartava o campo em silêncio,
+    // o que tornava qualquer teste de alias vazio: mandar `hostname` (que é
+    // só-leitura no controller real) em vez de `name` continuava "passando".
+    // `hostname` NÃO é aceito de propósito — é o que o dispositivo anuncia.
+    if (typeof body.name === 'string') client.name = body.name;
     return classicOk(res, [toClassicUser(client)]);
   }
 

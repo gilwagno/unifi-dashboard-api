@@ -75,7 +75,11 @@ export default defineConfig({
       // vars passadas aqui vencem o .env do desenvolvedor (dotenv não
       // sobrescreve variáveis já presentes em process.env), garantindo que
       // nenhum teste toque um controller de verdade.
-      command: 'npx tsx src/server.ts',
+      // O reset roda ANTES do servidor abrir a conexão SQLite: o cadastro de
+      // impressoras é o único estado e2e que sobrevive em disco entre runs, e
+      // uma run interrompida no meio (falha/Ctrl+C/`--grep`) envenenaria todas
+      // as seguintes. Ver e2e/reset-printers-db.mjs.
+      command: 'node e2e/reset-printers-db.mjs && npx tsx src/server.ts',
       port: BACKEND_PORT,
       reuseExistingServer: false,
       // Só stderr: o log do Fastify/Vite em stdout inunda a saída do
@@ -95,6 +99,12 @@ export default defineConfig({
         JWT_SECRET: 'segredo-de-teste-e2e-bem-longo-e-aleatorio',
         ADMIN_USER: DASHBOARD_USER,
         ADMIN_PASSWORD_HASH: DASHBOARD_PASSWORD_HASH,
+        // Isola o cadastro de impressoras do e2e do banco real de
+        // desenvolvimento (default './printers.db', que hoje guarda as 4
+        // impressoras reais da fabrica) -- sem isso, os testes de
+        // printers.spec.ts criariam e removeriam registros no arquivo de
+        // producao local.
+        PRINTERS_DB_FILE: './e2e/.printers-e2e.db',
         // Os fluxos disparam várias ações sensíveis em sequência; sem uma
         // folga aqui o rate limit de produção (10/min) derrubaria a suíte
         // por motivo alheio ao que está sendo testado.
