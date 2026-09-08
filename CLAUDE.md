@@ -373,12 +373,41 @@ Ondas 1 e 2 estão fechadas. Duas linhas em aberto, nenhuma delas subtarefa pend
 
 Nenhuma outra pendência de código conhecida em nenhuma das duas ondas.
 
-## Decisão do gate humano (respondida em 2026-08-31)
+## Decisão do gate humano (respondida em 2026-08-31) — IMPLEMENTADO em 2026-09-08
 
 Histórico de uso de banda por cliente além de 24h: usuário confirmou que **vira prioridade para a
 próxima etapa**. Não implementar sem planejamento explícito antes (escolha de banco, job
-periódico, retenção). Registrado em memória do projeto
-(`project_bandwidth_history_persistence.md`).
+periódico, retenção). Plano apresentado e aprovado pelo usuário em 2026-09-08 (retenção: 48h fino +
+rollup horário até 30d), implementado no mesmo dia — **48/50** (par executor Sonnet / crítico Opus).
+Branch `feat/bandwidth-history-persistence`, PR a abrir.
+
+- Banco novo e próprio (`node:sqlite`, `BANDWIDTH_HISTORY_DB_FILE`), mesmo padrão de `printers.db.ts`
+  — não reaproveita o banco de impressoras. Buffer em memória de 24h existente (`/bandwidth/history`,
+  `/bandwidth/history/summary`) **inalterado**; a persistência é escrita adicional, nunca substitui.
+- Novo `GET /bandwidth/history/long-range` (filtros `mac`/`from`/`to`), combinando amostra fina
+  recente + rollup horário mais antigo no mesmo shape de `BandwidthDelta` já existente.
+- **2 achados sérios do crítico, ambos de perda/invisibilidade silenciosa de dado, corrigidos:**
+  (a) o corte de retenção de 48h não estava alinhado à fronteira da hora — cortava uma hora ao meio,
+  resumia só a metade coletada até então, e a segunda metade batia no mesmo `hour_start` no dia
+  seguinte e era descartada em silêncio pelo `INSERT OR IGNORE` (que existe pra idempotência, não
+  pra isso). Corrigido: o corte agora arredonda pra baixo até o início da hora — só horas
+  INTEIRAMENTE fechadas são resumidas/apagadas (retenção fina passa a ser "pelo menos 48h", não
+  exatamente 48h, documentado no README). (b) `from`/`to` do endpoint `long-range` comparavam texto
+  ISO cru contra o SQLite — a rota aceita fuso (`-03:00`, achado 3 já registrado em outras partes do
+  projeto sobre datas/fuso) mas a comparação por string ignorava isso, e até timestamps UTC sem
+  milissegundos comparavam errado lexicograficamente (`Z` > `.`). Sonda confirmou 0 resultados
+  silenciosos nos dois casos. Corrigido com canonicalização pra UTC antes de qualquer query.
+- Decisão resolvida pelo crítico (o executor sinalizou como incerta): hora do rollup com só UMA
+  amostra fina vira `null` (não `0`) — um ponto só não mede intervalo nenhum, e `0` afirmaria "sem
+  uso" quando na verdade é "sem medição confiável" (mesmo vocabulário já usado pro reset de contador).
+- MAC gravado sem normalização de caixa (achado do crítico, corrigido) — a rota já normalizava o
+  filtro pra minúsculas, mas a escrita não, deixando o filtro por MAC inalcançável silenciosamente
+  se o controller devolvesse maiúsculas.
+- Limitação conhecida, documentada mas não corrigida (custo-benefício, fora de escopo): o endpoint
+  `long-range` sem nenhum filtro devolve os 30 dias inteiros sem paginação — aceitável pra uma rede
+  pequena/uso interno autenticado, mas README já registra a recomendação de sempre filtrar por
+  `from`/`to`/`mac`, e que paginação é o próximo passo se a rede crescer.
+- Suíte final: 311/311, `tsc` limpo.
 
 ## Metodologia (rubrica fixa — Seção 3 do plano original, pra referência se o loop continuar)
 

@@ -42,6 +42,12 @@ const envSchema = z.object({
   // (o resto do backend é tudo estado em memória). Caminho relativo ao
   // diretório de onde o processo é iniciado.
   PRINTERS_DB_FILE: z.string().min(1).default('./printers.db'),
+
+  // Arquivo do banco SQLite do histórico de banda de longo prazo (amostras
+  // finas de 48h + rollup horário de 30 dias — ver
+  // src/db/bandwidth-history.db.ts). Banco PRÓPRIO, separado de
+  // PRINTERS_DB_FILE (domínios diferentes, sem relação um com o outro).
+  BANDWIDTH_HISTORY_DB_FILE: z.string().min(1).default('./bandwidth-history.db'),
 });
 
 const parsed = envSchema.safeParse(process.env);
