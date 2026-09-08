@@ -10,6 +10,11 @@ export default defineConfig({
     // specs de e2e/ são do Playwright (browser real + stack completa) e
     // batem no padrão default de *.spec.ts do Vitest — sem esta exclusão,
     // `npm test` tentaria rodá-los como teste unitário e quebraria.
-    exclude: [...configDefaults.exclude, 'frontend/**', 'e2e/**'],
+    // `.claude/**` cobre o mesmo problema quando um worktree de agente (ver
+    // Agent tool, isolation: 'worktree') fica órfão em disco: é um checkout
+    // completo do repo, então sem esta exclusão `vitest run` na raiz varre
+    // (e duplica) a suíte de lá também, incluindo os specs de frontend/e2e
+    // que o worktree nem exclui do jeito certo. Achado real em 2026-09-08.
+    exclude: [...configDefaults.exclude, 'frontend/**', 'e2e/**', '.claude/**'],
   },
 });

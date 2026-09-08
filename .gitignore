@@ -15,3 +15,9 @@ test-results/
 playwright-report/
 blob-report/
 .playwright/
+
+# Worktrees isolados criados pelo Agent tool (isolation: 'worktree') — cada
+# um é um checkout completo do repo; nunca devem ser versionados, e um que
+# fique órfão em disco não deve poluir `git status`/`git add -A` por engano
+# (achado real em 2026-09-08 — ver vitest.config.ts pra exclusão da suíte).
+.claude/worktrees/
