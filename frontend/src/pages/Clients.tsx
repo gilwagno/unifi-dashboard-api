@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Badge } from '../components/Badge';
 import { Layout } from '../components/Layout';
+import { usePolling } from '../hooks/usePolling';
 import { api, ApiError, type Pagination, type UniFiClient } from '../lib/api';
 
 const PAGE_SIZE = 8;
+const POLL_INTERVAL_MS = 60_000;
 
 type TypeFilter = 'ALL' | 'WIRED' | 'WIRELESS';
 type BlockedFilter = 'ALL' | 'ACTIVE' | 'BLOCKED';
@@ -22,27 +24,66 @@ export function Clients() {
   const [fixedIpDraft, setFixedIpDraft] = useState('');
   const [pendingFixedIpMac, setPendingFixedIpMac] = useState<string | null>(null);
 
-  const load = useCallback(() => {
-    setLoading(true);
-    setError(null);
-    api
-      .listClients({
-        page,
-        pageSize: PAGE_SIZE,
-        type: typeFilter,
-        blocked: blockedFilter === 'ALL' ? undefined : blockedFilter === 'BLOCKED',
-      })
-      .then((res) => {
-        setClients(res.data);
-        setPagination(res.pagination);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : 'Erro ao carregar clientes'))
-      .finally(() => setLoading(false));
-  }, [page, typeFilter, blockedFilter]);
+  // Contador monotônico de requisições de listagem: só a resposta da requisição MAIS RECENTE
+  // é aplicada ao estado. Sem isso, um refresh silencioso do polling que já estava em voo
+  // quando o usuário troca de página/filtro resolve depois da carga nova e reverte a lista
+  // (e o rótulo de paginação) pro estado anterior — errada até o próximo ciclo de 60s. Também
+  // descarta respostas que chegam depois do unmount (usuário navegou pra outra tela).
+  const requestSeqRef = useRef(0);
+
+  // `silent = true` é usado pelo polling em segundo plano: recarrega a MESMA página que o
+  // usuário está vendo (não reseta `page`) e nunca ativa `loading` — senão a lista inteira
+  // pisca "Carregando…" a cada minuto. Se o refresh silencioso falhar (ex.: controller fora do
+  // ar nesse ciclo), só loga no console e mantém os dados antigos na tela — substituir a lista
+  // por uma mensagem de erro a cada minuto seria pior do que simplesmente tentar de novo no
+  // próximo ciclo.
+  const load = useCallback(
+    (silent = false) => {
+      if (!silent) {
+        setLoading(true);
+        setError(null);
+      }
+      const seq = (requestSeqRef.current += 1);
+      api
+        .listClients({
+          page,
+          pageSize: PAGE_SIZE,
+          type: typeFilter,
+          blocked: blockedFilter === 'ALL' ? undefined : blockedFilter === 'BLOCKED',
+        })
+        .then((res) => {
+          // Só a resposta mais recente escreve no estado. `loading`/`error` seguem
+          // desguardados de propósito: quem ligou o `loading` foi uma ação do usuário e
+          // precisa poder desligá-lo mesmo se sua resposta chegou atrasada, senão a tela
+          // trava em "Carregando…" quando um tick do polling passa no meio.
+          if (seq !== requestSeqRef.current) return;
+          setClients(res.data);
+          setPagination(res.pagination);
+        })
+        .catch((err) => {
+          if (silent) {
+            console.error('Falha ao atualizar clientes em segundo plano', err);
+            return;
+          }
+          setError(err instanceof Error ? err.message : 'Erro ao carregar clientes');
+        })
+        .finally(() => {
+          if (!silent) setLoading(false);
+        });
+    },
+    [page, typeFilter, blockedFilter],
+  );
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // Pausa o polling enquanto o editor inline de IP fixo está aberto: ele é renderizado DENTRO
+  // da linha do cliente (`key={c.id}`), então um refresh que remova aquele cliente da página
+  // atual (cliente que saiu da rede, ou a fronteira da paginação deslocando com PAGE_SIZE=8)
+  // desmonta o editor e joga fora o IP que o usuário estava digitando, sem nenhuma explicação
+  // na tela. Mesma proteção que Printers.tsx já aplica ao formulário de cadastro.
+  usePolling(() => load(true), POLL_INTERVAL_MS, { enabled: fixedIpMac === null });
 
   function changeTypeFilter(value: TypeFilter) {
     setTypeFilter(value);

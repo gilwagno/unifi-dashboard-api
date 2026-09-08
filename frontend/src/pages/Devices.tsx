@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Badge } from '../components/Badge';
 import { Layout } from '../components/Layout';
+import { usePolling } from '../hooks/usePolling';
 import { api, ApiError, type Pagination, type UniFiDevice, type UniFiDeviceDetail } from '../lib/api';
 
 const PAGE_SIZE = 8;
+const POLL_INTERVAL_MS = 60_000;
 
 export function Devices() {
   const [devices, setDevices] = useState<UniFiDevice[]>([]);
@@ -20,22 +22,54 @@ export function Devices() {
   const [portActionError, setPortActionError] = useState<string | null>(null);
   const [pendingPort, setPendingPort] = useState<number | null>(null);
 
-  const load = useCallback(() => {
-    setLoading(true);
-    setError(null);
-    api
-      .listDevices({ page, pageSize: PAGE_SIZE })
-      .then((res) => {
-        setDevices(res.data);
-        setPagination(res.pagination);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : 'Erro ao carregar dispositivos'))
-      .finally(() => setLoading(false));
-  }, [page]);
+  // Contador monotônico de requisições de listagem: só a resposta da requisição MAIS RECENTE
+  // é aplicada ao estado. Sem isso, um refresh silencioso do polling que já estava em voo
+  // quando o usuário troca de página resolve depois da carga da página nova e reverte a lista
+  // (e o rótulo de paginação) pra página anterior — errada até o próximo ciclo de 60s. Também
+  // descarta respostas que chegam depois do unmount (usuário navegou pra outra tela).
+  const requestSeqRef = useRef(0);
+
+  // `silent = true` é usado pelo polling em segundo plano: recarrega a MESMA página que o
+  // usuário está vendo (não reseta `page`) e nunca ativa `loading` — senão a lista inteira
+  // pisca "Carregando…" a cada minuto. Se o refresh silencioso falhar, só loga no console e
+  // mantém os dados antigos na tela em vez de trocar por uma mensagem de erro a cada minuto.
+  const load = useCallback(
+    (silent = false) => {
+      if (!silent) {
+        setLoading(true);
+        setError(null);
+      }
+      const seq = (requestSeqRef.current += 1);
+      api
+        .listDevices({ page, pageSize: PAGE_SIZE })
+        .then((res) => {
+          // Só a resposta mais recente escreve no estado. `loading`/`error` seguem
+          // desguardados de propósito: quem ligou o `loading` foi uma ação do usuário e
+          // precisa poder desligá-lo mesmo se sua resposta chegou atrasada, senão a tela
+          // trava em "Carregando…" quando um tick do polling passa no meio.
+          if (seq !== requestSeqRef.current) return;
+          setDevices(res.data);
+          setPagination(res.pagination);
+        })
+        .catch((err) => {
+          if (silent) {
+            console.error('Falha ao atualizar dispositivos em segundo plano', err);
+            return;
+          }
+          setError(err instanceof Error ? err.message : 'Erro ao carregar dispositivos');
+        })
+        .finally(() => {
+          if (!silent) setLoading(false);
+        });
+    },
+    [page],
+  );
 
   useEffect(() => {
     load();
   }, [load]);
+
+  usePolling(() => load(true), POLL_INTERVAL_MS);
 
   async function restart(device: UniFiDevice) {
     if (!confirm(`Reiniciar "${device.name}"? Isso derruba a conexão dos clientes ligados a ele por alguns segundos.`)) {

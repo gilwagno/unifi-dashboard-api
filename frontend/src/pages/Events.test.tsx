@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider } from '../context/AuthContext';
 import { Events } from './Events';
 
@@ -24,10 +24,25 @@ function renderEvents() {
   );
 }
 
+// Flusha a fila de microtasks (promises já resolvidas encadeadas em .then())
+// várias vezes seguidas — necessário com fake timers ativos, porque a carga
+// inicial da página passa por mais de um `.then()` em cadeia (ex: Layout
+// carregando sites + a própria página carregando dados) e uma única volta de
+// `advanceTimersByTimeAsync(0)` só libera um nível da cadeia por vez.
+async function flushMicrotasks() {
+  for (let i = 0; i < 10; i += 1) {
+    await vi.advanceTimersByTimeAsync(0);
+  }
+}
+
 describe('Events page', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.listSites).mockResolvedValue({ data: [{ id: 's1', name: 'Site 1' }] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('renders parsed.meta.message when present', async () => {
@@ -139,5 +154,31 @@ describe('Events page', () => {
     renderEvents();
 
     expect(await screen.findByText('Erro ao buscar eventos')).toBeInTheDocument();
+  });
+
+  it('refreshes the event list after the polling interval passes, without re-showing "Carregando…"', async () => {
+    vi.mocked(api.eventsHistory).mockResolvedValueOnce({
+      data: [{ receivedAt: '2026-01-01T10:00:00.000Z', data: JSON.stringify({ key: 'PRIMEIRO_EVENTO' }) }],
+    });
+
+    // Fake timers precisam estar ativos ANTES do render: o `setInterval` do
+    // usePolling é criado no primeiro efeito, e trocar pra fake timers DEPOIS
+    // não assume o controle de um timer real já agendado.
+    vi.useFakeTimers();
+
+    renderEvents();
+    await flushMicrotasks();
+    expect(screen.getByText('PRIMEIRO_EVENTO')).toBeInTheDocument();
+
+    vi.mocked(api.eventsHistory).mockResolvedValueOnce({
+      data: [{ receivedAt: '2026-01-01T10:01:00.000Z', data: JSON.stringify({ key: 'SEGUNDO_EVENTO' }) }],
+    });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushMicrotasks();
+
+    expect(screen.getByText('SEGUNDO_EVENTO')).toBeInTheDocument();
+    expect(screen.queryByText('Carregando…')).not.toBeInTheDocument();
+    expect(screen.queryByText('PRIMEIRO_EVENTO')).not.toBeInTheDocument();
   });
 });

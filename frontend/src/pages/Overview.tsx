@@ -1,10 +1,13 @@
 import { Ban, Radio, Users, Wifi } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge } from '../components/Badge';
 import { Layout } from '../components/Layout';
 import { StatCard } from '../components/StatCard';
+import { usePolling } from '../hooks/usePolling';
 import { api, type UniFiClient, type UniFiDevice, type UniFiEventRecord } from '../lib/api';
+
+const POLL_INTERVAL_MS = 60_000;
 
 function timeAgo(iso: string) {
   const diffMs = Date.now() - new Date(iso).getTime();
@@ -31,7 +34,10 @@ export function Overview() {
   const [events, setEvents] = useState<UniFiEventRecord[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  // `silent = true` (polling em segundo plano) nunca reseta os states pra `null` — é esse
+  // `null` que os StatCards usam como "—" enquanto carregam. Falha silenciosa só loga no
+  // console e mantém os dados antigos na tela, em vez de trocar por erro a cada ciclo de 60s.
+  const load = useCallback((silent = false) => {
     Promise.all([
       api.listClients({ pageSize: 200 }),
       api.listDevices({ pageSize: 200 }),
@@ -42,8 +48,20 @@ export function Overview() {
         setDevices(d.data);
         setEvents(e.data);
       })
-      .catch((err) => setError(err instanceof Error ? err.message : 'Erro ao carregar dados'));
+      .catch((err) => {
+        if (silent) {
+          console.error('Falha ao atualizar a visão geral em segundo plano', err);
+          return;
+        }
+        setError(err instanceof Error ? err.message : 'Erro ao carregar dados');
+      });
   }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  usePolling(() => load(true), POLL_INTERVAL_MS);
 
   const totalClients = clients?.length ?? 0;
   const blockedClients = clients?.filter((c) => c.blocked).length ?? 0;

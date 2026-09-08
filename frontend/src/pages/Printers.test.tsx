@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -77,6 +77,16 @@ function mockSites() {
   vi.mocked(api.listSites).mockResolvedValue({ data: [{ id: 's1', name: 'Site 1' }] });
 }
 
+// Flusha a fila de microtasks várias vezes seguidas — necessário com fake
+// timers ativos, porque a carga inicial passa por mais de um `.then()` em
+// cadeia (Layout carregando sites + Printers carregando a lista) e uma única
+// volta de `advanceTimersByTimeAsync(0)` só libera um nível da cadeia por vez.
+async function flushMicrotasks() {
+  for (let i = 0; i < 10; i += 1) {
+    await vi.advanceTimersByTimeAsync(0);
+  }
+}
+
 describe('Printers page', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -87,6 +97,7 @@ describe('Printers page', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   it('renders the printer list with the right network indicator for integration/classic/unknown sources', async () => {
@@ -349,5 +360,95 @@ describe('Printers page', () => {
     renderPrinters();
 
     expect(await screen.findByText('Falha ao carregar impressoras')).toBeInTheDocument();
+  });
+
+  it('refreshes the printer list after the polling interval passes, without re-showing "Carregando…"', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValueOnce([PRINTER_INTEGRATION]);
+
+    // Fake timers precisam estar ativos ANTES do render: o `setInterval` do
+    // usePolling é criado no primeiro efeito, e trocar pra fake timers DEPOIS
+    // não assume o controle de um timer real já agendado.
+    vi.useFakeTimers();
+
+    renderPrinters();
+    await flushMicrotasks();
+    expect(screen.getByText('HPLaserMFP135w')).toBeInTheDocument();
+    expect(screen.queryByText('HLL2360DWVENDAS')).not.toBeInTheDocument();
+
+    vi.mocked(api.listPrinters).mockResolvedValueOnce([PRINTER_INTEGRATION, PRINTER_CLASSIC]);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushMicrotasks();
+
+    expect(screen.getByText('HLL2360DWVENDAS')).toBeInTheDocument();
+    expect(screen.queryByText('Carregando…')).not.toBeInTheDocument();
+  });
+
+  // Regressão: o polling fica desligado com o FORMULÁRIO aberto, mas não durante remover/
+  // reconectar (que usam `window.confirm`). Nessas ações, um refresh silencioso que já estava
+  // em voo não pode resolver depois do `load()` da remoção e ressuscitar na tela a impressora
+  // que acabou de sair do cadastro.
+  it('does not resurrect a just-deleted printer with a stale in-flight poll response', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValueOnce([PRINTER_INTEGRATION, PRINTER_CLASSIC]);
+    vi.useFakeTimers();
+
+    renderPrinters();
+    await flushMicrotasks();
+    expect(screen.getByText('HLL2360DWVENDAS')).toBeInTheDocument();
+
+    // Tick do polling: a listagem fica PENDENTE, ainda com as duas impressoras.
+    let resolveStalePoll: (value: PrinterWithNetwork[]) => void = () => {};
+    vi.mocked(api.listPrinters).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveStalePoll = resolve; }),
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushMicrotasks();
+
+    // Com o refresh em voo, o usuário remove a segunda impressora; o `load()` da mutação
+    // responde primeiro.
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    vi.mocked(api.deletePrinter).mockResolvedValue(undefined as never);
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    const card = screen.getByText('HLL2360DWVENDAS').closest('div.overflow-hidden') as HTMLElement;
+    await act(async () => {
+      fireEvent.click(within(card).getByRole('button', { name: 'Remover' }));
+      await flushMicrotasks();
+    });
+    expect(screen.queryByText('HLL2360DWVENDAS')).not.toBeInTheDocument();
+
+    // Só agora a resposta atrasada (de antes da remoção) chega.
+    await act(async () => {
+      resolveStalePoll([PRINTER_INTEGRATION, PRINTER_CLASSIC]);
+      await flushMicrotasks();
+    });
+
+    expect(screen.queryByText('HLL2360DWVENDAS')).not.toBeInTheDocument();
+    expect(screen.getByText('HPLaserMFP135w')).toBeInTheDocument();
+  });
+
+  it('does not poll while the create/edit form is open (avoids the list shifting under the user mid-edit)', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+
+    // Usa `fireEvent` (síncrono) em vez de `userEvent` aqui: `userEvent`
+    // agenda seus próprios timers internos que não convivem bem com fake
+    // timers globais, o que travava este teste. `fireEvent.click` dispara o
+    // handler de clique diretamente, sem depender de nenhum timer.
+    vi.useFakeTimers();
+
+    renderPrinters();
+    await flushMicrotasks();
+    expect(screen.getByText('HPLaserMFP135w')).toBeInTheDocument();
+    expect(api.listPrinters).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Nova impressora' }));
+    });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushMicrotasks();
+
+    // O polling ficou desligado o tempo todo com o formulário aberto — nenhuma
+    // nova chamada de listagem aconteceu além da carga inicial.
+    expect(api.listPrinters).toHaveBeenCalledTimes(1);
   });
 });

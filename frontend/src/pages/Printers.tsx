@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp, Pencil, Printer as PrinterIcon, RefreshCw, Trash2 } from 'lucide-react';
 import { Badge } from '../components/Badge';
 import { Layout } from '../components/Layout';
+import { usePolling } from '../hooks/usePolling';
 import {
   api,
   ApiError,
@@ -13,6 +14,8 @@ import {
   type PrinterWithNetwork,
   type UpdatePrinterBody,
 } from '../lib/api';
+
+const POLL_INTERVAL_MS = 60_000;
 
 // Rótulo/tom/explicação de cada status de suprimento (ver
 // resolveSupplyStatus em src/routes/printers.routes.ts — os status além de
@@ -170,16 +173,42 @@ export function Printers() {
   const [aliasDraft, setAliasDraft] = useState('');
   const [aliasSubmitting, setAliasSubmitting] = useState(false);
 
-  const load = useCallback(() => {
+  const requestSeqRef = useRef(0);
+
+  // `silent = true` (polling em segundo plano) nunca reseta `printers` pra `null` — é esse
+  // `null` que a tela usa como sinal de "carregando". Falha silenciosa só loga no console e
+  // mantém a lista antiga na tela, em vez de trocar por uma mensagem de erro a cada ciclo.
+  const load = useCallback((silent = false) => {
+    const seq = (requestSeqRef.current += 1);
     api
       .listPrinters()
-      .then(setPrinters)
-      .catch((err) => setError(err instanceof Error ? err.message : 'Erro ao carregar impressoras'));
+      .then((data) => {
+        // Só a resposta mais recente escreve no estado: o polling fica desligado enquanto o
+        // formulário está aberto, mas NÃO durante remover/reconectar (que usam `confirm`), e
+        // nessas ações um refresh silencioso em voo pode resolver depois do `load()` da
+        // mutação e ressuscitar na tela a impressora que acabou de ser removida.
+        if (seq !== requestSeqRef.current) return;
+        setPrinters(data);
+      })
+      .catch((err) => {
+        if (silent) {
+          console.error('Falha ao atualizar impressoras em segundo plano', err);
+          return;
+        }
+        setError(err instanceof Error ? err.message : 'Erro ao carregar impressoras');
+      });
   }, []);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // Enquanto o formulário de cadastro/edição está aberto OU a edição de apelido está em
+  // andamento, desliga o polling desta página. O estado do formulário/apelido é tecnicamente
+  // separado da lista (`printers`), então um refresh em segundo plano não afetaria os campos
+  // preenchidos — mas evita qualquer risco de a lista trocar de posição/tamanho embaixo do
+  // usuário no meio de um cadastro, o que seria confuso mesmo sem quebrar nada.
+  usePolling(() => load(true), POLL_INTERVAL_MS, { enabled: !showForm && aliasEditingId === null });
 
   function resetForm() {
     setForm(EMPTY_FORM);
