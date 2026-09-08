@@ -6,6 +6,8 @@ import { unifiClassicService } from '../services/unifi-classic.service.js';
 import {
   toPublic,
   type CreatePrinterInput,
+  type CreateMaintenanceEventInput,
+  type PrinterMaintenancePolicy,
   type SnmpSecretInput,
   type UpdatePrinterInput,
 } from '../db/printers.db.js';
@@ -360,6 +362,100 @@ function toDiagnosticsResponse(printerId: string, reading: PrinterSnmpReading | 
   };
 }
 
+// --- POST/GET /printers/:id/maintenance (Onda 2, subtarefa 8) ---
+//
+// Histórico de manutenções REALIZADAS (registro manual) + cálculo de
+// 'próxima manutenção devida' a partir da política já existente no cadastro
+// (maintenance.intervalDays/intervalPages, subtarefa 1) combinada com o
+// último evento do histórico. Ver src/db/printers.db.ts para o schema da
+// tabela nova (printer_maintenance_events).
+
+const createMaintenanceEventBody = z.object({
+  // offset: true aceita qualquer deslocamento de fuso (não só 'Z') — quem
+  // registra a manutenção pode estar em outro fuso; o valor é guardado
+  // exatamente como recebido (ISO 8601), sem normalização para UTC.
+  performedAt: z.string().datetime({ offset: true }).optional(),
+  note: z.string().min(1).max(500).optional(),
+  // `nonnegative`, não `positive`: 0 é um contador de páginas legítimo
+  // (impressora nova cadastrada junto com a manutenção de instalação, ou
+  // contador zerado após troca de placa). Rejeitar 0 forçaria quem registra a
+  // manutenção a omitir o campo — e omitir é semanticamente diferente
+  // (`duePages` fica null, o alerta por páginas desliga), então o 400 aqui
+  // trocaria silenciosamente "zerado" por "desconhecido".
+  pageCountAtMaintenance: z.number().int().nonnegative().optional(),
+});
+
+interface MaintenanceNext {
+  dueAt: string | null;
+  duePages: number | null;
+  currentPageCount: number | null;
+  dateOverdue: boolean;
+  pagesOverdue: boolean;
+}
+
+interface MaintenanceResponse {
+  printerId: string;
+  policy: Pick<PrinterMaintenancePolicy, 'intervalDays' | 'intervalPages'>;
+  events: ReturnType<typeof printersRepository.listMaintenanceEvents>;
+  next: MaintenanceNext;
+}
+
+// DECISÃO — sem nenhum evento de manutenção registrado ainda, 'next.dueAt' e
+// 'next.duePages' ficam null mesmo que a política esteja configurada: não há
+// uma manutenção anterior da qual contar o próximo intervalo, e inventar uma
+// baseline (ex.: createdAt do cadastro) assumiria que a impressora nunca
+// recebeu manutenção antes de ser cadastrada no sistema, o que não é
+// necessariamente verdade. 'dateOverdue'/'pagesOverdue' seguem false nesse
+// caso — não há como estar atrasado de algo que nunca foi definido.
+function computeNextMaintenance(
+  policy: PrinterMaintenancePolicy,
+  events: ReturnType<typeof printersRepository.listMaintenanceEvents>,
+  currentPageCount: number | null,
+): MaintenanceNext {
+  // events já vem ordenado por performed_at DESC (listMaintenanceEvents) —
+  // o índice 0 é sempre o evento mais recente.
+  const lastEvent = events[0];
+
+  let dueAt: string | null = null;
+  if (lastEvent && policy.intervalDays !== null) {
+    const dueMs = new Date(lastEvent.performedAt).getTime() + policy.intervalDays * 24 * 60 * 60 * 1000;
+    dueAt = new Date(dueMs).toISOString();
+  }
+
+  // duePages exige tanto a política quanto o último evento SABER quantas
+  // páginas a impressora tinha na hora da manutenção — sem
+  // pageCountAtMaintenance informado naquele evento não há base pra somar o
+  // intervalo, mesmo que a política esteja configurada.
+  let duePages: number | null = null;
+  if (lastEvent && policy.intervalPages !== null && lastEvent.pageCountAtMaintenance !== null) {
+    duePages = lastEvent.pageCountAtMaintenance + policy.intervalPages;
+  }
+
+  const dateOverdue = dueAt !== null && new Date(dueAt).getTime() < Date.now();
+  const pagesOverdue = duePages !== null && currentPageCount !== null && currentPageCount >= duePages;
+
+  return { dueAt, duePages, currentPageCount, dateOverdue, pagesOverdue };
+}
+
+function toMaintenanceResponse(
+  printerId: string,
+  policy: PrinterMaintenancePolicy,
+  events: ReturnType<typeof printersRepository.listMaintenanceEvents>,
+  reading: PrinterSnmpReading | undefined,
+): MaintenanceResponse {
+  // Mesma regra de pageCountValue usada em /consumables: só um SnmpMeasurement
+  // com status 'ok' vira número utilizável; sentinela/erro/nunca-coletado
+  // viram null (nunca NaN/undefined).
+  const currentPageCount = reading ? pageCountValue(reading.pageCount) : null;
+
+  return {
+    printerId,
+    policy: { intervalDays: policy.intervalDays, intervalPages: policy.intervalPages },
+    events,
+    next: computeNextMaintenance(policy, events, currentPageCount),
+  };
+}
+
 export default async function printersRoutes(app: FastifyInstance) {
   app.addHook('preHandler', app.authenticate);
 
@@ -522,4 +618,38 @@ export default async function printersRoutes(app: FastifyInstance) {
       });
     },
   );
+
+  // --- Agenda de manutenção (Onda 2, subtarefa 8) ---
+
+  app.post(
+    '/printers/:id/maintenance',
+    { config: { rateLimit: { max: env.RATE_LIMIT_CLIENT_ACTION_MAX, timeWindow: env.RATE_LIMIT_WINDOW } } },
+    async (request, reply) => {
+      const { id } = idParam.parse(request.params);
+      const body = createMaintenanceEventBody.parse(request.body);
+
+      if (!printersRepository.getById(id)) {
+        return reply.code(404).send({ error: 'Impressora não encontrada' });
+      }
+
+      const input: CreateMaintenanceEventInput = {
+        performedAt: body.performedAt,
+        note: body.note,
+        pageCountAtMaintenance: body.pageCountAtMaintenance,
+      };
+      const event = printersRepository.createMaintenanceEvent(id, input);
+      return reply.code(201).send(event);
+    },
+  );
+
+  app.get('/printers/:id/maintenance', async (request, reply) => {
+    const { id } = idParam.parse(request.params);
+    const record = printersRepository.getById(id);
+    if (!record) {
+      return reply.code(404).send({ error: 'Impressora não encontrada' });
+    }
+
+    const events = printersRepository.listMaintenanceEvents(id);
+    return toMaintenanceResponse(id, record.maintenance, events, getLastReading(id));
+  });
 }

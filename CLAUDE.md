@@ -226,7 +226,7 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
    decisão de não inventar default sem esconder que a checagem está desligada. `pageCount` com
    sentinela/erro foi verificado: vira `null` com `collectedAt` preenchido (distinguível de "nunca
    coletada"), nunca NaN/undefined — estava correto, mas sem teste; agora tem. Suíte: 230/230.
-7. ✅ `GET /printers/:id/diagnostics` — **47/50**. Branch `feat/printers-diagnostics`, PR #11 aberta.
+7. ✅ `GET /printers/:id/diagnostics` — **47/50**. PR #11, mergeada em 2026-09-08.
    Formata `getLastReading()` (já existente desde a subtarefa 5) em `model` (`hrDeviceDescr`),
    `systemInfo` (`sysDescr` cru — formato livre por fabricante, não vale a pena parsear versão de
    firmware sem pedido explícito), `deviceStatus` (um dos 5 rótulos RFC 2790 ou `'not-measured'`),
@@ -240,10 +240,29 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
    novos no arquivo da subtarefa), `tsc` limpo. Nota lateral do crítico: `vitest.config.ts` na raiz
    não excluía `.claude/**` — corrigido direto em `master` em 2026-09-08 (worktree órfão limpo na
    mesma sessão), não é mais pendência.
-8. ✅ `PATCH /clients/:mac/alias` (achado 8, genérico) — **47/50**. PR #7, **mergeada em
-   2026-08-31** (esta linha estava desatualizada dizendo "PR a abrir" — corrigido em 2026-09-08).
+8a. ✅ `PATCH /clients/:mac/alias` (achado 8, genérico) — **47/50**. PR #7, mergeada em
+   2026-08-31 (esta linha estava desatualizada dizendo "PR a abrir" — corrigido em 2026-09-08).
    PUT parcial confirmado por teste (mesmo padrão de `setFixedIp`). Achado do crítico: `.trim()`
    sem teste ancorando — corrigido.
+8b. ✅ Agenda de manutenção (`POST/GET /printers/:id/maintenance`) — **48/50**. PR #12, retargeada
+   pra `master` depois que a #11 mergeou (squash mudou o hash dos commits, então a base precisou
+   virar `master` em vez de ficar na branch antiga). Tabela
+   nova `printer_maintenance_events` (mesma conexão SQLite de `printers`), `computeNextMaintenance`
+   cruza a política já existente (`intervalDays`/`intervalPages`) + último evento do histórico +
+   `pageCount` do poller SNMP. Decisão: sem nenhum evento registrado, `next.dueAt`/`next.duePages`
+   ficam `null` mesmo com política configurada — não inventa baseline a partir do `createdAt` do
+   cadastro. **2 achados do crítico, ambos corrigidos:** (a) bug real de fuso — `listMaintenanceEvents`
+   ordenava por `ORDER BY performed_at DESC` (comparação de STRING no SQLite), mas `performedAt`
+   aceita qualquer offset (`-03:00` etc.) e é gravado como recebido; um evento em horário de Brasília
+   podia ordenar como mais antigo que um em UTC do mesmo instante, fazendo `computeNextMaintenance`
+   usar o evento ERRADO como baseline. Corrigido: SQL vira só desempate, ordenação final por
+   `Date.parse` em JS. (b) `pageCountAtMaintenance: 0` era rejeitado com 400 (`z.number().positive()`)
+   — contador zerado é estado legítimo (impressora nova/placa trocada), e rejeitar forçava omitir o
+   campo, o que tem semântica diferente (desliga o alerta por páginas silenciosamente). Trocado para
+   `.nonnegative()`. Também revelado por mutação e corrigido: `duePages` sem checar
+   `pageCountAtMaintenance !== null` no último evento coagia `null + intervalPages` num número
+   inventado. Suíte do backend: 521/521 (fora as 7 suítes da pasta órfã `.claude/worktrees/agent-
+   a72f01faf9dd4e1f4/`, resíduo de outra tarefa, sem relação com este código), `tsc` limpo.
 9. 🔍 Investigação HP/SWS real (172.16.0.34, login admin sem senha via Playwright — a SWS usa AES
    client-side, não dá pra scriptar com curl puro): confirmado que é a MESMA HP já cadastrada
    (serial `BRBSP770DV` bate), não uma 5ª impressora — só estava respondendo num IP diferente do
