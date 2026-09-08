@@ -241,9 +241,29 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
    compartilhada): `vitest.config.ts` na raiz não exclui `.claude/**` — um worktree de agente órfão
    em disco faz `vitest run` duplicar a suíte e importar testes de frontend/e2e, mesmo sintoma já
    registrado no `workbench.md` da Onda 1 pra `frontend/**`/`e2e/**`. Considerar excluir também.
-8. ✅ `PATCH /clients/:mac/alias` (achado 8, genérico) — **47/50**. Branch `feat/clients-alias`,
+8a. ✅ `PATCH /clients/:mac/alias` (achado 8, genérico) — **47/50**. Branch `feat/clients-alias`,
    PR a abrir. PUT parcial confirmado por teste (mesmo padrão de `setFixedIp`). Achado do crítico:
    `.trim()` sem teste ancorando — corrigido.
+8b. ✅ Agenda de manutenção (`POST/GET /printers/:id/maintenance`) — **48/50**. Branch
+   `feat/printers-maintenance`, empilhada sobre `feat/printers-diagnostics` (PR #11, ainda aberta —
+   mesmo arquivo `printers.routes.ts`; **lição do CLAUDE.md sobre `--delete-branch` em pilha se
+   aplica aqui**: não apagar `feat/printers-diagnostics` até esta PR também estar mergeada). Tabela
+   nova `printer_maintenance_events` (mesma conexão SQLite de `printers`), `computeNextMaintenance`
+   cruza a política já existente (`intervalDays`/`intervalPages`) + último evento do histórico +
+   `pageCount` do poller SNMP. Decisão: sem nenhum evento registrado, `next.dueAt`/`next.duePages`
+   ficam `null` mesmo com política configurada — não inventa baseline a partir do `createdAt` do
+   cadastro. **2 achados do crítico, ambos corrigidos:** (a) bug real de fuso — `listMaintenanceEvents`
+   ordenava por `ORDER BY performed_at DESC` (comparação de STRING no SQLite), mas `performedAt`
+   aceita qualquer offset (`-03:00` etc.) e é gravado como recebido; um evento em horário de Brasília
+   podia ordenar como mais antigo que um em UTC do mesmo instante, fazendo `computeNextMaintenance`
+   usar o evento ERRADO como baseline. Corrigido: SQL vira só desempate, ordenação final por
+   `Date.parse` em JS. (b) `pageCountAtMaintenance: 0` era rejeitado com 400 (`z.number().positive()`)
+   — contador zerado é estado legítimo (impressora nova/placa trocada), e rejeitar forçava omitir o
+   campo, o que tem semântica diferente (desliga o alerta por páginas silenciosamente). Trocado para
+   `.nonnegative()`. Também revelado por mutação e corrigido: `duePages` sem checar
+   `pageCountAtMaintenance !== null` no último evento coagia `null + intervalPages` num número
+   inventado. Suíte do backend: 521/521 (fora as 7 suítes da pasta órfã `.claude/worktrees/agent-
+   a72f01faf9dd4e1f4/`, resíduo de outra tarefa, sem relação com este código), `tsc` limpo.
 9. 🔍 Investigação HP/SWS real (172.16.0.34, login admin sem senha via Playwright — a SWS usa AES
    client-side, não dá pra scriptar com curl puro): confirmado que é a MESMA HP já cadastrada
    (serial `BRBSP770DV` bate), não uma 5ª impressora — só estava respondendo num IP diferente do

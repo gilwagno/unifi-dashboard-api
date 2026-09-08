@@ -126,6 +126,49 @@ export function toPublic(record: PrinterRecord): PrinterPublic {
   return publicFields;
 }
 
+// --- Histórico de manutenção realizada (Onda 2, subtarefa 8) ---
+//
+// Um evento = uma manutenção que foi feita de verdade (troca de toner,
+// limpeza, etc.), registrada manualmente por quem administra o dashboard —
+// não confundir com `PrinterMaintenancePolicy` acima, que é a CONFIGURAÇÃO
+// de intervalo (a cada quantos dias/páginas a manutenção deveria acontecer).
+// O histórico é o que permite calcular "a próxima manutenção está devida",
+// somando a política à data/contador do último evento.
+export interface PrinterMaintenanceEvent {
+  id: string;
+  printerId: string;
+  performedAt: string;
+  note: string | null;
+  pageCountAtMaintenance: number | null;
+  createdAt: string;
+}
+
+export interface CreateMaintenanceEventInput {
+  performedAt?: string;
+  note?: string | null;
+  pageCountAtMaintenance?: number | null;
+}
+
+interface MaintenanceEventRow {
+  id: string;
+  printer_id: string;
+  performed_at: string;
+  note: string | null;
+  page_count_at_maintenance: number | null;
+  created_at: string;
+}
+
+function maintenanceRowToRecord(row: MaintenanceEventRow): PrinterMaintenanceEvent {
+  return {
+    id: row.id,
+    printerId: row.printer_id,
+    performedAt: row.performed_at,
+    note: row.note,
+    pageCountAtMaintenance: row.page_count_at_maintenance,
+    createdAt: row.created_at,
+  };
+}
+
 export class PrintersRepository {
   private readonly db: DatabaseSyncType;
 
@@ -157,6 +200,30 @@ export class PrintersRepository {
     // `CREATE UNIQUE INDEX IF NOT EXISTS` sim. Os MACs são normalizados para
     // minúsculas na camada de rota, então a comparação binária basta.
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_printers_mac ON printers(mac)');
+
+    // Tabela do histórico de manutenção (subtarefa 8) — mesma conexão/mesmo
+    // arquivo da tabela `printers` (é a primeira "tabela irmã" do projeto;
+    // não há necessidade de uma classe/repositório separado só por isso,
+    // dado que hoje é um único arquivo SQLite sem múltiplos repositórios).
+    // Sem `FOREIGN KEY` formal (mesmo estilo do resto do schema, sem
+    // migração formal ainda) — a existência da impressora é validada na
+    // camada de aplicação (rota) antes de inserir um evento.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS printer_maintenance_events (
+        id TEXT PRIMARY KEY,
+        printer_id TEXT NOT NULL,
+        performed_at TEXT NOT NULL,
+        note TEXT,
+        page_count_at_maintenance INTEGER,
+        created_at TEXT NOT NULL
+      )
+    `);
+
+    // Listado por impressora o tempo todo (GET /printers/:id/maintenance) —
+    // sem índice, cada listagem faria table scan na tabela inteira.
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_maintenance_events_printer_id ON printer_maintenance_events(printer_id)',
+    );
   }
 
   // Usada pelas rotas para devolver 409 com mensagem própria em vez de
@@ -275,6 +342,67 @@ export class PrintersRepository {
   delete(id: string): boolean {
     const result = this.db.prepare('DELETE FROM printers WHERE id = $id').run({ id });
     return result.changes > 0;
+  }
+
+  // --- Histórico de manutenção (subtarefa 8) ---
+
+  // Não valida aqui se `printerId` existe — quem chama (a rota) já fez
+  // `getById` antes para decidir entre 404 e seguir, então repetir a
+  // checagem no repositório seria uma segunda fonte da mesma verdade.
+  createMaintenanceEvent(printerId: string, input: CreateMaintenanceEventInput): PrinterMaintenanceEvent {
+    const now = new Date().toISOString();
+    const row: MaintenanceEventRow = {
+      id: randomUUID(),
+      printer_id: printerId,
+      performed_at: input.performedAt ?? now,
+      note: input.note ?? null,
+      page_count_at_maintenance: input.pageCountAtMaintenance ?? null,
+      created_at: now,
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO printer_maintenance_events (
+          id, printer_id, performed_at, note, page_count_at_maintenance, created_at
+        ) VALUES (
+          $id, $printer_id, $performed_at, $note, $page_count_at_maintenance, $created_at
+        )`,
+      )
+      .run(row as unknown as Record<string, SQLInputValue>);
+
+    return maintenanceRowToRecord(row);
+  }
+
+  // Mais recente primeiro — é assim que o histórico é consumido (o
+  // consumidor só precisa do último evento para calcular a próxima
+  // manutenção devida, mas a listagem inteira também é exposta para
+  // auditoria/UI).
+  //
+  // A ordenação FINAL é feita em JS, por instante real, e não pelo
+  // `ORDER BY performed_at DESC` do SQLite: `performed_at` é guardado
+  // exatamente como recebido (ISO 8601 com offset arbitrário — a rota aceita
+  // `datetime({ offset: true })`), e comparar essas strings como texto não
+  // equivale a comparar instantes. Exemplo real no fuso do projeto
+  // (America/Sao_Paulo): '2026-03-10T23:00:00.000-03:00' é 02:00Z do dia 11,
+  // logo POSTERIOR a '2026-03-11T01:00:00.000Z' — mas ordena ANTES por texto,
+  // porque a string começa com '2026-03-10'. Isso não erraria só a listagem:
+  // quem calcula a próxima manutenção usa o índice 0 como "última
+  // manutenção", então um offset diferente de 'Z' contaminaria
+  // dueAt/duePages/overdue com o evento errado.
+  //
+  // O `ORDER BY` continua no SQL só como desempate determinístico para
+  // eventos com o MESMO instante (o sort do JS é estável, então preserva
+  // essa ordem); a correção de fuso é a comparação numérica abaixo.
+  listMaintenanceEvents(printerId: string): PrinterMaintenanceEvent[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM printer_maintenance_events WHERE printer_id = $printerId
+         ORDER BY performed_at DESC, created_at DESC`,
+      )
+      .all({ printerId }) as unknown as MaintenanceEventRow[];
+    return rows
+      .map(maintenanceRowToRecord)
+      .sort((a, b) => Date.parse(b.performedAt) - Date.parse(a.performedAt));
   }
 
   close(): void {
