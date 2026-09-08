@@ -399,6 +399,66 @@ diferente a cada chamada; não assumir que ficou "liberado" permanentemente.
 | Otimização (sleep/power) | **Confirmado**, sem login, campos mapeados | Não investigado (não é o objetivo do achado 5, que era específico da Brother) |
 | Hostname real | Não revisitado nesta rodada (Brother tem campo hostname na aba Network, não reconferido) | **Confirmado**, autenticado, campo `GSI_NET_HOST_NAME` |
 
+## Payload exato do reboot HP — capturado via DevTools, sessão 2026-09-08 (continuação)
+
+O clique automatizado no botão "Restart Now" continuou bloqueado pelo classificador de modo
+automático do Claude Code (achado já registrado na seção do spike acima) — mesmo interceptando e
+abortando a requisição de rede antes que chegasse na impressora (pra nunca reiniciar o equipamento
+de verdade), a própria tentativa de clicar foi negada. Em vez de insistir, o usuário capturou o
+payload manualmente via DevTools do navegador (aba Network, "Keep log" ativado), abrindo o
+`reboot.js`/`reboot.json` da própria SWS **sem precisar clicar no botão real** — abordagem mais
+segura que não fica pendente de nenhuma configuração.
+
+### Fluxo confirmado (lido direto do `reboot.js` servido pela impressora)
+
+```js
+REBOOT.ApplyChange = function() {
+  SWS.UTIL.ConnRequest({
+    url: "/sws/app/security/general/reboot/RestartSystem.jsp",
+    timeout: 10000,
+    params: {pinCode: REBOOT.JSONData.pinCode},
+    ...
+  });
+}
+```
+
+- **Confirmação nativa do ExtJS antes de qualquer coisa**: `SWS.UI.ConfirmMsg(LN.Warning, "Do you
+  really want to restart the device?", ...)` — só dispara `ApplyChange()` se o usuário responder
+  "yes". Uma automação futura precisa simular essa confirmação (não é `window.confirm` nativo do
+  navegador, é um modal próprio do ExtJS — o `page.on('dialog', ...)` do Playwright NÃO pega isso,
+  precisa clicar no botão "Yes" do modal renderizado em HTML).
+- **`REBOOT.JSONData.pinCode` vem de `GET /sws/app/security/general/reboot/reboot.json`** (carregado
+  no `LoadData()` da página, via `SWS.UTIL.SyncLoadJOSN` — XHR síncrono autenticado pela sessão).
+- **Confirmado ao vivo o valor do `pinCode`**: `"50:81:40:D8:6C:7E"` — **é o próprio endereço MAC da
+  impressora**, maiúsculo, com dois-pontos. Bate exatamente com o MAC já cadastrado no projeto
+  (`50:81:40:d8:6c:7e`, minúsculo — mesmo valor, caixa diferente). **Não precisa nem chamar
+  `reboot.json`**: o `pinCode` pode ser calculado direto a partir do MAC já conhecido
+  (`mac.toUpperCase()`), sem requisição extra.
+
+### O que falta pra implementar de verdade como endpoint do backend
+
+O `SWS.UTIL.ConnRequest` (função da própria SWS, não inspecionada em detalhe — método HTTP exato
+não confirmado, mas o padrão `Set*.jsp` de outras telas desta mesma SWS, ex. `SetAdmin.jsp`, sugere
+POST form-urlencoded) exige uma **sessão autenticada** — mesmo login usado em todas as outras telas.
+E o login da SWS **criptografa a senha no lado do cliente antes de mandar** (biblioteca
+`gibberish-aes.pjs`, achado já registrado em sessão anterior) — ou seja, **não dá pra fazer um login
+programático simples via `fetch`/`curl` cru do backend Node**, seria preciso: (a) reimplementar essa
+criptografia AES em Node (não investigado, potencialmente frágil a mudanças de firmware), ou
+(b) rodar um navegador automatizado (Playwright) dentro do próprio processo do backend só pra fazer
+login — algo fora do padrão do resto do projeto (que só usa Playwright em testes e2e, nunca em
+produção). Essa é a mesma barreira que já bloqueava a automação de reboot antes — o payload da ação
+em si não era mais o problema, é o login.
+
+**Decisão registrada**: implementar o endpoint de reboot fica pendente até decidir esse ponto — não
+é mais um problema de "não sabemos o payload", é um problema de "como autenticar sem navegador".
+Opções pra próxima sessão, em ordem de preferência sugerida: (1) investigar se existe um endpoint
+de login mais simples que a UI não usa mas a API aceita (alguns firmwares SWS aceitam Basic Auth ou
+um cookie de sessão de vida longa que pode ser extraído uma vez e reusado — não confirmado); (2)
+aceitar Playwright como dependência de produção só pra este caso específico (a Brother já mostrou
+que POST cru funciona sem login nenhum — a HP é o único fabricante com essa complicação); (3) manter
+como ação manual documentada (o usuário reinicia pela própria SWS quando precisar), sem endpoint no
+dashboard.
+
 ## Consequência prática pro plano da Onda 2
 
 1. Subtarefa 2 (merge com status UniFi) precisa de fallback pra API clássica — 2 das 3

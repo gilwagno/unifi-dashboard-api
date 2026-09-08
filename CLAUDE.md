@@ -437,6 +437,21 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
       `Layout` compartilhado seria a forma barata de resolver isso numa subtarefa futura, se pedido.
     Suíte final: frontend 46/46 (8 arquivos), backend 370/370 intacto (não deveria ter sido tocado,
     confirmado), `tsc` limpo nos dois, lint sem warning novo.
+18. 🔍 Payload do reboot HP — **capturado, implementação ainda pendente**. Ver
+    `docs/printers-snmp-research.md`, seção "Payload exato do reboot HP — capturado via DevTools,
+    sessão 2026-09-08 (continuação)". O clique automatizado seguiu bloqueado pelo classificador
+    (mesmo interceptando/abortando a requisição de rede pra nunca reiniciar o equipamento de
+    verdade) — o usuário capturou manualmente via DevTools, sem precisar clicar no botão real.
+    **Achado**: `POST /sws/app/security/general/reboot/RestartSystem.jsp`, parâmetro `pinCode` =
+    o próprio MAC da impressora em maiúsculas (`50:81:40:D8:6C:7E`, já temos esse MAC cadastrado
+    minúsculo — não precisa nem consultar `reboot.json`, dá pra calcular direto). Tem uma
+    confirmação nativa do ExtJS antes (não é `window.confirm`, é modal HTML próprio — o
+    `page.on('dialog')` do Playwright não pega isso). **Bloqueio real pra implementar como endpoint
+    do backend**: o login da SWS criptografa a senha no cliente (AES, `gibberish-aes.pjs`) — não dá
+    pra logar via `fetch` cru do Node como fizemos com a Brother (que não pede login nenhum). Fica
+    pendente decidir entre reimplementar essa criptografia em Node, usar Playwright como dependência
+    de produção (fora do padrão do projeto), ou manter como ação manual sem endpoint. Nenhuma opção
+    escolhida ainda — decisão fica pra quando o usuário quiser retomar.
 
 **Nota sobre rate limit do Opus**: bateu o limite durante a subtarefa 2, voltou a funcionar antes
 da subtarefa 3 terminar. Se acontecer de novo numa subtarefa futura, o padrão que funcionou foi:
