@@ -365,6 +365,41 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
     é só leitura/escrita local no SQLite, ao contrário dos pollers de coleta, que continuam
     deliberadamente sem coleta imediata no boot por causa da chamada de rede). Suíte + e2e
     reconfirmados verdes depois da mudança (336/336 backend, 5/5 e2e).
+16. ✅ Automação Sleep Time / Auto Power Off (Brother) — **47/50**. Branch
+    `feat/printers-brother-power-settings`, PR a abrir. Primeira integração do projeto que NÃO é
+    SNMP nem API do UniFi: POST direto na WBM da impressora (`/general/sleep.html`,
+    `/general/powerdown.html`), sem login, confirmado ao vivo contra `HLL2360DWVENDAS`
+    (172.16.0.222). Novo `src/services/printer-brother-wbm.service.ts` +
+    `POST /printers/:id/sleep-time` / `POST /printers/:id/auto-power-off`. Tabela de tradução
+    hours→índice do dropdown `B204` confirmada ao vivo: `0`=Off, `1`="1 hour", `2`="2 hours",
+    `3`="4 hours", `4`="8 hours" — **é índice ordinal, não a hora em si**, documentado em
+    `docs/printers-snmp-research.md`. **Achados do crítico (corrigidos):**
+    - **Timeout nunca era testado de verdade.** O `AbortController` de 5s existia no código mas
+      nenhum teste provava que ele disparava — um mock de "rede falhou" passa com ou sem o timeout
+      de verdade armado. Contra uma impressora que aceita a conexão TCP mas nunca responde (cenário
+      real: impressora ocupada imprimindo), a rota do dashboard ficaria pendurada indefinidamente.
+      Corrigido com fake timers cravando o limite exato (4999ms não aborta, 5001ms aborta).
+    - **Risco real de escrever na impressora ERRADA, não corrigido por completo — mitigado e
+      documentado.** `resolvePrinterIp` reaproveita o mesmo critério do poller SNMP (`ipOverride ??
+      resolveNetwork(mac).ipAddress`), mas o poller só LÊ — aqui é ESCRITA. O fallback da API
+      clássica usa `last_ip`, que o próprio `unifi-classic.service.ts` já documenta como histórico
+      (não necessariamente o dispositivo atual — o CLAUDE.md já registra que `172.16.0.85` foi de um
+      iPhone/Watch/Redmi antes). Como a WBM aceita o POST sem se identificar e a rede tem 3 Brothers
+      em DHCP, um IP reciclado podia fazer o comando cair numa impressora DIFERENTE da pretendida,
+      com sucesso reportado (`{ok:true}`) mesmo assim. **Não bloqueado** (bloquear IP da API clássica
+      quebraria a escrita pras 2 Brothers que só aparecem lá, achado 1 do plano) — mitigado expondo
+      `ipAddress`/`ipOrigin` (`'override'|'integration'|'classic'`) na resposta de sucesso + log de
+      aviso quando a escrita usa IP histórico. **Recomendação registrada**: configurar
+      `ipOverride` nas impressoras que vão receber essas ações, pra não depender do IP dinâmico da
+      API clássica.
+    - "Sem IP conhecido" mapeava pra 502 (semanticamente errado — nenhuma requisição de rede chegou
+      a ser tentada, um cliente trataria como erro transitório e ficaria retentando pra sempre).
+      Trocado pra 409.
+    - Confirmado ao vivo (não só suposição): chamar essas rotas contra uma impressora não-Brother
+      falha de verdade — GET nas mesmas URLs deu 404 na HP real (172.16.0.89), 200 na Brother.
+    - Guardas de `minutes` (inteiro, teto 99) e a tradução hours→índice dentro da ROTA (não só a
+      tabela isolada) não tinham teste ancorando — cobertos.
+    Suíte final: 370/370 (34 arquivos), `tsc` limpo, mutações re-executadas sem sobrevivente.
 
 **Nota sobre rate limit do Opus**: bateu o limite durante a subtarefa 2, voltou a funcionar antes
 da subtarefa 3 terminar. Se acontecer de novo numa subtarefa futura, o padrão que funcionou foi:

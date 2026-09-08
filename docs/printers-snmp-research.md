@@ -306,6 +306,55 @@ visível, sem autenticação). Candidato real e de baixo risco pra automação �
 nesta sessão (só leitura), mas o caminho de implementação está mapeado: POST com o campo certo
 reproduz exatamente o que o painel faz.
 
+
+#### Valores exatos do select B204 (Auto Power Off) -- capturados 2026-09-08, implementacao
+
+O `B16` (Sleep Time) e um passo-a-passo do formulario ja estavam documentados acima; o que faltava
+era o significado de cada opcao do `<select name="B204">`. Confirmado ao vivo (visualizacao do HTML
+renderizado do formulario) contra a Brother HL-L2360D real (172.16.0.222) na sessao em que este
+servico foi implementado:
+
+| Indice (`B204`) | Rotulo exibido no painel |
+|---|---|
+| `0` | Off |
+| `1` | 1 hour |
+| `2` | 2 hours |
+| `3` | 4 hours |
+| `4` | 8 hours |
+
+**Importante -- nao confundir indice com quantidade de horas**: o indice e a posicao ordinal da
+opcao na lista, nao a hora em si. `B204=3` significa "4 hours", nao "3 horas"; `B204=4` significa
+"8 hours". `src/services/printer-brother-wbm.service.ts` expoe esse mapeamento explicitamente em
+`AUTO_POWER_OFF_HOURS_TO_INDEX` (`{ 0:0, 1:1, 2:2, 4:3, 8:4 }`), e a rota `POST /printers/:id/
+auto-power-off` aceita `hours` (0/1/2/4/8) no corpo -- nunca o indice cru -- justamente para nao
+obrigar quem chama a API a decorar essa traducao.
+
+Implementacao: `POST /printers/:id/sleep-time` (`{ minutes: number }`) e `POST /printers/:id/
+auto-power-off` (`{ hours: 0|1|2|4|8 }`), ambas especificas da familia Brother (sem checagem de
+fabricante no cadastro -- ver comentario de topo do servico para o porque). Erros HTTP: **409**
+quando nao ha IP conhecido da impressora (sem `ipOverride` e nao vista pelo controller -- nenhuma
+chamada de rede foi tentada, retry nao resolve, o operador precisa configurar `ipOverride`); 502
+quando a WBM responde status nao-2xx (`PrinterWbmRequestError`); 504 quando a requisicao a WBM nao
+completa por timeout/rede inacessivel (`PrinterUnreachableError`, timeout de 5s via
+`AbortController`).
+
+**Medido na revisao (2026-09-08), nao suposto**: `GET /general/sleep.html` e
+`GET /general/powerdown.html` devolvem `404` na HP real (`172.16.0.89`) e `200` na Brother real
+(`172.16.0.222`). Isso confirma que chamar estas rotas contra uma impressora nao-Brother resulta em
+502 (`PrinterWbmRequestError`), nunca num "sucesso" enganoso -- que era a premissa (ate aqui nao
+verificada) da decisao de nao guardar fabricante no cadastro.
+
+**Risco residual documentado -- IP de destino da escrita.** Diferente do poller SNMP (leitura), aqui
+o POST e uma ESCRITA sem autenticacao e sem qualquer identificacao do aparelho do outro lado. Quando
+a impressora nao tem `ipOverride` e nao aparece na Integration API, o IP vem do `last_ip` da API
+classica -- **historico**, nao ao vivo (ver `ClassicClient` em `unifi-classic.service.ts` e o caso
+do `172.16.0.85`, que ja foi de um iPhone/Watch/Redmi). Com 3 Brothers em DHCP na rede, um IP
+reciclado pode fazer o POST cair em OUTRA Brother, que aceita e responde 200. A rota nao bloqueia
+esse caso (bloquear inutilizaria a feature justamente nas Brother, que sao as em DHCP), mas nao o
+deixa invisivel: emite `log.warn` e devolve `ipAddress` + `ipOrigin`
+(`override` | `integration` | `classic`) na resposta de sucesso, para o operador/UI conferir o alvo
+real. Recomendacao operacional: configurar `ipOverride` nas impressoras que forem receber escrita.
+
 ### Hostname real (HP Laser MFP 135w, `172.16.0.89`) — CONFIRMADO, autenticado
 
 `Settings → Network Settings → General` (não é a página TCP/IPv4 como o levantamento anterior
