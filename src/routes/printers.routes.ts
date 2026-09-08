@@ -249,6 +249,116 @@ function toConsumablesResponse(
   };
 }
 
+// --- GET /printers/:id/diagnostics (Onda 2, subtarefa 7) ---
+//
+// Somente-leitura: modelo/firmware e erros ativos da última leitura SNMP
+// bem-sucedida (printer-snmp.service.ts, subtarefa 5). Mesmo padrão de
+// /consumables (subtarefa 6): "cadastrada mas nunca coletada" é resposta
+// válida com campos vazios/nulos, não erro 404/500.
+
+// Só os 5 rótulos da RFC 2790 (hrDeviceStatus, valores 1-5 — ver
+// DEVICE_STATUS_LABELS em printer-snmp.service.ts) descrevem um status
+// REPORTADO pela impressora. 'not-measured' é deste endpoint: cobre tanto
+// "nunca coletado" quanto "o varbind veio com sentinela/erro/OID não
+// suportado neste ciclo" — em nenhum desses casos dá pra afirmar
+// running/warning/testing/down/unknown(RFC) com segurança.
+type DiagnosticsDeviceStatus = 'unknown' | 'running' | 'warning' | 'testing' | 'down' | 'not-measured';
+
+interface DiagnosticsResponse {
+  printerId: string;
+  collectedAt: string | null;
+  // DECISÃO — mapeamento sysDescr vs deviceDescr (confirmado empiricamente
+  // contra as 3 impressoras reais, ver docs/printers-snmp-research.md,
+  // seção "Identificação real"): `hrDeviceDescr.1` é sempre um nome de
+  // modelo limpo e curto ("HP Laser MFP 131 133 135-138", "Brother
+  // HL-L2360D series"), por isso vira `model`. `sysDescr` TAMBÉM embute a
+  // versão de firmware, mas em formato livre e diferente por fabricante (HP:
+  // "...; V3.82.01.10 DEC-09-2019; Engine V1.00.11; ..."; Brother:
+  // "...,Firmware Ver.Z ," ou "...,Firmware Ver.1.46 ,..."). Não existe um
+  // separador estável entre fabricantes pra extrair só o número de versão
+  // sem regras específicas por fabricante que ninguém pediu ainda — parsear
+  // isso seria frágil e quebraria silenciosamente a cada modelo novo (ou
+  // fabricante novo) que a rede real ganhar. Por isso devolvemos o texto
+  // inteiro como `systemInfo`: quem consome (frontend/humano) já consegue
+  // ler a versão de firmware dali, sem o backend fingir uma extração
+  // confiável que não é.
+  model: string | null;
+  systemInfo: string | null;
+  deviceStatus: DiagnosticsDeviceStatus;
+  // Nomes já decodificados do bitmap hrPrinterDetectedErrorState (RFC 2790,
+  // ver decodeErrorStateBitmap em printer-snmp.service.ts) — já são rótulos
+  // amigáveis o bastante ('jammed', 'lowToner', 'doorOpen', ...); reaplicar
+  // uma segunda tradução aqui só duplicaria a mesma tabela sem ganho real.
+  // `null` = OID não suportado/falhou (não é o mesmo que "sem erro ativo",
+  // que é lista vazia — a mesma distinção que o serviço já faz).
+  activeErrors: string[] | null;
+  // true quando a última leitura tinha ao menos um campo incompleto
+  // (repassado de `PrinterSnmpReading.partial`) — o consumidor sabe que o
+  // que veio é utilizável, mas não é a leitura inteira.
+  partial: boolean;
+}
+
+// `deviceStatusLabel` chega do serviço como `string | null` (ele resolve
+// DEVICE_STATUS_LABELS, um Record<number, string>, sem prometer o conjunto
+// fechado desta união). Traduzir com um `as DiagnosticsDeviceStatus` seria
+// uma promessa que o compilador não tem como cobrar: bastaria alguém
+// acrescentar uma 6ª entrada em DEVICE_STATUS_LABELS (ou o serviço passar a
+// devolver um rótulo de outra origem) para esta rota emitir, sem erro de
+// tsc e sem teste falhando, um `deviceStatus` que não existe no contrato
+// documentado acima. Por isso a tradução é uma tabela explícita: rótulo
+// desconhecido degrada para 'not-measured' em vez de vazar para o
+// frontend um valor que ele não sabe tratar.
+const RFC_DEVICE_STATUS_BY_LABEL: Record<string, DiagnosticsDeviceStatus | undefined> = {
+  unknown: 'unknown',
+  running: 'running',
+  warning: 'warning',
+  testing: 'testing',
+  down: 'down',
+};
+
+// `reading.deviceStatus` é um SnmpMeasurement (subtarefa 5): só quando
+// `status === 'ok'` o valor numérico é confiável o bastante para virar um
+// rótulo RFC 2790 (`deviceStatusLabel`, já resolvido pelo serviço). Em
+// qualquer outro caso (sentinela, OID não suportado, falha pontual) não dá
+// pra afirmar o status reportado pela impressora — cai em 'not-measured',
+// nunca num rótulo inventado. A checagem do `status` é redundante com o
+// serviço hoje (ele zera o rótulo quando a medida não é 'ok'), mas é ela que
+// garante o invariante deste endpoint mesmo se as duas fontes divergirem —
+// tem teste próprio ancorando isso.
+function toDiagnosticsDeviceStatus(reading: PrinterSnmpReading): DiagnosticsDeviceStatus {
+  if (reading.deviceStatus.status !== 'ok') return 'not-measured';
+  // Valor fora de 1..5 no hrDeviceStatus (firmware fora da RFC 2790) chega
+  // aqui como `deviceStatusLabel: null` — também 'not-measured'.
+  if (reading.deviceStatusLabel === null) return 'not-measured';
+  return RFC_DEVICE_STATUS_BY_LABEL[reading.deviceStatusLabel] ?? 'not-measured';
+}
+
+function toDiagnosticsResponse(printerId: string, reading: PrinterSnmpReading | undefined): DiagnosticsResponse {
+  if (!reading) {
+    // Cadastrada, mas o poller ainda não coletou nada dela (recém-criada ou
+    // sempre offline até agora) — mesmo estado válido (não erro) de
+    // /consumables.
+    return {
+      printerId,
+      collectedAt: null,
+      model: null,
+      systemInfo: null,
+      deviceStatus: 'not-measured',
+      activeErrors: null,
+      partial: false,
+    };
+  }
+
+  return {
+    printerId,
+    collectedAt: reading.collectedAt,
+    model: reading.deviceDescr,
+    systemInfo: reading.sysDescr,
+    deviceStatus: toDiagnosticsDeviceStatus(reading),
+    activeErrors: reading.detectedErrorStates,
+    partial: reading.partial,
+  };
+}
 
 export default async function printersRoutes(app: FastifyInstance) {
   app.addHook('preHandler', app.authenticate);
@@ -306,6 +416,15 @@ export default async function printersRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: 'Impressora não encontrada' });
     }
     return toConsumablesResponse(id, getLastReading(id), record.maintenance.consumableLowThresholdPct);
+  });
+
+  app.get('/printers/:id/diagnostics', async (request, reply) => {
+    const { id } = idParam.parse(request.params);
+    const record = printersRepository.getById(id);
+    if (!record) {
+      return reply.code(404).send({ error: 'Impressora não encontrada' });
+    }
+    return toDiagnosticsResponse(id, getLastReading(id));
   });
 
   app.patch(

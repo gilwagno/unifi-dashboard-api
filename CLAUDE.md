@@ -226,7 +226,20 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
    decisão de não inventar default sem esconder que a checagem está desligada. `pageCount` com
    sentinela/erro foi verificado: vira `null` com `collectedAt` preenchido (distinguível de "nunca
    coletada"), nunca NaN/undefined — estava correto, mas sem teste; agora tem. Suíte: 230/230.
-7. ⏳ PRÓXIMO: `GET /printers/:id/diagnostics` — somente leitura (firmware, erros ativos via SNMP).
+7. ✅ `GET /printers/:id/diagnostics` — **47/50**. Branch `feat/printers-diagnostics`, PR #11 aberta.
+   Formata `getLastReading()` (já existente desde a subtarefa 5) em `model` (`hrDeviceDescr`),
+   `systemInfo` (`sysDescr` cru — formato livre por fabricante, não vale a pena parsear versão de
+   firmware sem pedido explícito), `deviceStatus` (um dos 5 rótulos RFC 2790 ou `'not-measured'`),
+   `activeErrors` (bitmap já decodificado pelo poller) e `partial`. **Achado do crítico (corrigido):**
+   o mapeamento de `deviceStatus` usava `as DiagnosticsDeviceStatus` sobre o `deviceStatusLabel` do
+   serviço (`string | null`) sem validar contra o conjunto fechado da união da rota — um 6º rótulo
+   futuro em `DEVICE_STATUS_LABELS` (poller ainda vai evoluir nas subtarefas 8+) vazaria pra fora do
+   contrato documentado sem quebrar `tsc` nem teste nenhum. Trocado por tabela de tradução explícita
+   sem `as`, com 3 testes novos ancorando (rótulo fora de 1..5, rótulo desconhecido do serviço,
+   leitura internamente inconsistente entre `status` e `label`). Suíte do backend: 262/262 (22 testes
+   novos no arquivo da subtarefa), `tsc` limpo. Nota lateral do crítico: `vitest.config.ts` na raiz
+   não excluía `.claude/**` — corrigido direto em `master` em 2026-09-08 (worktree órfão limpo na
+   mesma sessão), não é mais pendência.
 8. ✅ `PATCH /clients/:mac/alias` (achado 8, genérico) — **47/50**. PR #7, **mergeada em
    2026-08-31** (esta linha estava desatualizada dizendo "PR a abrir" — corrigido em 2026-09-08).
    PUT parcial confirmado por teste (mesmo padrão de `setFixedIp`). Achado do crítico: `.trim()`
