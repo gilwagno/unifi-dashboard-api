@@ -54,7 +54,9 @@ pelo usuário, nunca registrada em arquivo):
 
 **Catálogo HP (SWS) — parcial, em andamento** (prints reais enviados pelo usuário em pt-BR):
 - Aba **Configurações → Configurações de rede**: Geral (Nome do host, Local, Contato), **TCP/IPv4**
-  e TCP/IPv6 (ainda não vimos o conteúdo — é aqui que deve ficar o IP estático, PRÓXIMO PASSO),
+  (conteúdo confirmado na sessão 2026-09-08, ver bloco abaixo: DHCP puro, sem IP estático local) e
+  TCP/IPv6 (conteúdo nunca visto — IPv6 é irrelevante pro escopo deste módulo, que endereça tudo via
+  IPv4/UniFi/SNMP; não é uma pendência, só não investigado por falta de necessidade),
   Raw TCP/IP/LPR/IPP, AirPrint, Impressão em nuvem do Google, WSD, SLP, UPnP, mDNS, **SNMP**
   (sub-itens SNMPv1/v2 e SNMPv3 — community string do nosso poller fica aqui), HTTP, **Wi-Fi**
   (Wi-Fi e Wi-Fi Direct), Restaurar padrão.
@@ -67,8 +69,9 @@ pelo usuário, nunca registrada em arquivo):
 - **REVISÃO DO ACHADO ANTERIOR SOBRE REBOOT**: diferente da Brother, a **HP TEM uma opção de
   reboot real** ("Reiniciar dispositivo", aba Segurança) — a CLAUDE.md anterior dizia "reboot não
   encontrado em nenhuma aba" pra HP, isso estava incompleto (a busca automatizada nunca chegou lá
-  por causa do bug de idioma acima). **Ainda não confirmado** se é um botão simples (reboot limpo)
-  ou se pede confirmação/tem efeitos colaterais — PRÓXIMO PASSO antes de implementar.
+  por causa do bug de idioma acima). **CONFIRMADO na sessão de continuação 2026-09-08** (ver bloco
+  abaixo e o item 10 do "Progresso da Onda 2"): é um botão único "Restart Now", sem confirmação,
+  sem efeitos colaterais visíveis na tela — não é mais uma pendência em aberto.
 
 **Sessão de continuação 2026-09-08**: as 4 impressoras estavam todas online (confirmado por ping) —
 os itens 5/6 abaixo (Brother offline, DCP-1610NW desconectada) estão resolvidos, as 4 reconectaram
@@ -120,7 +123,9 @@ iPhone, um Watch e um Redmi antes).
    (Machine/Network/All Settings — apagam configuração), nenhuma opção de reboot simples em
    nenhuma aba. Isso fecha a investigação pra Brother: não implementar reboot remoto nessa família,
    nem tentar automatizar os botões de reset (são destrutivos, não um reboot). HP (SyncThru/SWS,
-   SPA ExtJS) segue não investigado — ainda pendente pro spike.
+   SPA ExtJS): **investigado no spike de 2026-09-08 (item 10 do "Progresso da Onda 2") — reboot
+   CONFIRMADO VIÁVEL**, ao contrário da Brother (botão único "Restart Now" em Security → System
+   Security → Restart Device, sem confirmação). Não é mais pendência.
 4. **IP fixo/dinâmico já está pronto**: `PATCH /clients/:mac/fixed-ip` (API clássica) já existe no
    projeto — o módulo de impressoras só precisa expor isso na UI/API nova, não reimplementar.
 5. **Otimização real já confirmada (Brother, sem login)**: "Sleep Time" e "Auto Power Off" existem
@@ -132,12 +137,13 @@ iPhone, um Watch e um Redmi antes).
 7. **Nova subtarefa pedida pelo usuário (2026-08-31): trocar a senha de admin dos painéis web**
    (WBM da Brother, SWS da HP) — não é a mesma coisa que o segredo SNMP (subtarefa 1). Cada
    fabricante tem seu próprio mecanismo de troca de senha autenticado (Brother: aba Administrator
-   → "Login Password", `/admin/password.html`, form POST autenticado; HP/SWS: ainda não mapeado,
-   é SPA ExtJS, precisa investigação como o spike de reboot). Risco alto: é a credencial mestra do
-   painel admin de cada impressora — um POST malformado pode trocar a senha errado e trancar o
-   acesso. Vira subtarefa própria (10), mesmo tier de risco do ssh-credentials do projeto original
-   (Opus obrigatório, nunca devolver a senha nova em log, mesmo padrão de "aceita na escrita, nunca
-   devolve na leitura" mas aqui não tem nem leitura possível — WBM não expõe a senha atual).
+   → "Login Password", `/admin/password.html`, form POST autenticado; HP/SWS: nunca mapeado, é SPA
+   ExtJS). Risco alto: é a credencial mestra do painel admin de cada impressora — um POST malformado
+   pode trocar a senha errado e trancar o acesso. Viraria subtarefa própria (11), mesmo tier de
+   risco do ssh-credentials do projeto original (Opus obrigatório, nunca devolver a senha nova em
+   log). **FECHADO por decisão do usuário em 2026-09-08 — não será implementado**, ver item 11 da
+   "Ordem de subtarefas" e item 11 do "Progresso da Onda 2" abaixo. Não redescobrir nem reabrir sem
+   pedido explícito novo.
 8. **Nova subtarefa pedida pelo usuário (2026-08-31): renomear o "Apelido" da impressora no
    UniFi**. Confirmado no `rest/user` da API clássica: cada cliente tem `name` (o Apelido exibido
    no painel) separado de `hostname` (o que o dispositivo anuncia via DHCP/mDNS, só-leitura). Dá
@@ -178,9 +184,9 @@ iPhone, um Watch e um Redmi antes).
 8. Agenda de manutenção (`POST/GET /printers/:id/maintenance*`).
 9. **`PATCH /clients/:mac/alias`** (genérico, achado 8) — renomeia o "Apelido" no UniFi via
    GET+troca+PUT no `rest/user`, mesmo padrão de `setFixedIp`. Baixo risco, tier Sonnet.
-10. **Spike: otimização (Sleep Time/Auto Power Off da Brother) + reboot HP (ainda pendente,
-    Brother já descartado) + trocar hostname real da impressora (achado 9)** — investigação
-    dedicada contra as impressoras reais.
+10. ✅ **Spike: otimização (Sleep Time/Auto Power Off da Brother) + reboot HP + trocar hostname
+    real da impressora (achado 9)** — investigação dedicada contra as impressoras reais. Concluído
+    em 2026-09-08, ver item 10 do "Progresso da Onda 2" abaixo.
 11. ❌ **FECHADO por decisão do usuário (2026-09-08), não será implementado.** Trocar senha de
     admin dos painéis web (WBM Brother + SWS HP) — achado 7. Requer par com Opus (risco alto,
     credencial mestra sem leitura possível). Usuário decidiu explicitamente não trocar a senha via
@@ -190,7 +196,7 @@ iPhone, um Watch e um Redmi antes).
 13. ✅ Frontend `Printers.tsx` — nova aba "Manutenção" no menu lateral. PR #10, **já mergeada em
     2026-08-31** (fazia parte do "Marco: subtarefas 1-8" no topo deste arquivo — esta linha
     numerada estava sem o status marcado; corrigido em 2026-09-08).
-14. ✅ e2e — **47/50**. Branch `e2e/printers-flows`, PR a abrir.
+14. ✅ e2e — **47/50**. PR #13, mergeada em 2026-09-08.
 
 Regra de alocação de modelo: CRUD/merge simples = Sonnet nos dois papéis (diversidade). Qualquer
 coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel do par em Opus.
@@ -216,7 +222,7 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
    com level>maxCapacity) e o crítico corrigiu um vazamento real de segredo via erro nativo da
    lib `net-snmp`. `getLastReading(printerId)` exportado de `src/services/printer-snmp.service.ts`
    pronto pra subtarefa 6 usar.
-6. ✅ `GET /printers/:id/consumables` — **47/50**. Branch `feat/printers-consumables`. Expõe
+6. ✅ `GET /printers/:id/consumables` — **47/50**. PR #9, mergeada em 2026-08-31. Expõe
    `getLastReading()` formatada (nome do suprimento, `levelPercent`, status). Sem threshold
    configurado no registro, o status nunca vira `'low'` (decisão documentada em
    `src/routes/printers.routes.ts`, junto de `resolveSupplyStatus`) — evita aplicar uma política de
@@ -298,7 +304,7 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
       determinístico, não assumir que ficou liberado permanentemente.
 11. ❌ Trocar senha de admin dos painéis web — **FECHADO por decisão do usuário (2026-09-08), não
     será implementado.** Ver item 11 da "Ordem de subtarefas" acima.
-14. ✅ e2e — **47/50**. Branch `e2e/printers-flows`, PR a abrir. Fluxo real completo pela UI:
+14. ✅ e2e — **47/50**. PR #13, mergeada em 2026-09-08. Fluxo real completo pela UI:
     cadastra impressora (MAC = `SEEDED_CLIENT.mac`, exercita merge de status de rede de verdade),
     confere consumíveis ("nunca coletado" — esperado, sem SNMP real no e2e), renomeia apelido no
     UniFi, edita nome (Fluxo A, serial); reconecta (2 chamadas `/cmd/stamgr`, block+unblock) e
