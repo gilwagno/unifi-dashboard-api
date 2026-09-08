@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { env } from '../config/env.js';
 import { macAddressSchema } from '../validators/mac.js';
@@ -28,6 +28,17 @@ import {
   type PrinterSnmpReading,
   type PrinterSupply,
 } from '../services/printer-snmp.service.js';
+// Automação de Sleep Time / Auto Power Off da WBM Brother (spike da
+// subtarefa 9 — ver o comentário de topo do serviço para o porquê disto ser
+// ESPECÍFICO da família Brother, sem checagem de fabricante no cadastro).
+import {
+  setAutoPowerOff,
+  setSleepTime,
+  PrinterUnreachableError,
+  PrinterWbmRequestError,
+  AUTO_POWER_OFF_HOURS_TO_INDEX,
+  type AutoPowerOffHours,
+} from '../services/printer-brother-wbm.service.js';
 
 // Cadastro (nome, MAC, segredo SNMP, política de manutenção) do módulo de
 // manutenção de impressoras — primeira rota do projeto com persistência em
@@ -140,6 +151,147 @@ const updatePrinterBody = z.object({
 
 function toSnmpSecretInput(snmp: z.infer<typeof snmpSchema>): SnmpSecretInput {
   return snmp.version === 'v3' ? { v3Auth: snmp.v3Auth! } : { community: snmp.community! };
+}
+
+// --- POST /printers/:id/sleep-time e /auto-power-off (spike, subtarefa 9) ---
+//
+// Automação da WBM Brother (ver src/services/printer-brother-wbm.service.ts
+// para o porquê de ser específica dessa família). O corpo de
+// /auto-power-off aceita `hours` (0/1/2/4/8) em vez do índice ordinal cru
+// do select B204 — quem chama a API não precisa decorar que "4 horas" é o
+// índice 3, não o índice 4 (ver AUTO_POWER_OFF_HOURS_TO_INDEX).
+
+const sleepTimeBody = z.object({
+  // Inteiro positivo, teto de 99 minutos: a Brother real mostrou "1" minuto
+  // configurado, mas não há confirmação do limite máximo aceito pelo
+  // firmware — 99 é só um teto razoável para não mandar um valor absurdo
+  // (ex.: 99999) sem que isso implique que o firmware aceite qualquer coisa
+  // até 99. O firmware pode rejeitar valores dentro dessa faixa também
+  // (ex.: um modelo com teto real de 30 minutos); nesse caso a WBM devolve
+  // um status não-2xx e a rota propaga como PrinterWbmRequestError (502).
+  minutes: z.number().int().positive().max(99),
+});
+
+// Só os 5 valores confirmados ao vivo contra a Brother HL-L2360D real (ver
+// docs/printers-snmp-research.md) — qualquer outro número é rejeitado ANTES
+// de qualquer chamada de rede à impressora.
+const autoPowerOffBody = z.object({
+  hours: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(4), z.literal(8)]),
+});
+
+// Origem do IP usado como destino da ESCRITA na WBM. Diferente do poller
+// SNMP (que só lê), aqui a origem importa para quem chama:
+//   - 'override': `ipOverride` do cadastro — declarado por um operador,
+//     estável, a fonte mais confiável.
+//   - 'integration': Integration API do UniFi — lista só clientes
+//     CONECTADOS AGORA, então é o IP ao vivo.
+//   - 'classic': fallback pela API clássica (`/rest/user`), que devolve
+//     `last_ip` — o ÚLTIMO IP conhecido, HISTÓRICO (ver o comentário de
+//     `ClassicClient` em unifi-classic.service.ts e a nota no CLAUDE.md
+//     sobre 172.16.0.85 já ter sido de um iPhone/Watch/Redmi antes de ser
+//     de uma impressora).
+export type PrinterIpOrigin = 'override' | 'integration' | 'classic';
+
+// Resolve o IP da impressora com EXATAMENTE o mesmo critério do poller SNMP
+// (printer-snmp.service.ts, `collectAllReadings`): `ipOverride` do cadastro
+// tem precedência; senão usa o merge de status de rede da subtarefa 2/5. A
+// diferença é que aqui a ORIGEM é devolvida junto — ver handleWbmAction.
+async function resolvePrinterIp(
+  record: { mac: string; ipOverride: string | null },
+  log: { warn: (obj: unknown, msg: string) => void },
+): Promise<{ ipAddress: string; origin: PrinterIpOrigin } | null> {
+  if (record.ipOverride) return { ipAddress: record.ipOverride, origin: 'override' };
+
+  const resolveNetwork = await buildNetworkStatusResolver(log);
+  const status = resolveNetwork(record.mac);
+  if (!status.ipAddress) return null;
+
+  // `source: 'unknown'` nunca vem com ipAddress preenchido (ver
+  // UNKNOWN_NETWORK_STATUS), então só 'integration'/'classic' chegam aqui.
+  return { ipAddress: status.ipAddress, origin: status.source === 'integration' ? 'integration' : 'classic' };
+}
+
+// DECISÃO — códigos HTTP das rotas de automação Brother:
+//   - sem IP conhecido (nem ipOverride, nem visto pelo controller): 409
+//     Conflict. NÃO é 502/504: nenhuma requisição de rede foi tentada, não
+//     houve upstream nenhum para falhar. É um conflito com o estado atual do
+//     próprio recurso (o cadastro não tem como ser endereçado agora), e a
+//     ação corretiva é do lado do cliente/operador — configurar `ipOverride`
+//     via PATCH /printers/:id, ou esperar a impressora aparecer no
+//     controller. Um cliente de API que trata 5xx como "erro transitório,
+//     tenta de novo" ficaria em retry eterno num estado que retry nunca
+//     resolve; 4xx comunica corretamente "não tente de novo sem mudar algo".
+//   - PrinterUnreachableError (timeout/rede): 504 Gateway Timeout — a
+//     requisição HTTP à WBM não completou dentro do prazo/não foi possível
+//     estabelecer conexão, semântica mais específica que um 502 genérico.
+//   - PrinterWbmRequestError (a WBM respondeu, mas com status != 2xx): 502
+//     Bad Gateway — recebemos uma resposta do "upstream" (a impressora),
+//     mas ela sinalizou erro; não sabemos o motivo exato (corpo é HTML, não
+//     JSON estruturado), só que a WBM rejeitou a requisição. É também o que
+//     acontece ao chamar estas rotas contra uma impressora NÃO-Brother:
+//     verificado ao vivo nesta revisão — a HP real (172.16.0.89) devolve 404
+//     em /general/sleep.html e /general/powerdown.html, enquanto a Brother
+//     (172.16.0.222) devolve 200. Ou seja, o "erro em vez de sucesso
+//     enganoso" prometido no comentário do serviço é fato medido, não
+//     suposição.
+//
+// Estes dois erros NÃO vão para o error handler central de src/app.ts (ao
+// contrário de /reconnect, que propaga UniFiClassicApiError de propósito):
+// lá ficam só os erros TRANSVERSAIS, compartilhados por muitas rotas (APIs
+// do UniFi, Zod, rate limit). PrinterUnreachableError/PrinterWbmRequestError
+// existem exclusivamente nestas duas rotas — registrá-los no handler global
+// faria o app.ts importar um serviço específico da família Brother e
+// acumular conhecimento por-feature. O mapeamento local vive num único
+// helper compartilhado pelas duas rotas, então não há duplicação. Qualquer
+// erro inesperado (nem um nem outro) segue propagando para o handler central
+// (500 genérico), de propósito.
+async function handleWbmAction(
+  reply: FastifyReply,
+  target: { ipAddress: string; origin: PrinterIpOrigin } | null,
+  printerId: string,
+  log: { warn: (obj: unknown, msg: string) => void },
+  action: (ip: string) => Promise<void>,
+) {
+  if (!target) {
+    return reply.code(409).send({
+      error: 'IP da impressora desconhecido',
+      details: `Impressora ${printerId} não tem ipOverride configurado e não foi encontrada pelo controller UniFi.`,
+    });
+  }
+
+  // ESCRITA sem autenticação num IP possivelmente HISTÓRICO: a WBM da
+  // Brother aceita estes POSTs sem login e sem qualquer identificação do
+  // aparelho, então não há como o serviço confirmar que o dispositivo do
+  // outro lado é a impressora deste cadastro. Com origin 'classic' o IP vem
+  // de `last_ip` (histórico) e a rede tem 3 Brothers em DHCP: um IP
+  // reciclado pode fazer o POST cair em OUTRA Brother, que aceita e responde
+  // 200 — mudaríamos o Sleep Time da impressora errada relatando sucesso.
+  // Não bloqueamos (isso inutilizaria a feature para as impressoras em DHCP,
+  // que são justamente as Brother — ver achado 1 do CLAUDE.md: só uma delas
+  // aparece na Integration API), mas o risco deixa de ser invisível: warn no
+  // log e o alvo real da escrita (`ipAddress`/`ipOrigin`) volta na resposta,
+  // para o operador/UI conferir. Para escrita, o recomendado é `ipOverride`.
+  if (target.origin === 'classic') {
+    log.warn(
+      { printerId, ipAddress: target.ipAddress, ipOrigin: target.origin },
+      'Escrita na WBM usando IP HISTÓRICO da API clássica (last_ip) — não há garantia de que este IP ' +
+        'ainda pertence a esta impressora. Configure ipOverride no cadastro para escritas confiáveis.',
+    );
+  }
+
+  try {
+    await action(target.ipAddress);
+  } catch (error) {
+    if (error instanceof PrinterUnreachableError) {
+      return reply.code(504).send({ error: 'Impressora não respondeu', details: error.message });
+    }
+    if (error instanceof PrinterWbmRequestError) {
+      return reply.code(502).send({ error: 'WBM da impressora recusou a requisição', details: error.message });
+    }
+    throw error;
+  }
+
+  return reply.send({ ok: true, ipAddress: target.ipAddress, ipOrigin: target.origin });
 }
 
 // --- GET /printers/:id/consumables (Onda 2, subtarefa 6) ---
@@ -512,7 +664,11 @@ export default async function printersRoutes(app: FastifyInstance) {
   // nem em PATCH. Ele é aceito na escrita e guardado em disco (ver
   // src/db/printers.db.ts), mas a leitura sempre passa por toPublic(),
   // que remove o campo antes de serializar. Mesmo espírito do
-  // GET /ssh-credentials em ssh.routes.ts.
+  // GET /ssh-credentials em ssh.routes.ts. As rotas de sleep-time/
+  // auto-power-off abaixo também não têm segredo nenhum envolvido (a WBM
+  // Brother não pede login para essas páginas), mas seguem a mesma
+  // disciplina por hábito do projeto: nunca ecoam nada do registro além do
+  // necessário para a ação pedida.
 
   app.post(
     '/printers',
@@ -689,6 +845,49 @@ export default async function printersRoutes(app: FastifyInstance) {
         ok: true,
         note: 'Reconexão de rede (bloqueia e desbloqueia o cliente no controller) — não reinicia o equipamento.',
       });
+    },
+  );
+
+  // --- Sleep Time / Auto Power Off da WBM Brother (spike da subtarefa 9) ---
+  //
+  // ESPECÍFICO DA FAMÍLIA BROTHER — ver o comentário de topo de
+  // printer-brother-wbm.service.ts. O cadastro deste módulo não tem campo
+  // de fabricante, então não há como recusar a chamada de antemão para uma
+  // HP/outro fabricante: o resultado nesse caso é um erro de rede/HTTP
+  // (504/502 abaixo), nunca um "sucesso" enganoso.
+
+  app.post(
+    '/printers/:id/sleep-time',
+    { config: { rateLimit: { max: env.RATE_LIMIT_CLIENT_ACTION_MAX, timeWindow: env.RATE_LIMIT_WINDOW } } },
+    async (request, reply) => {
+      const { id } = idParam.parse(request.params);
+      const body = sleepTimeBody.parse(request.body);
+
+      const record = printersRepository.getById(id);
+      if (!record) {
+        return reply.code(404).send({ error: 'Impressora não encontrada' });
+      }
+
+      const target = await resolvePrinterIp(record, request.log);
+      return handleWbmAction(reply, target, id, request.log, (ip) => setSleepTime(ip, body.minutes));
+    },
+  );
+
+  app.post(
+    '/printers/:id/auto-power-off',
+    { config: { rateLimit: { max: env.RATE_LIMIT_CLIENT_ACTION_MAX, timeWindow: env.RATE_LIMIT_WINDOW } } },
+    async (request, reply) => {
+      const { id } = idParam.parse(request.params);
+      const body = autoPowerOffBody.parse(request.body);
+
+      const record = printersRepository.getById(id);
+      if (!record) {
+        return reply.code(404).send({ error: 'Impressora não encontrada' });
+      }
+
+      const target = await resolvePrinterIp(record, request.log);
+      const index = AUTO_POWER_OFF_HOURS_TO_INDEX[body.hours as AutoPowerOffHours];
+      return handleWbmAction(reply, target, id, request.log, (ip) => setAutoPowerOff(ip, index));
     },
   );
 
