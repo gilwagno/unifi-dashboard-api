@@ -273,6 +273,25 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
    (Settings/Security agora visíveis) não revelou nenhum botão óbvio de reboot — consistente com o
    achado já confirmado da Brother. Ver `docs/printers-snmp-research.md`, seção "Investigação da HP
    via SWS real".
+10. ✅ Spike (item 9 do plano original): Sleep Time/Auto Power Off Brother + reboot HP + hostname
+    real — **investigação, não código ainda**. Sessão 2026-09-08, ver `docs/printers-snmp-
+    research.md` seção "Spike: Sleep Time/Auto Power Off (Brother) + reboot HP + hostname real"
+    pro detalhe completo. **3 achados que revisam/completam expectativas anteriores:**
+    - Sleep Time (`B16`, minutos) e Auto Power Off (`B204`, select) na Brother Vendas: forms reais,
+      POST simples, **sem login**. Confirmado, não implementado.
+    - Hostname real da HP (achado 9 do plano): confirmado em `Settings → Network Settings →
+      General` (não TCP/IPv4), campo `GSI_NET_HOST_NAME`. Autenticado, mesmo tier de risco da troca
+      de senha.
+    - **Reboot HP: REVISÃO IMPORTANTE da expectativa anterior.** A expectativa era "reboot simples
+      não é viável em nenhum fabricante" — pra HP é o oposto: `Security → System Security → Restart
+      Device` é **um único botão "Restart Now"**, sem confirmação, sem campo nenhum. Mais simples
+      de automatizar que o reconnect de rede já implementado (subtarefa 3). **Não clicado** (é a
+      impressora real do Financeiro em produção) — viabilidade confirmada visualmente, payload
+      exato da requisição fica pra quando a subtarefa 11/12 (troca de senha + reboot) for
+      implementada de verdade. Brother segue confirmada inviável (achado 3, sem mudança).
+    - Nota operacional: o classificador de modo automático do Claude Code bloqueou a mesma
+      navegação 2x numa sessão anterior no mesmo dia, e não bloqueou nesta retomada — não é
+      determinístico, não assumir que ficou liberado permanentemente.
 
 **Nota sobre rate limit do Opus**: bateu o limite durante a subtarefa 2, voltou a funcionar antes
 da subtarefa 3 terminar. Se acontecer de novo numa subtarefa futura, o padrão que funcionou foi:

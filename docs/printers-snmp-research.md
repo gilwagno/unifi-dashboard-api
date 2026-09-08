@@ -283,6 +283,73 @@ pública específica pra essa família de impressora sobre a tela de restart** �
 confiável continua sendo a investigação direta contra o dispositivo real, retomando de onde parou
 (pendência acima).
 
+## Spike: Sleep Time/Auto Power Off (Brother) + reboot HP + hostname real — sessão 2026-09-08
+
+Continuação direta da investigação anterior (subtarefa 9 do plano original). As 4 impressoras
+foram checadas por ping antes de começar: `172.16.0.89` (HP), `172.16.0.222` (Brother Vendas) e
+`172.16.0.85` (Brother DCP-1610NW) online; `172.16.0.80` (Brother DCP-L3560CDW colorida) offline
+no momento, não investigada nesta rodada.
+
+### Sleep Time / Auto Power Off (Brother HL-L2360D, `172.16.0.222`) — CONFIRMADO, sem login
+
+Ambas as páginas (`/general/sleep.html`, `/general/powerdown.html`) carregam e mostram formulários
+reais **sem exigir login** — confirma o achado 5 do plano ("otimização real já confirmada"), agora
+com os campos exatos:
+
+| Página | Campo do form | Tipo | Valor observado |
+|---|---|---|---|
+| Sleep Time | `B16` | text (minutos) | `1` |
+| Auto Power Off | `B204` | select | `0` (= "Off") |
+
+Ambos os forms fazem POST simples pra própria URL da página (`method="post"`, sem token CSRF
+visível, sem autenticação). Candidato real e de baixo risco pra automação — não clicado "Submit"
+nesta sessão (só leitura), mas o caminho de implementação está mapeado: POST com o campo certo
+reproduz exatamente o que o painel faz.
+
+### Hostname real (HP Laser MFP 135w, `172.16.0.89`) — CONFIRMADO, autenticado
+
+`Settings → Network Settings → General` (não é a página TCP/IPv4 como o levantamento anterior
+supôs — é uma página separada, "General", que fica ANTES de TCP/IPv4 na árvore lateral). Campos do
+formulário:
+
+| Campo | Valor observado |
+|---|---|
+| `GSI_NET_HOST_NAME` | `Comercial` |
+| `GSI_NET_LOCATION` | *(vazio)* |
+| `GSI_NET_CONTACT` | `T.I` |
+
+Confirma o achado 9 do plano: trocar o hostname real é uma escrita autenticada (SPA ExtJS, mesma
+sessão de login usada pra tudo mais na SWS), mesmo tier de complexidade da troca de senha de admin
+— não investigado o payload exato do submit (fora de escopo desta rodada; quando a subtarefa for
+implementada de verdade, capturar a requisição de rede real via Playwright resolve isso em minutos).
+
+### Reboot HP (`172.16.0.89`) — CONFIRMADO VIÁVEL, é um botão único
+
+`Security → System Security → Restart Device` — a tela inteira é **um único botão "Restart Now"**,
+sem confirmação adicional, sem campo de agendamento, sem aviso de efeito colateral visível na
+página (screenshot capturado). Isso **revisa a expectativa anterior** ("reboot remoto simples não
+seja viável em nenhum dos dois fabricantes") — pra HP, é exatamente o oposto: é o caso mais simples
+possível de automatizar, mais simples até que o reconnect de rede já implementado (subtarefa 3).
+
+**Não clicado nesta sessão** — é a impressora real do Financeiro em uso, e clicar reiniciaria o
+equipamento de produção sem necessidade (o objetivo aqui era só confirmar viabilidade, não
+executar). Tentativa de capturar o handler JS exato do botão (pra documentar o payload da
+requisição sem precisar clicar) não teve sucesso nesta sessão — fica pendente pra quando a
+subtarefa for implementada de verdade.
+
+**Nota operacional**: a navegação até esta tela via Playwright headless foi bloqueada 2x pelo
+classificador de modo automático do Claude Code numa sessão anterior (mesmo dia), mas funcionou
+sem bloqueio nesta retomada — o classificador não é determinístico ou reavalia o contexto de forma
+diferente a cada chamada; não assumir que ficou "liberado" permanentemente.
+
+### Resumo do spike (subtarefa 9 do plano original)
+
+| Item | Brother | HP |
+|---|---|---|
+| Reboot remoto simples | **Inviável** (só resets destrutivos) | **Viável** — botão único "Restart Now" |
+| Otimização (sleep/power) | **Confirmado**, sem login, campos mapeados | Não investigado (não é o objetivo do achado 5, que era específico da Brother) |
+| Hostname real | Não revisitado nesta rodada (Brother tem campo hostname na aba Network, não reconferido) | **Confirmado**, autenticado, campo `GSI_NET_HOST_NAME` |
+
 ## Consequência prática pro plano da Onda 2
 
 1. Subtarefa 2 (merge com status UniFi) precisa de fallback pra API clássica — 2 das 3
