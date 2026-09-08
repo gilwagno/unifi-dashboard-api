@@ -279,6 +279,13 @@ function startPolling(): void {
 
 function startRollupJob(): void {
   if (rollupTimer) return;
+  // Roda uma vez já no boot, além de agendar o timer diário: sem isso, um
+  // processo que reinicia mais de uma vez por dia (deploy, dev, queda de
+  // energia) nunca chega a rodar `runRollupAndCleanup` naquele dia, e as
+  // tabelas crescem sem poda nenhuma. Diferente de `startPolling()`
+  // (comentário acima) — aqui não há chamada de rede nenhuma, só leitura/
+  // escrita local no SQLite, então não há motivo pra adiar.
+  runRollupAndCleanup();
   rollupTimer = setInterval(() => {
     runRollupAndCleanup();
   }, ROLLUP_INTERVAL_MS);

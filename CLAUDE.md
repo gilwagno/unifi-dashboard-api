@@ -356,12 +356,15 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
     colaterais (rede/timer) continuam mockados. Também completou a blindagem de fuso: a
     canonicalização de `from`/`to` só tinha teste pro caso de offset (`-03:00`), não pro caso de ISO
     sem milissegundos (que também quebra por comparação lexicográfica) — adicionado. Suíte final:
-    336/336, `tsc` limpo. **Achado não corrigido, documentado, afeta os DOIS módulos de histórico**
-    (banda e SNMP): nenhum dos dois roda a limpeza por retenção uma vez no boot — só agendam o
-    `setInterval` diário. Num processo que reinicia mais de uma vez por dia, a poda nunca executa e
-    as tabelas crescem sem limite (volume ainda seria modesto no cenário real, mas é uma decisão de
-    afinação, não um bug). Fica pra próxima sessão, se o usuário quiser: aplicar nos dois módulos
-    juntos (rodar a limpeza uma vez no import, antes de agendar o timer), não só num.
+    336/336, `tsc` limpo. **Achado documentado, CORRIGIDO em 2026-09-08 (mesmo dia, decisão do
+    usuário)**: nenhum dos dois módulos de histórico (banda e SNMP) rodava a limpeza por retenção
+    no boot — só agendavam o `setInterval` diário, então um processo que reiniciasse mais de uma vez
+    por dia nunca podava naquele dia. Corrigido nos DOIS módulos juntos (`startRollupJob()` em
+    `bandwidth-history.service.ts` e `startSnmpHistoryCleanupJob()` em `printer-snmp.service.ts`
+    agora chamam a função de limpeza uma vez, síncrono, antes de agendar o timer — sem risco, já que
+    é só leitura/escrita local no SQLite, ao contrário dos pollers de coleta, que continuam
+    deliberadamente sem coleta imediata no boot por causa da chamada de rede). Suíte + e2e
+    reconfirmados verdes depois da mudança (336/336 backend, 5/5 e2e).
 
 **Nota sobre rate limit do Opus**: bateu o limite durante a subtarefa 2, voltou a funcionar antes
 da subtarefa 3 terminar. Se acontecer de novo numa subtarefa futura, o padrão que funcionou foi:

@@ -695,6 +695,12 @@ function startPolling(): void {
 
 function startSnmpHistoryCleanupJob(): void {
   if (snmpHistoryCleanupTimer) return;
+  // Roda uma vez já no boot, além de agendar o timer diário — mesmo
+  // raciocínio de bandwidth-history.service.ts (startRollupJob): sem isso,
+  // um processo que reinicia mais de uma vez por dia nunca poda a tabela
+  // naquele dia. Sem chamada de rede aqui (só SQLite local), então não há
+  // motivo pra adiar como a coleta SNMP em si (comentário abaixo).
+  runSnmpHistoryCleanup();
   snmpHistoryCleanupTimer = setInterval(() => {
     runSnmpHistoryCleanup();
   }, SNMP_HISTORY_CLEANUP_INTERVAL_MS);
