@@ -41,10 +41,23 @@ vi.mock('../../src/services/unifi-classic.service.js', () => ({
 // quebrar quem importar o módulo mockado por completude de shape.
 const getLastReadingMock = vi.fn<(printerId: string) => PrinterSnmpReading | undefined>(() => undefined);
 
-vi.mock('../../src/services/printer-snmp.service.js', () => ({
-  getLastReading: (printerId: string) => getLastReadingMock(printerId),
-  collectAllReadings: vi.fn(async () => undefined),
-}));
+// `pageCountValue` (subtarefa 12) é a MESMA função que a rota passou a
+// importar do serviço em vez de ter uma cópia local. Ela é PURA (não toca
+// rede/banco/timer), então vem do módulo REAL via `importOriginal` — nunca
+// reimplementada aqui. Reimplementá-la no mock quebraria o teste de
+// regressão de `pageCount` com sentinela (ver 'pageCount com sentinela/erro
+// vira null...' mais abaixo): ele passaria a validar a cópia do teste, e uma
+// mudança real do serviço para (por exemplo) `0` em vez de `null` — que
+// afirmaria "esta impressora imprimiu 0 páginas" quando na verdade o
+// contador não é legível — sairia daqui verde.
+vi.mock('../../src/services/printer-snmp.service.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/services/printer-snmp.service.js')>();
+  return {
+    getLastReading: (printerId: string) => getLastReadingMock(printerId),
+    collectAllReadings: vi.fn(async () => undefined),
+    pageCountValue: actual.pageCountValue,
+  };
+});
 
 const tmpDir = mkdtempSync(join(tmpdir(), 'printers-consumables-test-'));
 process.env.PRINTERS_DB_FILE = join(tmpDir, 'printers.db');

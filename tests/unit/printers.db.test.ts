@@ -202,3 +202,183 @@ describe('PrintersRepository — persistência entre "restarts"', () => {
     expect(reopenedTwice.listAll()).toHaveLength(1);
   });
 });
+
+// --- Histórico de leituras SNMP (Onda 2, subtarefa 12) ---
+describe('PrintersRepository — histórico de leituras SNMP', () => {
+  it('grava uma entrada e lê de volta com o mesmo shape (supplies/pageCount/partial)', () => {
+    const { repo } = newRepo();
+    const printer = repo.create(baseInput);
+
+    const recorded = repo.recordSnmpHistoryEntry(printer.id, {
+      collectedAt: '2026-08-31T12:00:00.000Z',
+      pageCount: 52994,
+      supplies: [
+        { name: 'Toner Preto', levelPercent: 42 },
+        { name: 'Tambor', levelPercent: null },
+      ],
+      partial: true,
+    });
+
+    expect(recorded.id).toBeGreaterThan(0);
+    expect(recorded.printerId).toBe(printer.id);
+
+    const list = repo.listSnmpHistory(printer.id);
+    expect(list).toHaveLength(1);
+    expect(list[0]).toEqual({
+      id: recorded.id,
+      printerId: printer.id,
+      collectedAt: '2026-08-31T12:00:00.000Z',
+      pageCount: 52994,
+      supplies: [
+        { name: 'Toner Preto', levelPercent: 42 },
+        { name: 'Tambor', levelPercent: null },
+      ],
+      partial: true,
+    });
+  });
+
+  it('pageCount null (sentinela/erro SNMP) é gravado e lido como null, nunca NaN/undefined', () => {
+    const { repo } = newRepo();
+    const printer = repo.create(baseInput);
+
+    repo.recordSnmpHistoryEntry(printer.id, {
+      collectedAt: '2026-08-31T12:00:00.000Z',
+      pageCount: null,
+      supplies: [],
+      partial: false,
+    });
+
+    const [entry] = repo.listSnmpHistory(printer.id);
+    expect(entry.pageCount).toBeNull();
+    expect(entry.supplies).toEqual([]);
+  });
+
+  it('listSnmpHistory ordena cronologicamente crescente (série temporal, não log)', () => {
+    const { repo } = newRepo();
+    const printer = repo.create(baseInput);
+
+    repo.recordSnmpHistoryEntry(printer.id, {
+      collectedAt: '2026-08-31T14:00:00.000Z',
+      pageCount: 300,
+      supplies: [],
+      partial: false,
+    });
+    repo.recordSnmpHistoryEntry(printer.id, {
+      collectedAt: '2026-08-31T12:00:00.000Z',
+      pageCount: 100,
+      supplies: [],
+      partial: false,
+    });
+    repo.recordSnmpHistoryEntry(printer.id, {
+      collectedAt: '2026-08-31T13:00:00.000Z',
+      pageCount: 200,
+      supplies: [],
+      partial: false,
+    });
+
+    const list = repo.listSnmpHistory(printer.id);
+    expect(list.map((e) => e.pageCount)).toEqual([100, 200, 300]);
+  });
+
+  it('listSnmpHistory filtra por impressora — não mistura histórico de outro registro', () => {
+    const { repo } = newRepo();
+    const printerA = repo.create(baseInput);
+    const printerB = repo.create({ ...baseInput, name: 'Outra', mac: 'e8:6f:38:ba:b9:32' });
+
+    repo.recordSnmpHistoryEntry(printerA.id, {
+      collectedAt: '2026-08-31T12:00:00.000Z',
+      pageCount: 1,
+      supplies: [],
+      partial: false,
+    });
+    repo.recordSnmpHistoryEntry(printerB.id, {
+      collectedAt: '2026-08-31T12:00:00.000Z',
+      pageCount: 2,
+      supplies: [],
+      partial: false,
+    });
+
+    expect(repo.listSnmpHistory(printerA.id)).toHaveLength(1);
+    expect(repo.listSnmpHistory(printerA.id)[0].pageCount).toBe(1);
+    expect(repo.listSnmpHistory(printerB.id)[0].pageCount).toBe(2);
+  });
+
+  it('listSnmpHistory respeita from/to (limites inclusivos)', () => {
+    const { repo } = newRepo();
+    const printer = repo.create(baseInput);
+
+    for (const [collectedAt, pageCount] of [
+      ['2026-08-01T00:00:00.000Z', 1],
+      ['2026-08-15T00:00:00.000Z', 2],
+      ['2026-08-30T00:00:00.000Z', 3],
+    ] as const) {
+      repo.recordSnmpHistoryEntry(printer.id, { collectedAt, pageCount, supplies: [], partial: false });
+    }
+
+    const filtered = repo.listSnmpHistory(printer.id, {
+      from: '2026-08-15T00:00:00.000Z',
+      to: '2026-08-15T00:00:00.000Z',
+    });
+    expect(filtered.map((e) => e.pageCount)).toEqual([2]);
+
+    const wideRange = repo.listSnmpHistory(printer.id, {
+      from: '2026-08-01T00:00:00.000Z',
+      to: '2026-08-30T00:00:00.000Z',
+    });
+    expect(wideRange.map((e) => e.pageCount)).toEqual([1, 2, 3]);
+  });
+
+  it('deleteSnmpHistoryOlderThan apaga só entradas anteriores ao corte (fronteira exata preservada)', () => {
+    const { repo } = newRepo();
+    const printer = repo.create(baseInput);
+
+    repo.recordSnmpHistoryEntry(printer.id, {
+      collectedAt: '2026-06-01T11:59:59.999Z', // 1ms antes do corte -> apaga
+      pageCount: 1,
+      supplies: [],
+      partial: false,
+    });
+    repo.recordSnmpHistoryEntry(printer.id, {
+      collectedAt: '2026-06-01T12:00:00.000Z', // exatamente no corte -> preserva (< estrito)
+      pageCount: 2,
+      supplies: [],
+      partial: false,
+    });
+    repo.recordSnmpHistoryEntry(printer.id, {
+      collectedAt: '2026-06-01T12:00:00.001Z', // 1ms depois do corte -> preserva
+      pageCount: 3,
+      supplies: [],
+      partial: false,
+    });
+
+    const deleted = repo.deleteSnmpHistoryOlderThan('2026-06-01T12:00:00.000Z');
+    expect(deleted).toBe(1);
+
+    const remaining = repo.listSnmpHistory(printer.id).map((e) => e.pageCount);
+    expect(remaining).toEqual([2, 3]);
+  });
+
+  it('deleteSnmpHistoryOlderThan apaga entradas de TODAS as impressoras, não só uma', () => {
+    const { repo } = newRepo();
+    const printerA = repo.create(baseInput);
+    const printerB = repo.create({ ...baseInput, name: 'Outra', mac: 'e8:6f:38:ba:b9:32' });
+
+    repo.recordSnmpHistoryEntry(printerA.id, {
+      collectedAt: '2000-01-01T00:00:00.000Z',
+      pageCount: 1,
+      supplies: [],
+      partial: false,
+    });
+    repo.recordSnmpHistoryEntry(printerB.id, {
+      collectedAt: '2000-01-01T00:00:00.000Z',
+      pageCount: 2,
+      supplies: [],
+      partial: false,
+    });
+
+    repo.deleteSnmpHistoryOlderThan('2020-01-01T00:00:00.000Z');
+
+    expect(repo.listSnmpHistory(printerA.id)).toHaveLength(0);
+    expect(repo.listSnmpHistory(printerB.id)).toHaveLength(0);
+  });
+});

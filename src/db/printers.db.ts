@@ -169,6 +169,83 @@ function maintenanceRowToRecord(row: MaintenanceEventRow): PrinterMaintenanceEve
   };
 }
 
+// --- Histórico de leituras SNMP (Onda 2, subtarefa 12) ---
+//
+// Diferente do buffer em memória `lastReadings` de printer-snmp.service.ts
+// (que guarda só a ÚLTIMA leitura de cada impressora, para /consumables e
+// /diagnostics), esta tabela guarda UMA LINHA POR LEITURA SNMP bem-sucedida
+// do poller — a série temporal que permite ver tendência (ex.: quanto o
+// toner caiu na última semana, ritmo de impressão). Tabela irmã de
+// `printer_maintenance_events`, mesmo padrão (sem FK formal, existência da
+// impressora validada na rota antes de qualquer escrita/leitura por
+// printer_id).
+//
+// `id` é INTEGER PRIMARY KEY AUTOINCREMENT (não UUID): esta tabela só cresce
+// (uma linha a cada ciclo de 15 min do poller, por impressora) e é podada
+// por idade (ver `deleteSnmpHistoryOlderThan`) — mesmo raciocínio de
+// custo/volume de `bandwidth_samples` em bandwidth-history.db.ts, onde um
+// identificador sequencial e mais barato que um UUID já é suficiente (nunca
+// é referenciado por fora deste módulo).
+export interface PrinterSnmpHistorySupply {
+  name: string;
+  levelPercent: number | null;
+}
+
+export interface RecordSnmpHistoryInput {
+  // Mesmo timestamp que já está em PrinterSnmpReading.collectedAt (o
+  // chamador não deve gerar um `new Date()` novo aqui — ver
+  // printer-snmp.service.ts).
+  collectedAt: string;
+  pageCount: number | null;
+  supplies: PrinterSnmpHistorySupply[];
+  partial: boolean;
+}
+
+export interface PrinterSnmpHistoryEntry {
+  id: number;
+  printerId: string;
+  collectedAt: string;
+  pageCount: number | null;
+  supplies: PrinterSnmpHistorySupply[];
+  partial: boolean;
+}
+
+export interface SnmpHistoryRangeFilter {
+  from?: string;
+  to?: string;
+}
+
+interface SnmpHistoryRow {
+  id: number;
+  printer_id: string;
+  collected_at: string;
+  page_count: number | null;
+  supplies_json: string;
+  partial: number;
+}
+
+function snmpHistoryRowToRecord(row: SnmpHistoryRow): PrinterSnmpHistoryEntry {
+  return {
+    id: row.id,
+    printerId: row.printer_id,
+    collectedAt: row.collected_at,
+    pageCount: row.page_count,
+    // `supplies_json` é sempre escrito por `recordSnmpHistoryEntry` (nunca
+    // por fora deste módulo), então o parse não deveria falhar em uso
+    // normal — mas uma linha corrompida/editada manualmente não pode
+    // derrubar a listagem inteira, então degrada para lista vazia em vez de
+    // propagar a exceção do JSON.parse.
+    supplies: (() => {
+      try {
+        return JSON.parse(row.supplies_json) as PrinterSnmpHistorySupply[];
+      } catch {
+        return [];
+      }
+    })(),
+    partial: row.partial === 1,
+  };
+}
+
 export class PrintersRepository {
   private readonly db: DatabaseSyncType;
 
@@ -224,6 +301,34 @@ export class PrintersRepository {
     this.db.exec(
       'CREATE INDEX IF NOT EXISTS idx_maintenance_events_printer_id ON printer_maintenance_events(printer_id)',
     );
+
+    // Tabela do histórico de leituras SNMP (subtarefa 12) — mesmo arquivo,
+    // mesma conexão `this.db` (ver comentário acima de PrinterSnmpHistoryEntry:
+    // é dado da mesma entidade "impressora", ao contrário do histórico de
+    // banda, que é de domínio próprio e vive em bandwidth-history.db.ts).
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS printer_snmp_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        printer_id TEXT NOT NULL,
+        collected_at TEXT NOT NULL,
+        page_count INTEGER,
+        supplies_json TEXT NOT NULL,
+        partial INTEGER NOT NULL
+      )
+    `);
+    // Consultado sempre por impressora + janela de tempo (GET
+    // /printers/:id/history) e apagado sempre por idade (job de retenção
+    // diário) — o mesmo índice composto serve os dois padrões de acesso,
+    // igual a idx_bandwidth_samples_mac em bandwidth-history.db.ts.
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_snmp_history_printer_collected ON printer_snmp_history(printer_id, collected_at)',
+    );
+
+    // Índice de limpeza por idade — a rotina de retenção (90 dias, ver
+    // printer-snmp.service.ts) apaga por collected_at sem filtrar por
+    // impressora nenhuma; sem este índice seria table scan na tabela
+    // inteira a cada execução diária.
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_snmp_history_collected_at ON printer_snmp_history(collected_at)');
   }
 
   // Usada pelas rotas para devolver 409 com mensagem própria em vez de
@@ -403,6 +508,80 @@ export class PrintersRepository {
     return rows
       .map(maintenanceRowToRecord)
       .sort((a, b) => Date.parse(b.performedAt) - Date.parse(a.performedAt));
+  }
+
+  // --- Histórico de leituras SNMP (subtarefa 12) ---
+
+  // Chamada pelo poller (printer-snmp.service.ts) depois de cada leitura SNMP
+  // bem-sucedida. Não valida aqui se `printerId` existe (mesmo raciocínio de
+  // createMaintenanceEvent) — o poller só chama isso para impressoras que
+  // acabou de ler do próprio cadastro, então a existência já está garantida
+  // por construção.
+  recordSnmpHistoryEntry(printerId: string, entry: RecordSnmpHistoryInput): PrinterSnmpHistoryEntry {
+    const suppliesJson = JSON.stringify(entry.supplies);
+    const partial = entry.partial ? 1 : 0;
+
+    const result = this.db
+      .prepare(
+        `INSERT INTO printer_snmp_history (
+          printer_id, collected_at, page_count, supplies_json, partial
+        ) VALUES (
+          $printer_id, $collected_at, $page_count, $supplies_json, $partial
+        )`,
+      )
+      .run({
+        printer_id: printerId,
+        collected_at: entry.collectedAt,
+        page_count: entry.pageCount,
+        supplies_json: suppliesJson,
+        partial,
+      } as Record<string, SQLInputValue>);
+
+    return snmpHistoryRowToRecord({
+      id: Number(result.lastInsertRowid),
+      printer_id: printerId,
+      collected_at: entry.collectedAt,
+      page_count: entry.pageCount,
+      supplies_json: suppliesJson,
+      partial,
+    });
+  }
+
+  // Ordenado CRESCENTE (collected_at ASC) — ao contrário de
+  // listMaintenanceEvents (log, mais recente primeiro), este histórico é
+  // consumido como SÉRIE TEMPORAL para gráfico de tendência, onde faz mais
+  // sentido a ordem cronológica normal. `from`/`to`, quando informados, já
+  // chegam normalizados para UTC canônico pela camada de aplicação (rota) —
+  // ver o alerta sobre comparação de datas como TEXTO no SQLite em
+  // toCanonicalUtcIso (bandwidth-history.service.ts), mesmo raciocínio vale
+  // aqui: este método não normaliza nada, só compara o que recebeu.
+  listSnmpHistory(printerId: string, options: SnmpHistoryRangeFilter = {}): PrinterSnmpHistoryEntry[] {
+    const conditions = ['printer_id = $printerId'];
+    const params: Record<string, SQLInputValue> = { printerId };
+
+    if (options.from !== undefined) {
+      conditions.push('collected_at >= $from');
+      params.from = options.from;
+    }
+    if (options.to !== undefined) {
+      conditions.push('collected_at <= $to');
+      params.to = options.to;
+    }
+
+    const rows = this.db
+      .prepare(`SELECT * FROM printer_snmp_history WHERE ${conditions.join(' AND ')} ORDER BY collected_at ASC`)
+      .all(params) as unknown as SnmpHistoryRow[];
+    return rows.map(snmpHistoryRowToRecord);
+  }
+
+  // Usado pelo job de retenção diário (printer-snmp.service.ts) — apaga
+  // TODAS as impressoras de uma vez (sem filtro por printer_id), mesma forma
+  // de bandwidth-history.db.ts#deleteSamplesOlderThan.
+  deleteSnmpHistoryOlderThan(cutoffIso: string): number {
+    const result = this.db.prepare('DELETE FROM printer_snmp_history WHERE collected_at < $cutoff').run({
+      cutoff: cutoffIso,
+    });
+    return Number(result.changes);
   }
 
   close(): void {

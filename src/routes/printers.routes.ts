@@ -18,7 +18,16 @@ import { buildNetworkStatusResolver, withNetworkStatus } from '../services/print
 // que sobe junto com bandwidth.routes.ts), este import também traz
 // `getLastReading` e os tipos usados por GET /printers/:id/consumables
 // (subtarefa 6) para formatar a última leitura SNMP bem-sucedida.
-import { getLastReading, type PrinterSnmpReading, type PrinterSupply, type SnmpMeasurement } from '../services/printer-snmp.service.js';
+// `pageCountValue` (subtarefa 12) é a MESMA função usada por
+// printer-snmp.service.ts para gravar o histórico — reaproveitada aqui em
+// vez de duplicada, para que /consumables e /history nunca divirjam em como
+// interpretam um SnmpMeasurement de contador de páginas.
+import {
+  getLastReading,
+  pageCountValue,
+  type PrinterSnmpReading,
+  type PrinterSupply,
+} from '../services/printer-snmp.service.js';
 
 // Cadastro (nome, MAC, segredo SNMP, política de manutenção) do módulo de
 // manutenção de impressoras — primeira rota do projeto com persistência em
@@ -216,10 +225,6 @@ function resolveSupplyStatus(supply: PrinterSupply, thresholdPct: number | null)
   // o limite é o piso aceitável, não o primeiro valor a alertar.
   if (thresholdPct !== null && supply.levelPercent < thresholdPct) return 'low';
   return 'ok';
-}
-
-function pageCountValue(pageCount: SnmpMeasurement): number | null {
-  return pageCount.status === 'ok' ? pageCount.value : null;
 }
 
 function toConsumablesResponse(
@@ -456,6 +461,49 @@ function toMaintenanceResponse(
   };
 }
 
+// --- GET /printers/:id/history (Onda 2, subtarefa 12) ---
+//
+// Série temporal de leituras SNMP persistidas por printer-snmp.service.ts a
+// cada ciclo do poller (ver `persistReadingToHistory` lá e
+// `printer_snmp_history` em src/db/printers.db.ts) — diferente de
+// /consumables e /diagnostics (que só expõem a ÚLTIMA leitura), este
+// endpoint devolve a lista inteira dentro da janela pedida, em ordem
+// cronológica, para o frontend plotar tendência (ex.: queda de toner ao
+// longo do tempo).
+
+const historyQuery = z.object({
+  // `offset: true`: mesmo schema de from/to já usado em
+  // /bandwidth/history/long-range (bandwidth.routes.ts) — aceita qualquer
+  // fuso, não só 'Z'.
+  from: z.string().datetime({ offset: true }).optional(),
+  to: z.string().datetime({ offset: true }).optional(),
+});
+
+// `collected_at` é gravado sempre em ISO-8601 UTC canônico
+// (`new Date().toISOString()`, com milissegundos e sufixo 'Z' — ver
+// PrinterSnmpReading.collectedAt em printer-snmp.service.ts), e a
+// comparação no SQLite é LEXICOGRÁFICA sobre TEXT. Um `from`/`to` com offset
+// de fuso (ex.: '-03:00', aceito pelo schema acima) ou sem milissegundos
+// comparado cru contra esse formato dá resultado errado sem erro nenhum —
+// mesma armadilha documentada em toCanonicalUtcIso
+// (bandwidth-history.service.ts). Convertemos para o mesmo formato canônico
+// antes de consultar o repositório.
+function toCanonicalUtcIso(value: string): string {
+  return new Date(value).toISOString();
+}
+
+interface HistoryResponseEntry {
+  collectedAt: string;
+  pageCount: number | null;
+  supplies: Array<{ name: string; levelPercent: number | null }>;
+  partial: boolean;
+}
+
+interface HistoryResponse {
+  printerId: string;
+  entries: HistoryResponseEntry[];
+}
+
 export default async function printersRoutes(app: FastifyInstance) {
   app.addHook('preHandler', app.authenticate);
 
@@ -521,6 +569,31 @@ export default async function printersRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: 'Impressora não encontrada' });
     }
     return toDiagnosticsResponse(id, getLastReading(id));
+  });
+
+  // --- GET /printers/:id/history (subtarefa 12) ---
+  app.get('/printers/:id/history', async (request, reply) => {
+    const { id } = idParam.parse(request.params);
+    const record = printersRepository.getById(id);
+    if (!record) {
+      return reply.code(404).send({ error: 'Impressora não encontrada' });
+    }
+
+    const query = historyQuery.parse(request.query);
+    const from = query.from ? toCanonicalUtcIso(query.from) : undefined;
+    const to = query.to ? toCanonicalUtcIso(query.to) : undefined;
+
+    const entries = printersRepository.listSnmpHistory(id, { from, to });
+    const response: HistoryResponse = {
+      printerId: id,
+      entries: entries.map((entry) => ({
+        collectedAt: entry.collectedAt,
+        pageCount: entry.pageCount,
+        supplies: entry.supplies,
+        partial: entry.partial,
+      })),
+    };
+    return response;
   });
 
   app.patch(
