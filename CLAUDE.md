@@ -1,5 +1,36 @@
 # Gauntlet Loop — unifi-dashboard-api
 
+## Onda 3 (Módulo de Active Directory + Ponte 802.1X) — PLANEJADA, não iniciada
+
+Escopo completo, arquitetura, estratégia de teste e ordem de subtarefas em
+`docs/ad-module-plan.md` — carregar esse documento no contexto de qualquer par que trabalhe
+nesta onda, mesmo papel que `docs/printers-snmp-research.md` teve pra Onda 2.
+
+**Objetivo**: hoje o projeto cobre 100% do lado UniFi (clientes, devices, Wi-Fi/RADIUS já
+preparado pra Enterprise, networks, segurança, SSH, banda, impressoras) e 0% de Active
+Directory. Esta onda fecha isso: CRUD de usuários/grupos/computadores no AD via LDAPS, e a
+ponte que liga "membro de um grupo no AD" a "tem acesso à rede" (802.1X/RADIUS/NPS, cujo
+lado UniFi já está pronto — falta só o lado AD).
+
+### Achados de uma revisão externa do repositório (2026-09-09) — subtarefas 0.x, bloqueantes
+
+Uma revisão feita fora do Gauntlet Loop (leitura completa do repo por outra instância do
+Claude) identificou 3 pontos, viraram as subtarefas 0.1–0.3 do plano da Onda 3 — resolver
+antes do resto por serem pequenos, genuínos, e pré-requisito direto do que vem depois:
+
+1. **Log de auditoria inexistente em `master`** — existe uma tentativa isolada, não
+   commitada no histórico principal, na branch `feat/audit-log` (mencionada na nota "Nota
+   sobre audit-log" no fim deste arquivo). Bloqueante pra Onda 3: toda ação de escrita do
+   módulo de AD precisa de rastro de quem fez o quê.
+2. **Rate limit inconsistente em 3 rotas `DELETE`** — `DELETE /wifi/:id`,
+   `DELETE /networks/:id` e `DELETE /printers/:id` não usam
+   `RATE_LIMIT_CLIENT_ACTION_MAX` como as demais rotas de escrita dos mesmos arquivos, caem
+   no limite global (100/min) em vez do restrito (10/min). Corrigir por consistência antes
+   de replicar o padrão de rotas no módulo de AD.
+3. **Senha em branco no admin da HP (SWS)** — decisão já fechada anteriormente como "não
+   implementado por enquanto" (ver Onda 2 abaixo). Só reafirmando que vale reconsiderar a
+   prioridade agora que o dashboard vai ganhar ainda mais poder de administração.
+
 ## Onda 2 (Módulo de Manutenção de Impressoras) — CONCLUÍDA — iniciada 2026-08-31, fechada 2026-09-08
 
 Todas as subtarefas de código planejadas foram aprovadas (47-48/50 cada), revisadas por par
