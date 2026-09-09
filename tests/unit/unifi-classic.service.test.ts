@@ -241,7 +241,7 @@ describe('unifiClassicService', () => {
     // um ar-condicionado, um celular Android e um dispositivo sem hostname
     // junto com as 2 impressoras reais — todos com OUI "Samsung Electronics
     // Co.,Ltd". Os 3 primeiros casos abaixo replicam exatamente isso.
-    it('reconhece HP/Brother só pelo OUI (fabricantes inequívocos)', async () => {
+    it('reconhece Brother só pelo OUI (fabricante inequívoco) e HP via OUI+name (ambíguo, com indício)', async () => {
       const fetchMock = vi.fn(async (url: string) => {
         if (url.endsWith('/api/auth/login')) return loginResponse();
         if (url.includes('/rest/user')) {
@@ -262,6 +262,33 @@ describe('unifiClassicService', () => {
 
       expect(candidates).toHaveLength(2);
       expect(candidates.map((c) => c.mac)).toEqual(['50:81:40:d8:6c:7e', 'e8:6f:38:ba:b9:32']);
+    });
+
+    // ACHADO DA REVISÃO CRÍTICA (2026-09-09): "HP Inc." estava classificado
+    // como fabricante INEQUÍVOCO ("nenhum outro tipo comum de aparelho usa
+    // esse OUI") — factualmente errado desde a cisão HP Inc./HPE: "HP Inc."
+    // é o OUI de toda a linha de PCs/notebooks/monitores HP, não só
+    // impressoras. Movido pra AMBÍGUO (mesmo grupo de Samsung/Canon/Epson).
+    // Este teste replica o cenário real que o achado descreveu — um notebook
+    // HP comum, sem nenhum indício de impressora no hostname/nome — e prova
+    // que ele NÃO aparece mais como candidato falso.
+    it('NÃO trata "HP Inc." como candidato sozinho — um notebook/desktop HP comum não deve aparecer', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url.endsWith('/api/auth/login')) return loginResponse();
+        if (url.includes('/rest/user')) {
+          return jsonResponse({
+            meta: { rc: 'ok' },
+            data: [{ mac: 'AA:BB:CC:11:22:33', oui: 'HP Inc.', hostname: 'DESKTOP-JOAO', name: 'PC do João' }],
+          });
+        }
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService } = await import('../../src/services/unifi-classic.service.js');
+      const candidates = await unifiClassicService.getPrinterDiscoveryCandidates();
+
+      expect(candidates).toHaveLength(0);
     });
 
     it('reconhece Brother pelo prefixo de hostname mesmo com OUI diferente/ausente', async () => {

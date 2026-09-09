@@ -199,24 +199,34 @@ async function assertKnownClient(mac: string, site: string, knownClients?: Class
 // tem motor Samsung/HP-Samsung por baixo, mas o MAC/OUI de rede pode ser
 // tanto do motor quanto de outro componente Samsung do aparelho anfitrião).
 // Por isso os fabricantes ficam em duas categorias:
-//   - INEQUÍVOCOS (`UNAMBIGUOUS_PRINTER_OUI_SUBSTRINGS`): "HP Inc." e
-//     "Brother Industries" — confirmados nas 2 impressoras reais deste
-//     projeto, e nenhum outro tipo comum de dispositivo doméstico/escritório
-//     usa esse OUI. Basta bater o OUI.
-//   - AMBÍGUOS (`AMBIGUOUS_PRINTER_OUI_SUBSTRINGS`): Samsung, Canon, Epson —
-//     fabricam impressoras E outras categorias de aparelho. Só contam como
-//     candidato se o `hostname` OU `name` também bater um padrão de
-//     impressora (`AMBIGUOUS_HOSTNAME_HINTS`) — sem isso, o ar-condicionado
-//     do exemplo acima entraria na lista.
+//   - INEQUÍVOCOS (`UNAMBIGUOUS_PRINTER_OUI_SUBSTRINGS`): "Brother
+//     Industries", Kyocera, Xerox, Lexmark, Ricoh — fabricantes cujo negócio
+//     é só impressão/imagem, sem linha de notebook/desktop/monitor. Basta
+//     bater o OUI.
+//   - AMBÍGUOS (`AMBIGUOUS_PRINTER_OUI_SUBSTRINGS`): Samsung, Canon, Epson,
+//     e **HP Inc.** — fabricam impressoras E outras categorias de aparelho.
+//     **CORREÇÃO (achado da revisão crítica, 2026-09-09)**: "HP Inc." estava
+//     na lista de inequívocos com o comentário "nenhum outro tipo comum de
+//     aparelho usa esse OUI" — factualmente errado. Desde a cisão HP
+//     Inc./HPE (2015), "HP Inc." é o OUI de TODA a linha de PCs/notebooks/
+//     monitores HP também, não só impressoras — um notebook HP comum na
+//     rede entraria como falso candidato. Movido pra ambíguo: as 2 HPs reais
+//     deste projeto continuam detectadas normalmente, porque o `name`
+//     delas ("HPLaserMFP135w...") bate em `AMBIGUOUS_HOSTNAME_HINTS`
+//     ("laser"/"mfp") — só o teste de fabricante sozinho que não basta mais.
+//     Só contam como candidato se o `hostname` OU `name` também bater um
+//     padrão de impressora — sem isso, o ar-condicionado do exemplo acima
+//     (ou um notebook HP) entraria na lista.
 // Prefixos de hostname Brother (`BRW`/`HLL`/`DCP`/`MFC`, já confirmados no
-// achado 10 original) contam como sinal PRÓPRIO, independente do OUI —
-// cobre o caso (não observado ainda, mas plausível) de uma Brother cujo OUI
-// de rede não seja "Brother Industries" (ex.: um adaptador Wi-Fi de outro
-// fabricante).
-const UNAMBIGUOUS_PRINTER_OUI_SUBSTRINGS = ['hp inc', 'brother industries', 'kyocera', 'xerox', 'lexmark', 'ricoh'];
-const AMBIGUOUS_PRINTER_OUI_SUBSTRINGS = ['samsung', 'canon', 'epson'];
+// achado 10 original) e HP (`NPI`, prefixo padrão de fábrica da linha
+// JetDirect/embedded quando a impressora nunca foi renomeada) contam como
+// sinal PRÓPRIO, independente do OUI — cobre o caso de uma impressora cujo
+// OUI de rede não seja o do fabricante do motor (ex.: um adaptador Wi-Fi de
+// outro fabricante).
+const UNAMBIGUOUS_PRINTER_OUI_SUBSTRINGS = ['brother industries', 'kyocera', 'xerox', 'lexmark', 'ricoh'];
+const AMBIGUOUS_PRINTER_OUI_SUBSTRINGS = ['samsung', 'canon', 'epson', 'hp inc'];
 const AMBIGUOUS_HOSTNAME_HINTS = ['print', 'laser', 'mfp', 'ink', 'scan'];
-const PRINTER_HOSTNAME_PREFIXES = ['brw', 'hll', 'dcp', 'mfc'];
+const PRINTER_HOSTNAME_PREFIXES = ['brw', 'hll', 'dcp', 'mfc', 'npi'];
 
 function containsAny(haystack: string, needles: string[]): boolean {
   return needles.some((needle) => haystack.includes(needle));
