@@ -16,6 +16,7 @@ import printersRoutes from './routes/printers.routes.js';
 import securityRoutes from './routes/security.routes.js';
 import sitesRoutes from './routes/sites.routes.js';
 import sshRoutes from './routes/ssh.routes.js';
+import { auditLogService } from './services/audit-log.service.js';
 import { UniFiApiError } from './services/unifi.service.js';
 import { ClassicApiNotConfiguredError, UniFiClassicApiError } from './services/unifi-classic.service.js';
 
@@ -26,6 +27,52 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(rateLimit, { max: env.RATE_LIMIT_MAX, timeWindow: env.RATE_LIMIT_WINDOW });
   await app.register(authPlugin);
   await app.register(websocketPlugin);
+
+  // Log de auditoria das ações do próprio dashboard (não do controller
+  // UniFi — isso já é coberto por /security/*). Roda como hook global em
+  // vez de instrumentar cada rota individualmente: cobre automaticamente
+  // toda ação mutável (block/unblock, restart, power-cycle, rotação de
+  // SSH, CRUD de Wi-Fi/VLAN, IP fixo) sem precisar tocar em cada handler.
+  // Ignora GET/HEAD/OPTIONS (leitura não é "ação") e /auth/* (login/refresh
+  // ainda não têm um ator autenticado). Nunca loga o corpo da requisição
+  // (poderia conter senha/passphrase) — só método, rota e params de path.
+  //
+  // HEAD entra nessa lista porque é semanticamente idêntico a um GET (o
+  // Fastify registra HEAD automaticamente pra toda rota GET, e a requisição
+  // não tem corpo nem efeito). Sem essa exclusão, um health check externo
+  // batendo `HEAD /health` de 10 em 10 segundos enchia o buffer de 500
+  // entradas em ~1h20 e EXPULSAVA as ações reais do operador da janela
+  // visível em GET /security/audit-log — um ruído que apaga justamente o
+  // dado que o log existe pra guardar.
+  const AUDIT_READ_ONLY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+  app.addHook('onResponse', async (request, reply) => {
+    if (AUDIT_READ_ONLY_METHODS.has(request.method)) return;
+    if (request.url.startsWith('/auth/')) return;
+
+    const actor = (request.user as { sub?: string } | undefined)?.sub ?? 'anônimo';
+
+    // `routeOptions.url` é o PADRÃO da rota (ex: `/clients/:mac/block`) e
+    // nunca traz query string. Só que ele é undefined quando nenhuma rota
+    // casou (404), e aí o fallback `request.url` é a URL crua — COM query
+    // string. Uma requisição a uma rota inexistente aceita qualquer coisa
+    // na query (um cliente mal configurado mandando `?password=...`, ou
+    // alguém varrendo endpoints), e isso ia parar verbatim num arquivo
+    // append-only sem rotação — furando a própria regra de "nunca gravar
+    // segredo" que o resto do hook segue. Corta no `?` pro fallback ficar
+    // com a mesma garantia do caminho normal.
+    const rawRoute = request.routeOptions.url ?? request.url;
+    const route = rawRoute.split('?')[0] ?? rawRoute;
+
+    auditLogService.record({
+      timestamp: new Date().toISOString(),
+      actor,
+      method: request.method,
+      route,
+      params: (request.params as Record<string, string> | undefined) ?? {},
+      statusCode: reply.statusCode,
+    });
+  });
 
   // Precisa ser registrado ANTES das rotas: cada app.register(rotaX) abaixo
   // cria um contexto encapsulado próprio, e o Fastify fixa nesse contexto o

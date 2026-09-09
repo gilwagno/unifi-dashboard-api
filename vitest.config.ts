@@ -15,6 +15,18 @@ export default defineConfig({
     // completo do repo, então sem esta exclusão `vitest run` na raiz varre
     // (e duplica) a suíte de lá também, incluindo os specs de frontend/e2e
     // que o worktree nem exclui do jeito certo. Achado real em 2026-09-08.
-    exclude: [...configDefaults.exclude, 'frontend/**', 'e2e/**', '.claude/**'],
+    // `.worktrees/**` é o MESMO problema por outro caminho: um `git
+    // worktree add .worktrees/<nome>` (usado pra rodar subtarefas em
+    // paralelo) também é um checkout completo do repo. Achado real em
+    // 2026-09-09, revisando o log de auditoria: a suíte da raiz estava
+    // rodando DUPLICADA (a daqui + a do worktree `fix-ratelimit`), o que
+    // torna qualquer contagem "X/Y verde" impossível de conferir.
+    exclude: [
+      ...configDefaults.exclude,
+      'frontend/**',
+      'e2e/**',
+      '.claude/**',
+      '.worktrees/**',
+    ],
   },
 });

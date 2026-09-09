@@ -1,3 +1,5 @@
+import { vi } from 'vitest';
+
 process.env.CONTROLLER_HOST ??= 'controller.test';
 process.env.UNIFI_API_KEY ??= 'test-api-key';
 process.env.SITE_ID ??= 'default';
@@ -16,3 +18,12 @@ process.env.PRINTERS_DB_FILE ??= ':memory:';
 // projeto (histórico de banda de longo prazo — ver
 // src/db/bandwidth-history.db.ts).
 process.env.BANDWIDTH_HISTORY_DB_FILE ??= ':memory:';
+
+// src/app.ts registra um hook global que grava em auditLogService.record()
+// pra toda requisição não-GET — sem mockar isso aqui, cada teste de rota
+// mutável (block/unblock, restart, wifi, networks, ssh...) tocaria disco de
+// verdade em ./audit.log. Mockado globalmente em vez de arquivo por
+// arquivo porque o hook é transversal a quase todo teste de integração.
+vi.mock('../src/services/audit-log.service.js', () => ({
+  auditLogService: { record: vi.fn(), getHistory: vi.fn(() => []) },
+}));
