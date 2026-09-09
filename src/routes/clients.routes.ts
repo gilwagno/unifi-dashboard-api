@@ -33,6 +33,19 @@ const aliasBody = z.object({
   alias: z.string().trim().min(1, 'alias é obrigatório').max(128, 'alias deve ter no máximo 128 caracteres'),
 });
 
+// Hostname bruto do cliente (campo `hostname` em /rest/user) — ver a
+// DECISÃO em unifi-classic.service.ts#setHostname sobre por que isso existe:
+// o controller cacheia esse valor e, pra clientes com IP estático, nunca
+// reaprende sozinho mesmo quando o próprio dispositivo já anuncia um
+// hostname novo (SNMP/TCP-IP/mDNS todos corretos) — reboot, forçar
+// reconexão e até "esquecer" o cliente não resolvem. Sobrescrever direto é
+// o único jeito confirmado de corrigir a exibição no painel sem depender de
+// descoberta de rede. Mesmo limite de tamanho do Apelido (128) — o
+// controller não documenta um teto oficial pra este campo especificamente.
+const hostnameBody = z.object({
+  hostname: z.string().trim().min(1, 'hostname é obrigatório').max(128, 'hostname deve ter no máximo 128 caracteres'),
+});
+
 const listClientsQuery = z
   .object({
     siteId: z.string().min(1).optional(),
@@ -120,6 +133,21 @@ export default async function clientsRoutes(app: FastifyInstance) {
       const { mac } = macParamSchema.parse(request.params);
       const { alias } = aliasBody.parse(request.body);
       await unifiClassicService.setClientAlias(mac, alias);
+      return reply.send({ ok: true });
+    },
+  );
+
+  // Hostname bruto exibido no UniFi (achado ao vivo, 2026-09-09 — ver
+  // unifi-classic.service.ts#setHostname): sobrescreve o cache do
+  // controller diretamente. Rota genérica (não específica de impressora),
+  // mesmo padrão de /alias e /fixed-ip acima.
+  app.patch(
+    '/clients/:mac/hostname',
+    { config: { rateLimit: { max: env.RATE_LIMIT_CLIENT_ACTION_MAX, timeWindow: env.RATE_LIMIT_WINDOW } } },
+    async (request, reply) => {
+      const { mac } = macParamSchema.parse(request.params);
+      const { hostname } = hostnameBody.parse(request.body);
+      await unifiClassicService.setClientHostname(mac, hostname);
       return reply.send({ ok: true });
     },
   );

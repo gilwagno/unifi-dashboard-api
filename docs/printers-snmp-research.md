@@ -176,19 +176,31 @@ que a documentação geral da família SyncThru/WBM já sugeria.
 
 ## Investigação da HP via SWS real (172.16.0.34) — achados críticos, 2026-08-31
 
+> **CORREÇÃO (2026-09-09, sessão de reboot HP)**: o Achado 1 abaixo estava ERRADO. Confirmado ao
+> vivo, sem Playwright — só um `GET /sws/data/sws_data.js` sem autenticação — que `172.16.0.34` tem
+> `productSerial: "BRBSP770DV"`, DIFERENTE do serial da HP do Financeiro
+> (`172.16.0.89`, `productSerial: "BRBSQ2G13Q"`). São duas impressoras HP físicas distintas, não a
+> mesma vista por duas interfaces. O motivo do engano original: quem investigou por Playwright leu
+> "Serial Number" de uma tela da UI (não confirmado qual), que aparentemente não é o mesmo campo que
+> `SWS.DATA.productSerial` — os dois `BRBSP770DV` mencionados no texto original vieram da MESMA leitura
+> (a da UI), nunca comparados contra o dado bruto de `.89`. `172.16.0.34` é uma 2ª impressora HP real
+> (mesmo modelo, hostname UniFi `COMPRAS`), cadastrada no sistema nesta sessão de continuação — ver
+> CLAUDE.md, seção "Impressoras reais confirmadas na rede".
+
 Login feito com Playwright (a SWS da HP usa criptografia AES do lado do cliente pra senha —
 biblioteca `gibberish-aes.pjs` — confirmado por leitura do JS servido; não dá pra fazer login via
 POST simples de curl como na Brother, só via navegador de verdade). Usuário `admin`, senha em
 branco (padrão de fábrica) — **funcionou**.
 
-**Achado 1 — não é uma 5ª impressora, é a HP já cadastrada, num IP inesperado.** Serial Number
-exibido (`BRBSP770DV`) bate exatamente com a etiqueta da impressora descrita na Seção 0 original,
-Host Name "Financeiro" bate com o registro do UniFi. Mas ela respondeu em `172.16.0.34`, não em
-`172.16.0.89` (o IP fixo registrado no `rest/user` do controller) — e a tela "Device Information"
-mostra `MAC Address: B0:22:7A:4F:63:80`, diferente do MAC cadastrado (`50:81:40:d8:6c:7e`).
-Hipótese mais provável: essa tela expõe a interface de Wi-Fi Direct (MAC próprio, separado da
-Wi-Fi de infraestrutura que o UniFi rastreia), não confirmado com certeza. **Consequência prática:
-o merge de status por MAC (subtarefa 2) e a resolução de IP do poller (subtarefa 5) continuam
+**Achado 1 (SUPERADO — ver correção acima) — não é uma 5ª impressora, é a HP já cadastrada, num IP
+inesperado.** Serial Number exibido (`BRBSP770DV`) bate exatamente com a etiqueta da impressora
+descrita na Seção 0 original, Host Name "Financeiro" bate com o registro do UniFi. Mas ela
+respondeu em `172.16.0.34`, não em `172.16.0.89` (o IP fixo registrado no `rest/user` do
+controller) — e a tela "Device Information" mostra `MAC Address: B0:22:7A:4F:63:80`, diferente do
+MAC cadastrado (`50:81:40:d8:6c:7e`). Hipótese mais provável: essa tela expõe a interface de Wi-Fi
+Direct (MAC próprio, separado da Wi-Fi de infraestrutura que o UniFi rastreia), não confirmado com
+certeza. **Consequência prática: o merge de status por MAC (subtarefa 2) e a resolução de IP do
+poller (subtarefa 5) continuam
 corretos usando o MAC/IP do UniFi — mas se o poller algum dia falhar em achar essa impressora,
 não assumir que ela sumiu da rede sem checar se o IP simplesmente mudou.**
 

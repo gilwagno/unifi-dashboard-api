@@ -15,6 +15,7 @@ vi.mock('../../src/services/unifi-classic.service.js', () => ({
     unblockClient: vi.fn(async () => undefined),
     setClientFixedIp: vi.fn(async () => undefined),
     setClientAlias: vi.fn(async () => undefined),
+    setClientHostname: vi.fn(async () => undefined),
   },
   UniFiClassicApiError: class UniFiClassicApiError extends Error {
     constructor(
@@ -40,6 +41,7 @@ beforeEach(() => {
   vi.mocked(unifiClassicService.unblockClient).mockClear();
   vi.mocked(unifiClassicService.setClientFixedIp).mockClear();
   vi.mocked(unifiClassicService.setClientAlias).mockClear();
+  vi.mocked(unifiClassicService.setClientHostname).mockClear();
 });
 
 async function authedApp() {
@@ -468,6 +470,171 @@ describe('PATCH /clients/:mac/alias', () => {
       method: 'PATCH',
       url: '/clients/aa:bb:cc:dd:ee:ff/alias',
       payload: { alias: 'Novo apelido' },
+    });
+
+    expect(res.statusCode).toBe(401);
+
+    await app.close();
+  });
+});
+
+// ACHADO AO VIVO (sessão de continuação do reboot HP, 2026-09-09): o
+// `hostname` bruto exibido no UniFi fica cacheado no controller e, pra
+// clientes com IP estático, nunca é reaprendido sozinho — mesmo com o
+// próprio dispositivo já anunciando um valor novo em toda fonte que ele
+// expõe (SNMP, TCP/IPv4, mDNS) e mesmo depois de reboot, forçar reconexão e
+// "esquecer" o cliente no controller. Sobrescrever direto via PUT em
+// /rest/user/{id} (mesmo endpoint que /alias já usa) foi o único mecanismo
+// que corrigiu de verdade — ver a DECISÃO em
+// unifi-classic.service.ts#setHostname. Suíte espelha exatamente
+// PATCH /clients/:mac/alias (mesmo formato de rota/validação), corrigindo
+// só o nome do campo.
+describe('PATCH /clients/:mac/hostname', () => {
+  it('sobrescreve o hostname bruto exibido no UniFi', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/hostname',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { hostname: 'Financeiro' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+    expect(unifiClassicService.setClientHostname).toHaveBeenCalledWith('aa:bb:cc:dd:ee:ff', 'Financeiro');
+
+    await app.close();
+  });
+
+  it('retorna 404 quando o MAC não é conhecido pelo controller', async () => {
+    const { app, token } = await authedApp();
+    vi.mocked(unifiClassicService.setClientHostname).mockRejectedValueOnce(
+      new UniFiClassicApiError(404, 'Cliente ff:ff:ff:ff:ff:ff não é conhecido pelo controller'),
+    );
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/ff:ff:ff:ff:ff:ff/hostname',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { hostname: 'Novo hostname' },
+    });
+
+    expect(res.statusCode).toBe(404);
+
+    await app.close();
+  });
+
+  it('retorna 503 quando a API clássica não está configurada', async () => {
+    const { app, token } = await authedApp();
+    vi.mocked(unifiClassicService.setClientHostname).mockRejectedValueOnce(new ClassicApiNotConfiguredError());
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/hostname',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { hostname: 'Novo hostname' },
+    });
+
+    expect(res.statusCode).toBe(503);
+
+    await app.close();
+  });
+
+  // ACHADO DO CRÍTICO (2026-09-09): `LocalDnsRecordRequiresFixedIpError`
+  // (unifi-classic.service.ts) existe especificamente pra esta rota, mas
+  // nenhum teste confirmava que o 409 chegava até o cliente HTTP — mudar o
+  // `super(409, ...)` pra qualquer outro status passaria com a suíte
+  // inteira verde (o erro handler central cairia no fallback 502 sem
+  // ninguém notar).
+  it('retorna 409 quando o cliente não tem IP fixo habilitado (LocalDnsRecordRequiresFixedIpError)', async () => {
+    const { app, token } = await authedApp();
+    vi.mocked(unifiClassicService.setClientHostname).mockRejectedValueOnce(
+      new UniFiClassicApiError(409, 'Cliente aa:bb:cc:dd:ee:ff precisa ter IP fixo habilitado'),
+    );
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/hostname',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { hostname: 'Novo hostname' },
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().details).toContain('IP fixo');
+
+    await app.close();
+  });
+
+  it('rejeita hostname vazio', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/hostname',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { hostname: '' },
+    });
+
+    expect(res.statusCode).toBe(400);
+
+    await app.close();
+  });
+
+  it('rejeita hostname só com espaços (o trim roda antes do min(1))', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/hostname',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { hostname: '   ' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(unifiClassicService.setClientHostname).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it('repassa o hostname já sem os espaços das pontas pro controller', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/hostname',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { hostname: '  Financeiro  ' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(unifiClassicService.setClientHostname).toHaveBeenCalledWith('aa:bb:cc:dd:ee:ff', 'Financeiro');
+
+    await app.close();
+  });
+
+  it('rejeita hostname maior que 128 caracteres', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/hostname',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { hostname: 'a'.repeat(129) },
+    });
+
+    expect(res.statusCode).toBe(400);
+
+    await app.close();
+  });
+
+  it('retorna 401 sem token', async () => {
+    const app = await buildApp();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/hostname',
+      payload: { hostname: 'Novo hostname' },
     });
 
     expect(res.statusCode).toBe(401);

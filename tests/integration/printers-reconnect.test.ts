@@ -44,6 +44,7 @@ vi.mock('../../src/services/unifi-classic.service.js', () => {
     unifiClassicService: {
       isConfigured: vi.fn(() => false),
       getKnownClientsNetworkInfo: vi.fn(async () => new Map()),
+      getConnectedMacs: vi.fn(async () => new Set()),
       blockClient: vi.fn(async () => undefined),
       unblockClient: vi.fn(async () => undefined),
     },

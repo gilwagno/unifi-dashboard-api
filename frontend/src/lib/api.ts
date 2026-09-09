@@ -234,11 +234,21 @@ export type PrinterSnmpInput =
   | { version: 'v1' | 'v2c'; community: string }
   | { version: 'v3'; v3Auth: PrinterSnmpV3Auth };
 
+// Credencial de admin do PAINEL WEB da impressora (WBM da Brother, SWS da
+// HP) — aceita na escrita, NUNCA devolvida em nenhuma leitura (o backend a
+// remove em toPublic, mesmo regime do segredo SNMP). Por isso não existe em
+// `Printer`: não há como o formulário reexibi-la.
+export interface PrinterWbmCredentialsInput {
+  username: string;
+  password: string;
+}
+
 export interface CreatePrinterBody {
   name: string;
   mac: string;
   ipOverride?: string;
   snmp: PrinterSnmpInput;
+  wbmCredentials?: PrinterWbmCredentialsInput;
   maintenance?: Partial<PrinterMaintenancePolicy>;
 }
 
@@ -249,6 +259,8 @@ export interface UpdatePrinterBody {
   mac?: string;
   ipOverride?: string | null;
   snmp?: PrinterSnmpInput;
+  // Omitir mantém a credencial atual; `null` a apaga (ver o backend).
+  wbmCredentials?: PrinterWbmCredentialsInput | null;
   maintenance?: Partial<PrinterMaintenancePolicy>;
 }
 
@@ -468,4 +480,13 @@ export const api = {
   reconnectPrinter: (id: string) =>
     request<{ ok: true; note: string }>(`/printers/${id}/reconnect`, { method: 'POST' }),
   getPrinterConsumables: (id: string) => request<PrinterConsumablesResponse>(`/printers/${id}/consumables`),
+  // REINICIA O EQUIPAMENTO FÍSICO (HP/SWS) — não confundir com
+  // reconnectPrinter, que só desassocia/reassocia o cliente na rede.
+  // `ipOrigin` volta na resposta para a tela poder mostrar em QUAL endereço a
+  // ação foi executada (o IP pode ter vindo do histórico do controller).
+  rebootPrinter: (id: string) =>
+    request<{ ok: true; ipAddress: string; ipOrigin: 'override' | 'integration' | 'classic' }>(
+      `/printers/${id}/reboot`,
+      { method: 'POST' },
+    ),
 };

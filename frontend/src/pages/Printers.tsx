@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronDown, ChevronUp, Pencil, Printer as PrinterIcon, RefreshCw, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronUp, Pencil, Power, Printer as PrinterIcon, RefreshCw, Trash2 } from 'lucide-react';
 import { Badge } from '../components/Badge';
 import { Layout } from '../components/Layout';
 import { usePolling } from '../hooks/usePolling';
@@ -11,6 +11,7 @@ import {
   type PrinterConsumablesResponse,
   type PrinterSnmpInput,
   type PrinterSnmpVersion,
+  type PrinterWbmCredentialsInput,
   type PrinterWithNetwork,
   type UpdatePrinterBody,
 } from '../lib/api';
@@ -42,19 +43,38 @@ const SUPPLY_STATUS_INFO: Record<ConsumableSupplyStatus, { label: string; tone: 
 
 function networkBadge(printer: PrinterWithNetwork) {
   const { network } = printer;
-  if (network.source === 'integration') {
-    return (
-      <Badge tone="success">Online · {network.ipAddress ?? 'IP desconhecido'} ({network.connectionType ?? '—'})</Badge>
-    );
+  if (network.source === 'unknown') {
+    return <Badge tone="neutral">Status de rede desconhecido</Badge>;
   }
-  if (network.source === 'classic') {
+
+  // `source` 'integration' e 'classic' compartilham o mesmo shape desde a
+  // melhoria que cruza a API clássica com stat/sta (conectados agora de
+  // verdade) — `online` já vem true/false/null calculado pelo backend nos
+  // dois casos, não é mais "sempre true na Integration API, sempre
+  // desconhecido na clássica". A UI só precisa decidir o texto/tom pelo
+  // valor de `online`, sem se importar com a origem.
+  const originLabel = network.source === 'integration' ? undefined : 'Conhecida pelo controller';
+  const ipText = `${network.ipAddress ?? 'IP desconhecido'} (${network.connectionType ?? '—'})`;
+
+  if (network.online === true) {
     return (
-      <Badge tone="neutral">
-        Conhecida pelo controller · {network.ipAddress ?? 'IP desconhecido'} (online desconhecido)
+      <Badge tone="success">
+        {originLabel ? `${originLabel} · ` : ''}Online · {ipText}
       </Badge>
     );
   }
-  return <Badge tone="neutral">Status de rede desconhecido</Badge>;
+  if (network.online === false) {
+    return (
+      <Badge tone="warning">
+        {originLabel ? `${originLabel} · ` : ''}Offline · {ipText}
+      </Badge>
+    );
+  }
+  return (
+    <Badge tone="neutral">
+      {originLabel ? `${originLabel} · ` : ''}Online desconhecido · {ipText}
+    </Badge>
+  );
 }
 
 interface FormState {
@@ -68,6 +88,8 @@ interface FormState {
   v3AuthPassword: string;
   v3PrivProtocol: 'DES' | 'AES' | '';
   v3PrivPassword: string;
+  wbmUsername: string;
+  wbmPassword: string;
   intervalDays: string;
   intervalPages: string;
   consumableLowThresholdPct: string;
@@ -84,6 +106,8 @@ const EMPTY_FORM: FormState = {
   v3AuthPassword: '',
   v3PrivProtocol: '',
   v3PrivPassword: '',
+  wbmUsername: '',
+  wbmPassword: '',
   intervalDays: '',
   intervalPages: '',
   consumableLowThresholdPct: '',
@@ -122,6 +146,32 @@ function toSnmpInput(form: FormState): PrinterSnmpInput | undefined {
   return { version: form.snmpVersion, community: form.community.trim() };
 }
 
+// Credencial do painel web: mesma disciplina do segredo SNMP — o backend
+// nunca a devolve, então o formulário nunca a repopula, e deixar AMBOS os
+// campos em branco na edição significa "manter a atual". Atenção: preencher
+// só o usuário NÃO é "manter a senha" — grava senha vazia (ver a confirmação
+// explícita no submit, achado do crítico).
+//
+// O gatilho é o USUÁRIO estar preenchido, não a senha: a HP real do
+// Financeiro está com a senha de fábrica EM BRANCO (o backend aceita
+// `password: ''` de propósito), então exigir senha digitada impediria de
+// cadastrar exatamente a impressora que motivou a feature. A senha não passa
+// por `.trim()` — ao contrário de nome/IP, um espaço pode fazer parte dela.
+function toWbmCredentials(form: FormState): PrinterWbmCredentialsInput | undefined {
+  if (!form.wbmUsername.trim()) return undefined;
+  return { username: form.wbmUsername.trim(), password: form.wbmPassword };
+}
+
+// Senha do painel digitada sem usuário: sem isto, o `toWbmCredentials` acima
+// descartaria a senha em silêncio e a tela reportaria sucesso sem ter salvo
+// nada.
+function wbmFormError(form: FormState): string | null {
+  if (form.wbmPassword && !form.wbmUsername.trim()) {
+    return 'Informe o usuário do painel web junto da senha (ou deixe os dois em branco).';
+  }
+  return null;
+}
+
 // Validações que espelham o que o backend REALMENTE exige, para transformar
 // um 400 confuso do zod numa mensagem de campo legível:
 //
@@ -155,6 +205,10 @@ function snmpFormError(form: FormState, currentVersion: PrinterSnmpVersion | nul
 export function Printers() {
   const [printers, setPrinters] = useState<PrinterWithNetwork[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Confirmação de ação assíncrona sem retorno visível na lista (o reboot não
+  // muda nenhum campo do cadastro), separada de `error` para não colorir um
+  // sucesso de vermelho.
+  const [notice, setNotice] = useState<string | null>(null);
 
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [consumables, setConsumables] = useState<Record<string, PrinterConsumablesResponse>>({});
@@ -237,6 +291,9 @@ export function Printers() {
       v3AuthPassword: '',
       v3PrivProtocol: '',
       v3PrivPassword: '',
+      // Credencial do painel web também nunca vem do backend.
+      wbmUsername: '',
+      wbmPassword: '',
       intervalDays: printer.maintenance.intervalDays !== null ? String(printer.maintenance.intervalDays) : '',
       intervalPages: printer.maintenance.intervalPages !== null ? String(printer.maintenance.intervalPages) : '',
       consumableLowThresholdPct:
@@ -258,12 +315,43 @@ export function Printers() {
       return;
     }
 
+    const wbmError = wbmFormError(form);
+    if (wbmError) {
+      setFormError(wbmError);
+      return;
+    }
+
+    // ACHADO DO CRÍTICO — sobrescrita SILENCIOSA da senha do painel na EDIÇÃO.
+    // `toWbmCredentials` dispara com o USUÁRIO preenchido e manda
+    // `password: ''` quando o campo de senha está em branco. Isso é o
+    // comportamento certo no cadastro (a HP real tem senha de fábrica em
+    // branco), mas na edição é destrutivo: quem preenche só o usuário — para
+    // trocar `admin` por `operador`, por exemplo — APAGA a senha guardada sem
+    // nenhum aviso. E como a credencial nunca é devolvida em leitura, não há
+    // como perceber: o cadastro continua "com credencial", e a falha só
+    // aparece depois, como um 403 no reboot.
+    //
+    // Não dá para simplesmente proibir (senha em branco é um caso legítimo
+    // desta impressora), nem para distinguir no backend (`''` é um valor
+    // válido). Então confirmamos de forma explícita, mesmo padrão dos outros
+    // atos destrutivos desta tela (remover/reiniciar).
+    if (editingId && form.wbmUsername.trim() && form.wbmPassword === '') {
+      const confirmed = window.confirm(
+        'Salvar a credencial do painel web com a SENHA EM BRANCO?\n\n' +
+          'O campo de senha está vazio, e isso GRAVA uma senha vazia — a senha que estiver salva hoje ' +
+          'é perdida. Se o painel desta impressora tem senha, o reinício remoto passa a falhar.\n\n' +
+          'Para manter a credencial atual intacta, cancele e deixe TAMBÉM o campo de usuário em branco.',
+      );
+      if (!confirmed) return;
+    }
+
     if (editingId) {
       const body: UpdatePrinterBody = {
         name: form.name,
         mac: form.mac,
         ipOverride: form.ipOverride.trim() || null,
         snmp: toSnmpInput(form),
+        wbmCredentials: toWbmCredentials(form),
         maintenance: toMaintenance(form),
       };
       setSubmitting(true);
@@ -293,6 +381,7 @@ export function Printers() {
       mac: form.mac,
       ipOverride: form.ipOverride.trim() || undefined,
       snmp,
+      wbmCredentials: toWbmCredentials(form),
       maintenance: toMaintenance(form),
     };
     setSubmitting(true);
@@ -334,6 +423,36 @@ export function Printers() {
       load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Falha ao reconectar impressora');
+    } finally {
+      setPendingId(null);
+    }
+  }
+
+  // REINICIA O EQUIPAMENTO FÍSICO — o texto do confirm precisa deixar isso
+  // óbvio, porque o botão vizinho ("Reconectar") parece parecido e NÃO
+  // reinicia nada. Um clique errado aqui derruba a impressora do Financeiro
+  // no meio de uma impressão.
+  async function handleReboot(printer: PrinterWithNetwork) {
+    const confirmed = window.confirm(
+      `ATENÇÃO: reiniciar de verdade a impressora "${printer.name}"?\n\n` +
+        'Isto REINICIA O EQUIPAMENTO FÍSICO (o firmware da impressora), pelo painel web dela. ' +
+        'Qualquer impressão em andamento é perdida e a impressora fica indisponível por alguns minutos.\n\n' +
+        'Não é a mesma coisa que "Reconectar", que só refaz a conexão de rede sem desligar nada.',
+    );
+    if (!confirmed) return;
+    setPendingId(printer.id);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api.rebootPrinter(printer.id);
+      // Mostra o alvo REAL da ação: com `ipOrigin: 'classic'` o endereço veio
+      // do histórico do controller e pode, em teoria, pertencer a outro
+      // dispositivo hoje (mesmo alerta que o backend registra no log).
+      setNotice(
+        `Comando de reinício enviado para "${printer.name}" em ${result.ipAddress} (origem do IP: ${result.ipOrigin}).`,
+      );
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Falha ao reiniciar impressora');
     } finally {
       setPendingId(null);
     }
@@ -390,6 +509,12 @@ export function Printers() {
       {error && (
         <div className="mb-4 rounded-lg border border-[oklch(88%_0.06_25)] bg-[oklch(97%_0.03_25)] px-4 py-3 text-sm text-[oklch(40%_0.15_25)]">
           {error}
+        </div>
+      )}
+
+      {notice && (
+        <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+          {notice}
         </div>
       )}
 
@@ -565,6 +690,38 @@ export function Printers() {
             </div>
           </div>
 
+          <div className="flex flex-wrap items-end gap-2.5">
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-semibold text-slate-500">
+                Usuário do painel web (opcional) {editingId ? '(em branco = manter atual)' : ''}
+              </label>
+              <input
+                value={form.wbmUsername}
+                onChange={(e) => setForm((f) => ({ ...f, wbmUsername: e.target.value }))}
+                autoComplete="off"
+                maxLength={64}
+                className="rounded-md border border-slate-300 px-2.5 py-1.5 text-[13px]"
+                placeholder={editingId ? 'deixe em branco para manter o atual' : 'ex: admin'}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-semibold text-slate-500">Senha do painel web (opcional)</label>
+              <input
+                value={form.wbmPassword}
+                onChange={(e) => setForm((f) => ({ ...f, wbmPassword: e.target.value }))}
+                type="password"
+                autoComplete="off"
+                maxLength={128}
+                className="rounded-md border border-slate-300 px-2.5 py-1.5 text-[13px]"
+                aria-label="Senha do painel web"
+              />
+            </div>
+            <span className="max-w-72 text-[10.5px] text-slate-400">
+              Credencial de administrador do painel da própria impressora (WBM/SWS) — necessária para
+              reiniciá-la remotamente. Nunca é exibida de volta depois de salva.
+            </span>
+          </div>
+
           {formError && <div className="text-[12.5px] text-[oklch(45%_0.18_25)]">{formError}</div>}
 
           <div className="flex gap-2">
@@ -632,6 +789,16 @@ export function Printers() {
                   >
                     <RefreshCw className="h-3.5 w-3.5" />
                     Reconectar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleReboot(printer)}
+                    disabled={pendingId === printer.id}
+                    title="REINICIA o equipamento físico pelo painel web da impressora — diferente de Reconectar."
+                    className="flex items-center gap-1 rounded-md border border-[oklch(87%_0.06_25)] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[oklch(48%_0.16_25)] disabled:opacity-50"
+                  >
+                    <Power className="h-3.5 w-3.5" />
+                    Reiniciar remotamente
                   </button>
                   <button
                     type="button"

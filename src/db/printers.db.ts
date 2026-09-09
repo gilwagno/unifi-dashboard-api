@@ -45,6 +45,24 @@ export interface SnmpV3Auth {
 // src/routes/printers.routes.ts.
 export type SnmpSecretInput = { community: string } | { v3Auth: SnmpV3Auth };
 
+// Credencial de administrador do PAINEL WEB da impressora (WBM da Brother,
+// SWS da HP) — coisa DIFERENTE do segredo SNMP acima: o SNMP aqui é só
+// leitura de contadores/suprimentos, isto é o login que dá acesso de
+// ADMINISTRAÇÃO ao firmware (usado hoje por POST /printers/:id/reboot, ver
+// src/services/printer-hp-sws.service.ts). Opcional: nem toda impressora
+// precisa disso (as páginas de Sleep Time/Auto Power Off da Brother aceitam
+// POST sem login nenhum).
+//
+// Guardada como JSON serializado na coluna `wbm_credentials`, sob o MESMO
+// regime do segredo SNMP: aceita na escrita (POST/PATCH), NUNCA devolvida em
+// nenhuma resposta de leitura (removida por `toPublic`). Diferente do segredo
+// SNMP (obrigatório no cadastro), esta coluna é nullable — cadastros criados
+// antes desta versão, e impressoras sem painel autenticado, ficam com `null`.
+export interface WbmCredentials {
+  username: string;
+  password: string;
+}
+
 export interface PrinterMaintenancePolicy {
   intervalDays: number | null;
   intervalPages: number | null;
@@ -63,12 +81,15 @@ export interface PrinterRecord {
   snmpVersion: SnmpVersion;
   // JSON serializado de SnmpSecretInput — nunca exposto via API.
   snmpSecret: string;
+  // JSON serializado de WbmCredentials, ou null quando não configurada —
+  // nunca exposto via API (mesmo regime do snmpSecret).
+  wbmCredentials: string | null;
   maintenance: PrinterMaintenancePolicy;
   createdAt: string;
   updatedAt: string;
 }
 
-export type PrinterPublic = Omit<PrinterRecord, 'snmpSecret'>;
+export type PrinterPublic = Omit<PrinterRecord, 'snmpSecret' | 'wbmCredentials'>;
 
 export interface CreatePrinterInput {
   name: string;
@@ -76,6 +97,7 @@ export interface CreatePrinterInput {
   ipOverride?: string | null;
   snmpVersion: SnmpVersion;
   snmpSecret: SnmpSecretInput;
+  wbmCredentials?: WbmCredentials | null;
   maintenance?: Partial<PrinterMaintenancePolicy>;
 }
 
@@ -85,6 +107,11 @@ export interface UpdatePrinterInput {
   ipOverride?: string | null;
   snmpVersion?: SnmpVersion;
   snmpSecret?: SnmpSecretInput;
+  // `undefined` (campo omitido) mantém a credencial atual; `null` APAGA a
+  // credencial guardada. São dois significados diferentes de propósito — sem
+  // o `null` não haveria como desconfigurar o painel web de uma impressora
+  // (não existe leitura pra reenviar o valor atual: ele nunca sai do banco).
+  wbmCredentials?: WbmCredentials | null;
   maintenance?: Partial<PrinterMaintenancePolicy>;
 }
 
@@ -95,6 +122,7 @@ interface PrinterRow {
   ip_override: string | null;
   snmp_version: string;
   snmp_secret: string;
+  wbm_credentials: string | null;
   maintenance_interval_days: number | null;
   maintenance_interval_pages: number | null;
   consumable_low_threshold_pct: number | null;
@@ -110,6 +138,10 @@ function rowToRecord(row: PrinterRow): PrinterRecord {
     ipOverride: row.ip_override,
     snmpVersion: row.snmp_version as SnmpVersion,
     snmpSecret: row.snmp_secret,
+    // `?? null` em vez de só `row.wbm_credentials`: um banco antigo cujo
+    // ALTER TABLE (migrateAddColumn) ainda não rodou traria `undefined` aqui,
+    // e o contrato do tipo é `string | null`.
+    wbmCredentials: row.wbm_credentials ?? null,
     maintenance: {
       intervalDays: row.maintenance_interval_days,
       intervalPages: row.maintenance_interval_pages,
@@ -122,8 +154,42 @@ function rowToRecord(row: PrinterRow): PrinterRecord {
 
 export function toPublic(record: PrinterRecord): PrinterPublic {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { snmpSecret, ...publicFields } = record;
+  const { snmpSecret, wbmCredentials, ...publicFields } = record;
   return publicFields;
+}
+
+/**
+ * Interpreta a coluna `wbm_credentials` (JSON serializado) de um registro.
+ *
+ * Usada pela rota de reboot (src/routes/printers.routes.ts) para decidir
+ * entre "credencial configurada" e "não configurada". NUNCA loga nem repassa
+ * o conteúdo em mensagem de erro.
+ *
+ * @param raw Valor cru da coluna (`PrinterRecord.wbmCredentials`).
+ * @returns As credenciais quando o JSON é válido e o usuário está
+ *   preenchido; `null` quando a coluna está vazia OU o conteúdo é
+ *   inutilizável (JSON corrompido, campos ausentes/do tipo errado). Trata os
+ *   dois casos igual de propósito: para quem chama, uma credencial que não dá
+ *   pra usar é o mesmo que não ter credencial — e a alternativa (propagar
+ *   exceção) viraria um 500 opaco numa rota que já tem um 409 com mensagem
+ *   acionável ("configure a credencial") exatamente para esse estado.
+ * @throws Nunca — qualquer conteúdo inválido degrada para `null`.
+ */
+export function parseWbmCredentials(raw: string | null): WbmCredentials | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<WbmCredentials>;
+    if (typeof parsed?.username !== 'string' || typeof parsed?.password !== 'string') return null;
+    if (parsed.username.length === 0) return null;
+    // Senha VAZIA é aceita de propósito: a HP real do Financeiro está
+    // literalmente com `admin` + senha em branco (padrão de fábrica — ver
+    // docs/printers-snmp-research.md, achado 2 da investigação HP). Recusar
+    // isso aqui tornaria a feature inutilizável justamente na impressora que
+    // ela existe para atender.
+    return { username: parsed.username, password: parsed.password };
+  } catch {
+    return null;
+  }
 }
 
 // --- Histórico de manutenção realizada (Onda 2, subtarefa 8) ---
@@ -259,6 +325,7 @@ export class PrintersRepository {
         ip_override TEXT,
         snmp_version TEXT NOT NULL,
         snmp_secret TEXT NOT NULL,
+        wbm_credentials TEXT,
         maintenance_interval_days INTEGER,
         maintenance_interval_pages INTEGER,
         consumable_low_threshold_pct REAL,
@@ -277,6 +344,17 @@ export class PrintersRepository {
     // `CREATE UNIQUE INDEX IF NOT EXISTS` sim. Os MACs são normalizados para
     // minúsculas na camada de rota, então a comparação binária basta.
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_printers_mac ON printers(mac)');
+
+    // MIGRAÇÃO (credencial do painel web) — o `CREATE TABLE IF NOT EXISTS`
+    // acima NÃO altera uma tabela que já existe, e o `printers.db` real em
+    // disco já tem as 4 impressoras cadastradas em sessões anteriores, sem
+    // esta coluna. Sem este ALTER, todo INSERT/UPDATE que menciona
+    // `wbm_credentials` falharia com "no such column" num banco antigo.
+    // Consultamos o PRAGMA em vez de engolir a exceção de um ALTER duplicado:
+    // um try/catch mudo aqui esconderia também erros reais (banco
+    // somente-leitura, arquivo corrompido) que precisam aparecer no boot, em
+    // vez de virar um "no such column" muito depois, na primeira escrita.
+    this.migrateAddColumn('printers', 'wbm_credentials', 'TEXT');
 
     // Tabela do histórico de manutenção (subtarefa 8) — mesma conexão/mesmo
     // arquivo da tabela `printers` (é a primeira "tabela irmã" do projeto;
@@ -331,6 +409,17 @@ export class PrintersRepository {
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_snmp_history_collected_at ON printer_snmp_history(collected_at)');
   }
 
+  // Acrescenta uma coluna a uma tabela existente só se ela ainda não existir
+  // (o SQLite não tem `ADD COLUMN IF NOT EXISTS`). Idempotente: rodar N vezes
+  // é igual a rodar uma. Não há framework de migração neste projeto (ver o
+  // comentário de topo do arquivo) — este helper é o mínimo necessário para
+  // que uma coluna nova não derrube o `printers.db` que já existe em disco.
+  private migrateAddColumn(table: string, column: string, definition: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{ name: string }>;
+    if (columns.some((c) => c.name === column)) return;
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+
   // Usada pelas rotas para devolver 409 com mensagem própria em vez de
   // deixar o erro de constraint do SQLite virar 500. `exceptId` permite que
   // um PATCH reenvie o MAC que o próprio registro já tem.
@@ -351,6 +440,7 @@ export class PrintersRepository {
       ip_override: input.ipOverride ?? null,
       snmp_version: input.snmpVersion,
       snmp_secret: JSON.stringify(input.snmpSecret),
+      wbm_credentials: input.wbmCredentials ? JSON.stringify(input.wbmCredentials) : null,
       maintenance_interval_days: input.maintenance?.intervalDays ?? null,
       maintenance_interval_pages: input.maintenance?.intervalPages ?? null,
       consumable_low_threshold_pct: input.maintenance?.consumableLowThresholdPct ?? null,
@@ -361,11 +451,11 @@ export class PrintersRepository {
     this.db
       .prepare(
         `INSERT INTO printers (
-          id, name, mac, ip_override, snmp_version, snmp_secret,
+          id, name, mac, ip_override, snmp_version, snmp_secret, wbm_credentials,
           maintenance_interval_days, maintenance_interval_pages, consumable_low_threshold_pct,
           created_at, updated_at
         ) VALUES (
-          $id, $name, $mac, $ip_override, $snmp_version, $snmp_secret,
+          $id, $name, $mac, $ip_override, $snmp_version, $snmp_secret, $wbm_credentials,
           $maintenance_interval_days, $maintenance_interval_pages, $consumable_low_threshold_pct,
           $created_at, $updated_at
         )`,
@@ -396,6 +486,15 @@ export class PrintersRepository {
       ip_override: patch.ipOverride !== undefined ? patch.ipOverride : existing.ipOverride,
       snmp_version: patch.snmpVersion ?? existing.snmpVersion,
       snmp_secret: patch.snmpSecret ? JSON.stringify(patch.snmpSecret) : existing.snmpSecret,
+      // `undefined` mantém o que já está gravado; `null` apaga (ver
+      // UpdatePrinterInput). Não dá pra usar `??` aqui: ele trataria `null`
+      // como "manter", tornando impossível desconfigurar a credencial.
+      wbm_credentials:
+        patch.wbmCredentials === undefined
+          ? existing.wbmCredentials
+          : patch.wbmCredentials === null
+            ? null
+            : JSON.stringify(patch.wbmCredentials),
       maintenance_interval_days:
         patch.maintenance?.intervalDays !== undefined
           ? patch.maintenance.intervalDays
@@ -422,6 +521,7 @@ export class PrintersRepository {
         `UPDATE printers SET
           name = $name, mac = $mac, ip_override = $ip_override,
           snmp_version = $snmp_version, snmp_secret = $snmp_secret,
+          wbm_credentials = $wbm_credentials,
           maintenance_interval_days = $maintenance_interval_days,
           maintenance_interval_pages = $maintenance_interval_pages,
           consumable_low_threshold_pct = $consumable_low_threshold_pct,
@@ -435,6 +535,7 @@ export class PrintersRepository {
         ip_override: updated.ip_override,
         snmp_version: updated.snmp_version,
         snmp_secret: updated.snmp_secret,
+        wbm_credentials: updated.wbm_credentials,
         maintenance_interval_days: updated.maintenance_interval_days,
         maintenance_interval_pages: updated.maintenance_interval_pages,
         consumable_low_threshold_pct: updated.consumable_low_threshold_pct,

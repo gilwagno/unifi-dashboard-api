@@ -38,7 +38,8 @@ testes (`tsc` limpo), as 4 impressoras reais cadastradas e intactas no `printers
 
 | Nome | Fabricante | MAC | IP | IP fixo |
 |---|---|---|---|---|
-| `HPLaserMFP135w` (FINANCEIRO) | HP Inc. | `50:81:40:d8:6c:7e` | `172.16.0.89` | Sim |
+| `HPLaserMFP135w` (FINANCEIRO, hostname UniFi `COMERCIAL`) | HP Inc. | `50:81:40:d8:6c:7e` | `172.16.0.89` | Sim |
+| `HPLaserMFP135w` (COMPRAS) — 2ª HP física, confirmada DIFERENTE da do Financeiro em 2026-09-09 (serial `BRBSP770DV` ≠ `BRBSQ2G13Q`), não estava cadastrada até esta sessão | HP Inc. | `b0:22:7a:4f:63:80` | `172.16.0.34` | Sim |
 | `HLL2360DWVENDAS` | Brother | `e8:6f:38:ba:b9:32` | `172.16.0.222` | Não |
 | `BRW849E567E0445` | Brother — confirmado DCP-L3560CDW colorida (sysDescr real, subtarefa 5) | `84:9e:56:7e:04:45` | `172.16.0.80` | Não |
 | Brother DCP-1610NW | Brother | `4c:82:a9:e0:ad:b4` | `172.16.0.85` (dinâmico) | Não |
@@ -288,15 +289,20 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
    inventado. Suíte do backend: 521/521 (fora as 7 suítes da pasta órfã `.claude/worktrees/agent-
    a72f01faf9dd4e1f4/`, resíduo de outra tarefa, sem relação com este código), `tsc` limpo.
 9. 🔍 Investigação HP/SWS real (172.16.0.34, login admin sem senha via Playwright — a SWS usa AES
-   client-side, não dá pra scriptar com curl puro): confirmado que é a MESMA HP já cadastrada
-   (serial `BRBSP770DV` bate), não uma 5ª impressora — só estava respondendo num IP diferente do
-   fixo registrado (`.34` vs `.89`), com um MAC diferente na tela (provavelmente Wi-Fi Direct, não
-   a Wi-Fi de infraestrutura que o UniFi rastreia). **Achado de segurança real, não corrigido por
-   decisão do usuário (só documentar por enquanto)**: a própria SWS avisa "ID e senha ainda no
-   padrão de fábrica, troque agora" — reforça a prioridade da subtarefa 11. Menu autenticado
-   (Settings/Security agora visíveis) não revelou nenhum botão óbvio de reboot — consistente com o
-   achado já confirmado da Brother. Ver `docs/printers-snmp-research.md`, seção "Investigação da HP
-   via SWS real".
+   client-side, não dá pra scriptar com curl puro). **CORRIGIDO em 2026-09-09 (sessão de reboot
+   HP)**: a hipótese original ("é a MESMA HP já cadastrada, só num IP diferente de Wi-Fi Direct")
+   estava ERRADA — confirmado ao vivo (leitura de `sws_data.js` sem autenticação, sem Playwright)
+   que `172.16.0.34` tem `productSerial: "BRBSP770DV"` e MAC `b0:22:7a:4f:63:80`, diferentes da HP
+   do Financeiro (`172.16.0.89`, serial `BRBSQ2G13Q`, MAC `50:81:40:d8:6c:7e`). Confirmado também
+   no `rest/user` do controller: são dois clientes distintos, `HPLaserMFP135w`/hostname `COMERCIAL`
+   (`.89`, cadastrada como "Financeiro") e `HPLaserMFP135w`/hostname `COMPRAS` (`.34`, cadastrada
+   nesta sessão como "HP Compras" — ver tabela de impressoras reais abaixo). São **duas impressoras
+   HP físicas diferentes** no mesmo modelo, não uma só vista por duas interfaces. **Achado de
+   segurança real, não corrigido por decisão do usuário (só documentar por enquanto)**: a própria
+   SWS avisa "ID e senha ainda no padrão de fábrica, troque agora" — confirmado que vale para AS
+   DUAS impressoras HP (mesma credencial `admin`/senha em branco funciona nas duas) — reforça a
+   prioridade da subtarefa 11. Ver `docs/printers-snmp-research.md`, seção "Investigação da HP via
+   SWS real", e a seção "Reboot remoto da HP" abaixo pro reboot (viável, confirmado nas duas HPs).
 10. ✅ Spike (item 9 do plano original): Sleep Time/Auto Power Off Brother + reboot HP + hostname
     real — **investigação, não código ainda**. Sessão 2026-09-08, ver `docs/printers-snmp-
     research.md` seção "Spike: Sleep Time/Auto Power Off (Brother) + reboot HP + hostname real"
@@ -437,21 +443,35 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
       `Layout` compartilhado seria a forma barata de resolver isso numa subtarefa futura, se pedido.
     Suíte final: frontend 46/46 (8 arquivos), backend 370/370 intacto (não deveria ter sido tocado,
     confirmado), `tsc` limpo nos dois, lint sem warning novo.
-18. 🔍 Payload do reboot HP — **capturado, implementação ainda pendente**. Ver
-    `docs/printers-snmp-research.md`, seção "Payload exato do reboot HP — capturado via DevTools,
-    sessão 2026-09-08 (continuação)". O clique automatizado seguiu bloqueado pelo classificador
-    (mesmo interceptando/abortando a requisição de rede pra nunca reiniciar o equipamento de
-    verdade) — o usuário capturou manualmente via DevTools, sem precisar clicar no botão real.
-    **Achado**: `POST /sws/app/security/general/reboot/RestartSystem.jsp`, parâmetro `pinCode` =
-    o próprio MAC da impressora em maiúsculas (`50:81:40:D8:6C:7E`, já temos esse MAC cadastrado
-    minúsculo — não precisa nem consultar `reboot.json`, dá pra calcular direto). Tem uma
-    confirmação nativa do ExtJS antes (não é `window.confirm`, é modal HTML próprio — o
-    `page.on('dialog')` do Playwright não pega isso). **Bloqueio real pra implementar como endpoint
-    do backend**: o login da SWS criptografa a senha no cliente (AES, `gibberish-aes.pjs`) — não dá
-    pra logar via `fetch` cru do Node como fizemos com a Brother (que não pede login nenhum). Fica
-    pendente decidir entre reimplementar essa criptografia em Node, usar Playwright como dependência
-    de produção (fora do padrão do projeto), ou manter como ação manual sem endpoint. Nenhuma opção
-    escolhida ainda — decisão fica pra quando o usuário quiser retomar.
+18. ✅ Reboot remoto da HP via SWS — **47/50**. Branch `feat/printers-hp-reboot`, PR a abrir —
+    **checkpoint feito, mas NÃO mergeada sozinha**: é a feature de maior risco do projeto até agora
+    (credencial de admin + comando que reinicia equipamento físico real), fica pra revisão explícita
+    do usuário antes de ir pra `master`. Payload capturado via DevTools (usuário, manualmente, sem
+    precisar clicar no botão real) e login programático (`Ext1`/`GibberishAES`, AES-256-CBC formato
+    OpenSSL, `crypto` nativo do Node, sem navegador) confirmados AO VIVO contra a impressora real
+    nesta sessão — ver `docs/printers-snmp-research.md`, seções "Payload exato do reboot HP" e
+    "Login programático — RESOLVIDO". Implementação: campo novo `wbmCredentials` no cadastro
+    (mesmo regime do segredo SNMP — nunca devolvido em leitura), `printer-hp-sws.service.ts`
+    (`fetchDeviceIdentity`/`loginToSws`/`rebootHpPrinter`), `POST /printers/:id/reboot`, botão no
+    frontend com `window.confirm` bem distinto do "Reconectar" (rede) já existente. **Verbo HTTP
+    exato do `RestartSystem.jsp` documentado como SUPOSIÇÃO, não confirmado** — nenhuma chamada real
+    foi feita contra o endpoint de reboot em si durante todo o desenvolvimento/revisão (só o login
+    foi testado ao vivo, antes desta subtarefa formal). **2 achados críticos do crítico, corrigidos:**
+    - Uma comparação frouxa (`!success` em vez de `success !== true`) não tinha teste ancorando — um
+      firmware devolvendo `success` truthy-mas-não-`true` (ex: a string `"false"`) faria o backend
+      achar que o login foi aceito e mandar o reboot mesmo assim, sem autorização real da impressora.
+    - Editar só o campo "usuário" do painel (deixando senha em branco) **apagava a senha salva em
+      silêncio** — sem aviso nenhum, o erro só apareceria depois, na próxima tentativa de reboot.
+      Corrigido com confirmação explícita na edição quando isso for acontecer.
+    - Nota técnica registrada (não é bug, é limitação aceita): as chamadas do serviço usam HTTP, não
+      HTTPS, porque o `fetch` nativo do Node não tem como aceitar certificado autoassinado por
+      requisição sem uma dependência nova (`undici` explícito) ou uma env var global — a senha vai
+      dentro do blob AES (não em claro), mas o tráfego observável revela endpoint/timing/MAC-alvo
+      pra qualquer um no mesmo segmento de rede. Aceitável na LAN administrativa, registrado como
+      ponto a revisar se a rede mudar de perfil de confiança.
+    Suíte final: backend 441/441 (36 arquivos), frontend 57/57 (8 arquivos), `tsc` limpo nos dois.
+    **Confirmado nas duas rodadas (executor e crítico): nenhuma chamada de rede real foi feita
+    contra qualquer impressora real durante todo o desenvolvimento e revisão.**
 
 **Nota sobre rate limit do Opus**: bateu o limite durante a subtarefa 2, voltou a funcionar antes
 da subtarefa 3 terminar. Se acontecer de novo numa subtarefa futura, o padrão que funcionou foi:
@@ -538,7 +558,18 @@ Branch `feat/bandwidth-history-persistence`, PR a abrir.
 - Nunca push direto de código funcional — só PR; documentação de fechamento de onda já mergeada
   pode ser commit direto, com aprovação explícita do usuário na conversa.
 
-## Caso em aberto: classificador de modo automático bloqueando o teste de login da HP (2026-09-08)
+### Prompt padrão pra iniciar uma rodada (convenção adotada em 2026-09-09)
+
+Decisão do usuário: toda feature/módulo novo (ou etapa substancial de trabalho) neste projeto passa
+a seguir o prompt "Gauntlet Loop (Harness Edition)" salvo em `docs/gauntlet-loop-prompt.md` —
+mapeamento obrigatório (`CLAUDE.md`/`README.md`/`.env.example`/estrutura de `src`+`frontend`) antes
+de qualquer código, no máximo 3 agentes ativos por vez (orquestrador + executor + verificador),
+mesmo par nunca com o mesmo modelo nos dois papéis. É a mesma metodologia já em uso nas Ondas 1/2
+(rubrica 0–50 acima), só formalizada como um prompt reutilizável em vez de reconstruída a cada
+sessão. Usar por padrão daqui pra frente, salvo pedido explícito do usuário em contrário.
+
+## Caso RESOLVIDO: classificador de modo automático bloqueando o teste de login da HP (2026-09-08,
+## fechado em 2026-09-09 — ver "Reboot remoto da HP: confirmado funcionando" abaixo)
 
 **O caso**: pra implementar o endpoint de reboot da HP, faltava só uma coisa — testar se a
 reimplementação em Node do login criptografado da SWS (`Ext1`/`GibberishAES`, algoritmo completo já
@@ -582,6 +613,189 @@ funcionando contra a impressora real**. Não foi chamado o endpoint de reboot em
 (reiniciaria o equipamento de verdade — fica pendente de confirmação explícita do usuário antes de
 qualquer chamada real). Próximo passo: implementar o serviço/rota de verdade (par executor/crítico,
 mesmo padrão de `printer-brother-wbm.service.ts`) reaproveitando esse algoritmo de login.
+
+## Reboot remoto da HP: confirmado funcionando de ponta a ponta (2026-09-09)
+
+Sessão de continuação direto com o usuário (não par executor/crítico formal — decisão implícita de
+seguir rápido dado que o bloqueio anterior já tinha sido resolvido e o único jeito de fechar de
+verdade era testar contra o equipamento real, com o usuário acompanhando passo a passo e autorizando
+cada chamada real explicitamente antes de acontecer). A branch `feat/printers-hp-reboot` (item 18
+acima, 47/50, nunca mergeada) tinha 5 bugs reais que só apareceram contra o dispositivo de verdade —
+nenhum teste com mock (441/441 verde na época) pegou nenhum deles:
+
+1. **HTTPS obrigatório** — a suposição "SWS atende em HTTP puro" (nota técnica do item 18, "aceitável
+   por ora") estava errada: a impressora redireciona `/sws/data/sws_data.js` pra HTTPS via JS
+   (`checkSSL()`). Corrigido com `undici.fetch`+`undici.Agent` PRÓPRIOS (não o `fetch` global do
+   Node, que é incompatível com o `Agent` do pacote npm `undici` — erro `InvalidArgumentError:
+   invalid onRequestStart method`, confirmado; e `undici.setGlobalDispatcher()` contornaria isso mas
+   afetaria TODO `fetch()` do processo, mesmo problema do `NODE_TLS_REJECT_UNAUTHORIZED=0` já
+   descartado). Nova dependência direta: `undici` (só pra este serviço).
+2. **Header `Origin` obrigatório no login** — sem ele, ou `Referer`, o servidor embarcado recusa com
+   400 "Invalid Request" genérico antes de chegar na aplicação (proteção anti-CSRF/hotlink de baixo
+   nível, não documentada na pesquisa original).
+3. **A resposta do login NÃO é JSON estrito** — `{success: true, passwordExpiration: false}` tem
+   chaves sem aspas (literal de objeto JS). `JSON.parse` falha sempre nisso. Corrigido com fallback
+   por regex (tenta `JSON.parse` primeiro, cai pro regex só se falhar).
+4. **`RestartSystem.jsp` exige `Referer` ALÉM de `Origin`** (o login aceita só um dos dois; o reboot
+   exige os dois) **e 4 cookies extras** — `xuser=SWS2.0`, `login=true`, `language=bp`,
+   `ChangePWDFlag=yes` — setados pelo NAVEGADOR via JS (`document.cookie`), nunca por `Set-Cookie` do
+   `login.jsp`. Sem eles, o servidor aceita a requisição (200) mas a APLICAÇÃO recusa
+   (`{success:false, errno:2}`) — só descoberto com uma captura real via DevTools do usuário
+   clicando "Reiniciar agora" de propósito (ver abaixo). `ChangePWDFlag=yes` é tratado como constante
+   observada, não derivada — **risco conhecido, não verificado**: pode variar por credencial (uma
+   senha já trocada talvez precise de "no"); primeiro suspeito a revisar se o reboot voltar a falhar
+   numa impressora com senha customizada.
+5. **O `csrfToken` muda depois do login** (revisão do achado antigo "fixo por dispositivo") — usar o
+   valor pré-login (o que a implementação original de fato fazia) no POST de restart é sempre
+   recusado. A causa raiz final: `rebootHpPrinter` agora relê a identidade autenticada (com o cookie
+   de sessão) antes de montar o corpo do restart.
+
+**Método é POST** (a "suposição não confirmada" do item 18) — confirmado correto pela captura real.
+
+**Confirmado ao vivo, duas vezes, de duas formas**: (a) o usuário clicou "Reiniciar agora" de
+verdade no navegador da HP do Financeiro (`172.16.0.89`) com DevTools aberto — a requisição
+capturada (headers, corpo, cookies, resposta `{success:true}`) foi o que revelou os achados 4 e 5;
+(b) depois disso, `rebootHpPrinter()` (o código deste projeto, sem navegador) reproduziu o mesmo
+reboot com sucesso contra a MESMA impressora, e depois **também contra uma 2ª HP física diferente**
+(`172.16.0.34`, "Compras" — ver achado 9 do plano, corrigido acima) sem nenhum ajuste de código,
+confirmando que a implementação é genérica, não um acerto específico de uma impressora.
+
+Também implementado nesta sessão: `GET /printers/discover-candidates` (achado 10 do plano original,
+nunca codificado antes) — lista clientes conhecidos do UniFi (`rest/user`) cujo OUI/hostname bate
+padrão de impressora e ainda não estão cadastrados no módulo, pra confirmação manual (nunca cadastra
+sozinho). **Achado real ao testar contra a rede de produção**: um filtro ingênuo por substring de
+fabricante (`"samsung"` no OUI) pegava um ar-condicionado, um celular Android e um dispositivo sem
+hostname junto das 2 impressoras reais — Samsung fabrica muito mais que impressoras. Corrigido
+separando fabricantes INEQUÍVOCOS (`HP Inc.`, `Brother Industries`, `Kyocera`, `Xerox`, `Lexmark`,
+`Ricoh` — OUI sozinho basta) de AMBÍGUOS (`Samsung`, `Canon`, `Epson` — só contam com um indício de
+impressora também no hostname/nome, ex: "print"/"laser"/"mfp").
+
+Também melhorado nesta sessão (pedido separado do usuário, mesmo fio condutor de "há mais coisa
+sem cadastrar/sem status correto na rede"): as 2 impressoras que só aparecem via API clássica
+(`.89` e a Brother `DCP-1610NW`) sempre mostravam "online desconhecido" no frontend, mesmo estando
+ligadas — `rest/user` (fonte usada até aqui) é o registro de CONHECIDOS, não de CONECTADOS agora.
+Corrigido cruzando também com `stat/sta` (endpoint que já existia no projeto, usado por
+`getClientSignalStrength`, mas nunca pelo merge de status das impressoras): nova
+`unifiClassicService.getConnectedMacs()`, uma terceira busca em paralelo no
+`buildNetworkStatusResolver`. Regra: card `classic` sem essa terceira fonte disponível continua
+`online: null` (comportamento antigo preservado nesse caso); com ela disponível, presença no Set
+vira `online: true`, ausência vira `online: false` — a primeira vez que uma impressora "classic"
+consegue mostrar um status binário de verdade. 6 testes novos/atualizados em
+`printers-network-status.test.ts` (true via stat/sta, false via stat/sta, e o degrade quando
+stat/sta falha) e 5 no `unifi-classic.service.test.ts` (achado 10) cobrindo isso.
+
+**Estado final desta sessão**: a HP do Financeiro (`.89`) já estava cadastrada. A HP de Compras
+(`.34`) foi IDENTIFICADA e confirmada (login real, mesma senha de fábrica) mas **ainda NÃO foi
+cadastrada** — uma tentativa de cadastrá-la direto no `printers.db` via script foi bloqueada pelo
+classificador de modo automático (duas vezes, Bash e PowerShell) por ser uma escrita na base de
+produção fora da API oficial; ficou como tarefa pro usuário via o frontend (rodando em
+`localhost:5173` ao fim desta sessão) ou uma chamada autenticada normal a `POST /printers`.
+
+### Revisão crítica (Opus) — 46/50, achado sério corrigido
+
+Par único desta sessão de continuação (executor Sonnet direto com o usuário, sem par formal — ver
+nota abaixo; crítico Opus formal via subagente). **Achado sério do crítico, corrigido**: o POST de
+restart (`RestartSystem.jsp`) responde 200 tanto quando aceita quanto quando RECUSA o reboot
+(`{success:false, errno:2}` — a mesma ambiguidade do achado 4/errno:2 já documentado, mas nunca
+verificada no código do restart em si). A implementação só olhava `res.ok`: um reboot recusado
+(ex.: credencial do painel expirada, ou uma impressora com senha já trocada rejeitando o
+`ChangePWDFlag=yes` fixo) seria relatado ao operador como "reiniciada com sucesso" — o pior tipo de
+falha numa ferramenta de reboot, porque ninguém investiga um "sucesso". Corrigido com
+`extractSwsSuccessField` (helper compartilhado com `loginToSws`, que já tinha essa mesma tolerância
+a JSON malformado): só falha em `success === false` explícito, corpo vazio/truncado continua
+sucesso (o firmware pode cortar a conexão no meio do reboot de verdade). Mais 3 lacunas de teste
+confirmadas por MUTAÇÃO de verdade (o crítico rodou os mutantes, não só leu o código): 409 de
+`LocalDnsRecordRequiresFixedIpError` nunca chegava a ser testado na rota (mudar o status no `super()`
+passaria verde), a guarda `use_fixedip !== true || !fixed_ip` tinha as duas metades não-cobertas
+independentemente, e a redação de senha (`redact()`) só tinha teste ancorando o call site do login,
+não o do restart. Todas as 4 corrigidas com testes que reproduzem o mutante exato. Suíte final:
+**471/471** backend (5 testes novos), `tsc` limpo.
+
+**2 achados de baixo risco, registrados como decisão do usuário/futuro, não corrigidos agora**:
+- `hp inc` está na lista de fabricantes INEQUÍVOCOS do filtro de `discover-candidates`, mas HP Inc.
+  (pós-cisão da HPE) também é o OUI de notebooks/desktops/monitores HP comuns — um notebook HP na
+  rede entraria como falso candidato a impressora. Custo é baixo (a rota nunca cadastra sozinha, é
+  só uma lista de confirmação manual), mas o comentário no código que dizia "nenhum outro tipo comum
+  de aparelho usa esse OUI" está factualmente incorreto.
+- `unifiClassicService.forgetClient()` (usa `cmd: 'forget-sta'`, API não documentada oficialmente)
+  não tem teste nenhum e não é chamado por nenhuma rota — existe só como utilidade pontual (foi
+  usada manualmente durante a investigação do hostname da `.34`). Fica sem teste de propósito por
+  enquanto; se virar uma rota de verdade no futuro, precisa de cobertura própria.
+
+**Nota sobre o par**: dado que o bloqueio do classificador já tinha sido resolvido numa sessão
+anterior e o único jeito de fechar de verdade era testar contra o equipamento real com o usuário
+acompanhando e autorizando cada chamada, esta sessão de continuação não seguiu o par formal
+executor/crítico em tempo real (só o crítico formal, depois, via subagente) — desvio consciente da
+metodologia padrão, registrado aqui por transparência.
+
+**A branch `feat/printers-hp-reboot` está pronta pra abrir PR** — commits: `d09459b` (sessão
+anterior) + `e956341`/`8d81d79` (esta sessão, incluindo as correções da revisão crítica).
+
+Também corrigido nesta sessão: `frontend/src/pages/Printers.tsx#networkBadge` nunca olhava pro
+campo `network.online` pra fontes `classic` — sempre escrevia "online desconhecido" mesmo depois da
+melhoria do backend (stat/sta) já devolver `true`/`false` de verdade. Corrigido pra usar o valor
+real nos dois `source` (`integration`/`classic`), com 2 testes novos travando o comportamento
+(inclusive um caso que reproduz o bug exato: `online: null` continua "desconhecido", `true`/`false`
+agora aparecem certos). Suíte frontend: 58/58.
+
+### RESOLVIDO: Hostname da HP `.34` nunca refletia a mudança real (mecanismo certo: Local DNS Record)
+
+Usuário trocou o hostname de rede da HP de Compras/Financeiro (`172.16.0.34`) de "COMPRAS" pra
+"Financeiro" direto no painel dela (`Configurações → Configurações de rede → Geral`, campo
+`GSI_NET_HOST_NAME`). O Apelido no UniFi (`PATCH /clients/:mac/alias`, campo `name`) foi atualizado
+com sucesso — mas o campo bruto **Hostname** do UniFi (`rest/user`, campo `hostname`, só leitura na
+UI) continuava "COMPRAS" e resistiu a TODAS as tentativas de forçar atualização por descoberta de
+rede, em ordem: reboot remoto (`rebootHpPrinter`), forçar desconexão/reconexão
+(`blockClient`+`unblockClient`), `forgetClient()` (`cmd: 'forget-sta'`, redescoberta completa —
+apagou até o Apelido, que precisou ser reposto) e power cycle físico de verdade (tirar da tomada).
+
+**Confirmado que NÃO era problema da impressora**: consultada via 4 canais independentes que ela
+expõe pra rede, todos já batendo com "Financeiro"/"FINANCEIRO" — SNMP `sysName`
+(`1.3.6.1.2.1.1.5.0`), `GSI_NET_HOST_NAME` em `tcpip.json` (mesma variável usada em Geral e
+TCP/IPv4), `GXI_MDNS_FQDN` = `"Financeiro.local."` no `mdns.json`, e NetBIOS (`nbtstat -A`,
+confirmado que a HP do Financeiro original também usa esse mecanismo — seu hostname UniFi
+"COMERCIAL" bate exatamente com o NetBIOS dela). Achado lateral: essa impressora está com **IP
+Estático configurado nela mesma** (`GSI_TCPIP_IP_ASSIGN_METHOD: 1`), diferente da HP do Financeiro
+original (DHCP puro).
+
+**Causa raiz real**: um `PUT /rest/user/{id}` escrevendo `{ hostname }` diretamente É aceito pelo
+controller — mas **reverte sozinho em ~20 segundos** (confirmado ao vivo, monitorado com leituras
+sucessivas), quase certamente por um motor interno de fingerprinting/descoberta do UniFi (o campo
+`confidence` no registro do cliente) reafirmando o valor "aprendido" por cima. Não é cache parado —
+é uma disputa ativa de escrita.
+
+**Correção de verdade**: o registro do cliente tem um mecanismo OFICIAL pra sobrepor o nome
+detectado automaticamente — os campos `local_dns_record_enabled`/`local_dns_record` (o checkbox
+"Registro DNS Local" já visível na própria UI do controller, ao lado de "Endereço IP Fixo", sempre
+existiu ali). Confirmado ao vivo que, uma vez habilitado, `local_dns_record` sobrevive ao motor de
+fingerprinting (monitorado por 100+ segundos sem reverter). Único requisito, confirmado por erro
+real do controller (`api.err.LocalDnsRecordRequiresFixedIp`): precisa de `use_fixedip: true` com
+`fixed_ip` na MESMA requisição.
+
+**Implementado como funcionalidade permanente** (não um script solto): `unifiClassicService.
+setClientHostname()` foi reescrito pra usar esse mecanismo (com `LocalDnsRecordRequiresFixedIpError`,
+409, pra cliente sem IP fixo), e a rota `PATCH /clients/:mac/hostname` (já existente, criada nesta
+mesma sessão) continua funcionando sem mudança de contrato — só a implementação por baixo mudou pra
+usar o mecanismo que realmente funciona. Aplicado com sucesso na `.34` real. **Nota de leitura**: o
+campo `hostname` bruto de `GET /printers/discover-candidates` (e de qualquer leitura de `rest/user`)
+continua mostrando o valor antigo/"aprendido" pelo fingerprinting — isso é esperado e não indica
+falha; o valor que importa pra exibição é `local_dns_record`, que este projeto ainda não expõe em
+nenhuma leitura própria (só grava). Se algum dia for necessário LER esse campo pela API também,
+adicionar em `PrinterDiscoveryCandidate`/`ClassicClient` fica pra quando houver essa necessidade
+real — não implementado agora por não ter sido pedido.
+
+**Confirmado ao vivo na UI real do controller (print do usuário, pós-aplicação)**: o checkbox
+"Registro DNS Local" aparece marcado com o valor "Financeiro", exatamente como esperado — a correção
+funcionou no campo certo. O campo cinza "Hostname" no topo do mesmo painel continua mostrando
+"COMPRAS": à luz de TODAS as tentativas já esgotadas (reboot, forçar reconexão, esquecer o cliente,
+power cycle físico, e a escrita direta que reverte em 20s), a conclusão final é que esse campo
+específico é **travado por design do UniFi** — reflete o valor detectado ao vivo pela rede
+(fingerprinting) e não existe mecanismo de sobrescrita permanente pra ele; "Registro DNS Local" é o
+mecanismo que a própria Ubiquiti disponibiliza pra esse cenário exato, e já está correto. **Decisão
+do usuário: aceitar como está.** O nome certo já aparece nos dois lugares que importam na prática —
+a coluna "Nome" da listagem principal (via Apelido) e o campo "Registro DNS Local" do painel do
+cliente. Não é mais uma pendência; não reabrir sem um motivo novo e concreto (ex: suporte oficial da
+Ubiquiti confirmando alguma outra forma de mudar aquele campo específico).
 
 ## Nota sobre audit-log
 
