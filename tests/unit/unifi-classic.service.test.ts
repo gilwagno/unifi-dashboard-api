@@ -235,6 +235,138 @@ describe('unifiClassicService', () => {
     });
   });
 
+  describe('getPrinterDiscoveryCandidates() — achado 10 do CLAUDE.md', () => {
+    // ACHADO REAL (sessão de continuação, contra a rede real desta empresa):
+    // um filtro ingênuo por substring de fabricante ("samsung" no OUI) pegou
+    // um ar-condicionado, um celular Android e um dispositivo sem hostname
+    // junto com as 2 impressoras reais — todos com OUI "Samsung Electronics
+    // Co.,Ltd". Os 3 primeiros casos abaixo replicam exatamente isso.
+    it('reconhece HP/Brother só pelo OUI (fabricantes inequívocos)', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url.endsWith('/api/auth/login')) return loginResponse();
+        if (url.includes('/rest/user')) {
+          return jsonResponse({
+            meta: { rc: 'ok' },
+            data: [
+              { mac: '50:81:40:D8:6C:7E', oui: 'HP Inc.', hostname: 'COMERCIAL', name: 'HPLaserMFP135w' },
+              { mac: 'E8:6F:38:BA:B9:32', oui: 'Brother Industries, Ltd.', hostname: 'HLL2360DWVENDAS' },
+            ],
+          });
+        }
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService } = await import('../../src/services/unifi-classic.service.js');
+      const candidates = await unifiClassicService.getPrinterDiscoveryCandidates();
+
+      expect(candidates).toHaveLength(2);
+      expect(candidates.map((c) => c.mac)).toEqual(['50:81:40:d8:6c:7e', 'e8:6f:38:ba:b9:32']);
+    });
+
+    it('reconhece Brother pelo prefixo de hostname mesmo com OUI diferente/ausente', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url.endsWith('/api/auth/login')) return loginResponse();
+        if (url.includes('/rest/user')) {
+          return jsonResponse({
+            meta: { rc: 'ok' },
+            data: [{ mac: '84:9E:56:7E:04:45', oui: 'Some Other Vendor', hostname: 'BRW849E567E0445' }],
+          });
+        }
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService } = await import('../../src/services/unifi-classic.service.js');
+      const candidates = await unifiClassicService.getPrinterDiscoveryCandidates();
+
+      expect(candidates.map((c) => c.mac)).toEqual(['84:9e:56:7e:04:45']);
+    });
+
+    it('NÃO trata fabricante ambíguo (Samsung/Canon/Epson) como candidato sem indício de impressora no hostname/nome', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url.endsWith('/api/auth/login')) return loginResponse();
+        if (url.includes('/rest/user')) {
+          return jsonResponse({
+            meta: { rc: 'ok' },
+            data: [
+              // Réplica exata dos 3 falsos positivos observados ao vivo.
+              { mac: 'BC:45:5B:C0:CE:23', oui: 'Samsung Electronics Co.,Ltd', hostname: 'Samsung' },
+              {
+                mac: '50:FD:D5:01:EF:9A',
+                oui: 'SJI Industry Company',
+                hostname: 'Samsung-Room-Airconditioner',
+              },
+              { mac: '38:9A:F6:9D:89:EB', oui: 'Samsung Electronics Co.,Ltd' },
+              { mac: '78:37:16:7C:38:F0', oui: 'Samsung Electronics Co.,Ltd', hostname: 'A03s-de-ADM' },
+            ],
+          });
+        }
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService } = await import('../../src/services/unifi-classic.service.js');
+      const candidates = await unifiClassicService.getPrinterDiscoveryCandidates();
+
+      expect(candidates).toHaveLength(0);
+    });
+
+    it('trata fabricante ambíguo como candidato QUANDO o hostname/nome também indica impressora', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url.endsWith('/api/auth/login')) return loginResponse();
+        if (url.includes('/rest/user')) {
+          return jsonResponse({
+            meta: { rc: 'ok' },
+            data: [{ mac: 'AA:BB:CC:DD:EE:FF', oui: 'Canon Inc.', hostname: 'Canon-LaserPrinter' }],
+          });
+        }
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService } = await import('../../src/services/unifi-classic.service.js');
+      const candidates = await unifiClassicService.getPrinterDiscoveryCandidates();
+
+      expect(candidates.map((c) => c.mac)).toEqual(['aa:bb:cc:dd:ee:ff']);
+    });
+
+    it('devolve mac em minúsculas, hostname/name/oui/ipAddress do jeito que fetchKnownClientsNetworkInfo já expõe', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url.endsWith('/api/auth/login')) return loginResponse();
+        if (url.includes('/rest/user')) {
+          return jsonResponse({
+            meta: { rc: 'ok' },
+            data: [
+              {
+                mac: 'B0:22:7A:4F:63:80',
+                oui: 'HP Inc.',
+                hostname: 'COMPRAS',
+                name: 'HPLaserMFP135w',
+                use_fixedip: true,
+                fixed_ip: '172.16.0.34',
+                last_ip: '172.16.0.34',
+              },
+            ],
+          });
+        }
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService } = await import('../../src/services/unifi-classic.service.js');
+      const [candidate] = await unifiClassicService.getPrinterDiscoveryCandidates();
+
+      expect(candidate).toEqual({
+        mac: 'b0:22:7a:4f:63:80',
+        hostname: 'COMPRAS',
+        name: 'HPLaserMFP135w',
+        oui: 'HP Inc.',
+        ipAddress: '172.16.0.34',
+      });
+    });
+  });
+
   describe('setClientAlias() — Apelido do cliente (rest/user, campo name)', () => {
     it('busca o _id pelo MAC e faz PUT parcial só com { name: alias }, sem os outros campos do cliente', async () => {
       let putUrl: string | undefined;
@@ -289,6 +421,108 @@ describe('unifiClassicService', () => {
       );
 
       await expect(unifiClassicService.setClientAlias('ff:ff:ff:ff:ff:ff', 'Novo apelido')).rejects.toBeInstanceOf(
+        UnknownClientError,
+      );
+    });
+  });
+
+  // ACHADO AO VIVO (sessão de continuação do reboot HP, 2026-09-09): o
+  // campo `hostname` aparece travado (só leitura) na UI do controller. Uma
+  // 1ª tentativa (PUT direto em `{ hostname }`, mesmo endpoint que `/alias`
+  // usa pra `name`) FOI aceita pelo controller mas confirmada, ao vivo, como
+  // NÃO permanente — revertia sozinha em ~20s, provavelmente por um motor
+  // interno de fingerprinting/descoberta reafirmando o valor "aprendido"
+  // por cima. O mecanismo que realmente funciona (monitorado >100s sem
+  // reverter) é o campo oficial `local_dns_record` (visível na própria UI
+  // como o checkbox "Registro DNS Local"), que exige `use_fixedip: true`
+  // com `fixed_ip` na mesma requisição.
+  describe('setClientHostname() — hostname via Local DNS Record (rest/user)', () => {
+    it('busca o _id pelo MAC e faz PUT com use_fixedip/fixed_ip + local_dns_record_enabled/local_dns_record', async () => {
+      let putUrl: string | undefined;
+      let putBody: Record<string, unknown> | undefined;
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.endsWith('/api/auth/login')) return loginResponse();
+        if (init?.method === 'PUT' && url.includes('/rest/user/')) {
+          putUrl = url;
+          putBody = JSON.parse(String(init.body));
+          return jsonResponse({ meta: { rc: 'ok' }, data: [{ ...putBody, _id: 'client-id-1' }] });
+        }
+        if (url.includes('/rest/user')) {
+          return jsonResponse({
+            meta: { rc: 'ok' },
+            data: [
+              {
+                _id: 'client-id-1',
+                mac: 'b0:22:7a:4f:63:80',
+                name: 'HPLaserMFP135w Financeiro',
+                hostname: 'COMPRAS',
+                blocked: false,
+                use_fixedip: true,
+                fixed_ip: '172.16.0.34',
+              },
+            ],
+          });
+        }
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService } = await import('../../src/services/unifi-classic.service.js');
+      await unifiClassicService.setClientHostname('b0:22:7a:4f:63:80', 'Financeiro');
+
+      expect(putUrl).toContain('/rest/user/client-id-1');
+      // Não reenvia `name` (Apelido) — campo diferente, não deveria ser
+      // afetado por essa chamada.
+      expect(putBody).toEqual({
+        use_fixedip: true,
+        fixed_ip: '172.16.0.34',
+        local_dns_record_enabled: true,
+        local_dns_record: 'Financeiro',
+      });
+    });
+
+    // ACHADO DO CRÍTICO EM POTENCIAL — validado por mutação mental: sem essa
+    // guarda, um cliente sem IP fixo receberia um PUT que o controller real
+    // rejeita com `api.err.LocalDnsRecordRequiresFixedIp` (confirmado ao
+    // vivo) — e sem este teste, a guarda poderia ser removida silenciosamente
+    // sem quebrar nada além do controller real.
+    it('lança LocalDnsRecordRequiresFixedIpError (409) quando o cliente não tem IP fixo habilitado', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url.endsWith('/api/auth/login')) return loginResponse();
+        if (url.includes('/rest/user')) {
+          return jsonResponse({
+            meta: { rc: 'ok' },
+            data: [{ _id: 'client-id-1', mac: 'aa:bb:cc:dd:ee:ff', use_fixedip: false }],
+          });
+        }
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService, LocalDnsRecordRequiresFixedIpError } = await import(
+        '../../src/services/unifi-classic.service.js'
+      );
+
+      const error = await unifiClassicService
+        .setClientHostname('aa:bb:cc:dd:ee:ff', 'Novo hostname')
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(LocalDnsRecordRequiresFixedIpError);
+      expect((error as InstanceType<typeof LocalDnsRecordRequiresFixedIpError>).status).toBe(409);
+    });
+
+    it('lança UnknownClientError (404) quando o MAC não é conhecido pelo controller', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url.endsWith('/api/auth/login')) return loginResponse();
+        if (url.includes('/rest/user')) return jsonResponse({ meta: { rc: 'ok' }, data: [] });
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService, UnknownClientError } = await import(
+        '../../src/services/unifi-classic.service.js'
+      );
+
+      await expect(unifiClassicService.setClientHostname('ff:ff:ff:ff:ff:ff', 'Novo hostname')).rejects.toBeInstanceOf(
         UnknownClientError,
       );
     });

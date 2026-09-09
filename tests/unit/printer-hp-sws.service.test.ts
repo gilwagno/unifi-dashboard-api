@@ -1,5 +1,24 @@
 import { createDecipheriv, createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+// O serviço fala com a rede via `undici.fetch` (não o `fetch` global do
+// Node — ver a DECISÃO no topo de printer-hp-sws.service.ts sobre por que:
+// resumo, o `fetch` global roda sobre uma cópia INTERNA do undici que não é
+// compatível com o `Agent` do pacote npm). Em vez de reescrever todos os
+// `vi.stubGlobal('fetch', ...)` já existentes abaixo (mockam o padrão usado
+// por printer-brother-wbm.service.test.ts), o mock do módulo `undici` só
+// REPASSA pra `globalThis.fetch` — cada teste continua controlando a
+// resposta do jeito que já fazia, só que agora por baixo de um nível de
+// indireção. `Agent` continua a implementação real (é só instanciada, nunca
+// chamada de verdade nos testes: quem intercepta é o `fetch`).
+vi.mock('undici', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('undici')>();
+  return {
+    ...actual,
+    fetch: (...args: Parameters<typeof fetch>) => globalThis.fetch(...args),
+  };
+});
+
 import {
   buildLoginAuthentication,
   fetchDeviceIdentity,
@@ -16,10 +35,11 @@ import {
 // SWS da HP + reboot remoto.
 //
 // NENHUMA CHAMADA DE REDE REAL: `global.fetch` é sempre mockado (mesmo padrão
-// de printer-brother-wbm.service.test.ts). A impressora HP real
-// (172.16.0.89) é a do Financeiro, em produção — um POST de reboot acidental
-// aqui reiniciaria o equipamento de verdade, então nem o endereço real
-// aparece nos testes: usamos um IP de laboratório fictício.
+// de printer-brother-wbm.service.test.ts) e o mock de `undici.fetch` acima
+// repassa pra ele. A impressora HP real (172.16.0.89) é a do Financeiro, em
+// produção — um POST de reboot acidental aqui reiniciaria o equipamento de
+// verdade, então nem o endereço real aparece nos testes: usamos um IP de
+// laboratório fictício.
 const IP = '10.99.99.99';
 
 const IDENTITY: SwsDeviceIdentity = {
@@ -48,6 +68,12 @@ function swsDataBody(overrides: Partial<Record<'buyorProductName' | 'productSeri
     'SWS.DATA.somethingElse = "irrelevante";',
   ].join('\n');
 }
+
+// Sufixo fixo que loginToSws sempre adiciona ao cookie de sessão — ver
+// SESSION_COOKIE_DEFAULTS em printer-hp-sws.service.ts (achado ao vivo via
+// captura DevTools de um reboot real: sem esses 4 cookies, a SWS aceita o
+// POST mas recusa a aplicação com errno:2).
+const SESSION_COOKIE_SUFFIX = '; xuser=SWS2.0; login=true; language=bp; ChangePWDFlag=yes';
 
 function fakeResponse(status: number, body: string, setCookies: string[] = []): Response {
   const headers = new Headers();
@@ -190,7 +216,7 @@ describe('fetchDeviceIdentity', () => {
     expect(identity).toEqual(IDENTITY);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe(`http://${IP}/sws/data/sws_data.js`);
+    expect(url).toBe(`https://${IP}/sws/data/sws_data.js`);
     expect(init.method).toBe('GET');
   });
 
@@ -256,11 +282,19 @@ describe('loginToSws', () => {
 
     const session = await loginToSws(IP, CREDENTIALS, IDENTITY);
 
-    expect(session).toEqual({ cookie: 'Authentication=Ext1 blob-de-sessao' });
+    expect(session).toEqual({ cookie: `Authentication=Ext1 blob-de-sessao${SESSION_COOKIE_SUFFIX}` });
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe(`http://${IP}/sws/app/gnb/login/login.jsp`);
+    expect(url).toBe(`https://${IP}/sws/app/gnb/login/login.jsp`);
     expect(init.method).toBe('POST');
-    expect(init.headers).toMatchObject({ 'Content-Type': 'application/x-www-form-urlencoded' });
+    // ACHADO AO VIVO: sem `Origin` (ou `Referer`), a SWS real devolve 400
+    // "Invalid Request. Some Error" antes até de olhar o corpo — ver a
+    // DECISÃO em printer-hp-sws.service.ts (swsOrigin). Sem este teste, um
+    // futuro refactor que remova o header passaria com a suíte inteira verde
+    // e só quebraria contra o dispositivo real.
+    expect(init.headers).toMatchObject({
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Origin: `https://${IP}`,
+    });
 
     const body = new URLSearchParams(String(init.body));
     expect(body.get('Authentication')?.startsWith('Ext1 ')).toBe(true);
@@ -281,7 +315,7 @@ describe('loginToSws', () => {
     );
 
     await expect(loginToSws(IP, CREDENTIALS, IDENTITY)).resolves.toEqual({
-      cookie: 'Authentication=Ext1 sessao-certa',
+      cookie: `Authentication=Ext1 sessao-certa${SESSION_COOKIE_SUFFIX}`,
     });
   });
 
@@ -330,6 +364,42 @@ describe('loginToSws', () => {
 
   it('lança PrinterSwsRequestError quando o corpo do login não é JSON', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => fakeResponse(200, '<html>login page</html>')));
+
+    await expect(loginToSws(IP, CREDENTIALS, IDENTITY)).rejects.toBeInstanceOf(PrinterSwsRequestError);
+  });
+
+  // ACHADO AO VIVO (sessão de continuação): o corpo real devolvido pela HP do
+  // Financeiro NÃO é JSON estrito — as chaves não são citadas
+  // (`{success: true, passwordExpiration: false}`, confirmado repetidas
+  // vezes contra o dispositivo real). `JSON.parse` SEMPRE falha nesse
+  // formato — sem o fallback por regex, o login nunca teria funcionado
+  // contra a impressora de verdade, mesmo com a credencial certa. Este teste
+  // usa o corpo LITERAL observado (não `JSON.stringify`), então ele quebra
+  // se o fallback for removido — ao contrário dos outros testes deste
+  // describe, que geram JSON válido e não exercitariam a lacuna real.
+  it('aceita o corpo REAL do dispositivo (chaves sem aspas, não é JSON estrito)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        fakeResponse(200, '{success: true, passwordExpiration: false}', [
+          'Authentication=Ext1 blob-de-sessao; Path=/; HttpOnly',
+        ]),
+      ),
+    );
+
+    await expect(loginToSws(IP, CREDENTIALS, IDENTITY)).resolves.toEqual({
+      cookie: `Authentication=Ext1 blob-de-sessao${SESSION_COOKIE_SUFFIX}`,
+    });
+  });
+
+  it('recusa a credencial mesmo no formato sem aspas quando success é false', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => fakeResponse(200, '{success: false, passwordExpiration: false}')));
+
+    await expect(loginToSws(IP, CREDENTIALS, IDENTITY)).rejects.toBeInstanceOf(PrinterSwsAuthenticationError);
+  });
+
+  it('lança PrinterSwsRequestError quando nem JSON nem o padrão sem aspas contêm "success"', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => fakeResponse(200, '{passwordExpiration: false}')));
 
     await expect(loginToSws(IP, CREDENTIALS, IDENTITY)).rejects.toBeInstanceOf(PrinterSwsRequestError);
   });
@@ -397,23 +467,45 @@ describe('loginToSws', () => {
 });
 
 describe('rebootHpPrinter', () => {
-  it('faz identidade → login → POST de restart com pinCode = MAC em MAIÚSCULAS e o cookie de sessão', async () => {
-    const fetchMock = vi.fn(async (url: string) => {
-      if (String(url).endsWith('/sws/data/sws_data.js')) return fakeResponse(200, swsDataBody());
+  // Segundo csrfToken, distinto do pré-login (IDENTITY.csrfToken) — o mock
+  // abaixo devolve ESTE valor só quando a leitura de sws_data.js chega COM
+  // cookie (autenticada), replicando o achado ao vivo de que o csrfToken
+  // muda depois do login.
+  const POST_LOGIN_CSRF = 'cG9zLWxvZ2luLWNzcmYtdG9rZW4=';
+
+  it('faz identidade → login → RELÊ identidade autenticada → POST de restart com o csrfToken PÓS-login', async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/sws/data/sws_data.js')) {
+        const authenticated = Boolean((init?.headers as Record<string, string> | undefined)?.Cookie);
+        // ACHADO AO VIVO: usar o csrfToken PRÉ-login (o primeiro valor lido,
+        // sem sessão) no POST de restart é recusado pela SWS real mesmo com
+        // tudo mais certo — só o valor relido DEPOIS do login funciona. Sem
+        // este teste, voltar a usar o valor da primeira leitura (a
+        // implementação anterior, nunca testada contra o dispositivo real)
+        // passaria com a suíte inteira verde.
+        return fakeResponse(200, swsDataBody(authenticated ? { csrfToken: POST_LOGIN_CSRF } : {}));
+      }
       if (String(url).endsWith('/login.jsp')) return loginOkResponse();
-      return fakeResponse(200, '{"success":true}');
+      return fakeResponse(200, '{success:true}');
     });
     vi.stubGlobal('fetch', fetchMock);
 
     await rebootHpPrinter(IP, '50:81:40:d8:6c:7e', CREDENTIALS);
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    const [url, init] = fetchMock.mock.calls[2] as unknown as [string, RequestInit];
-    expect(url).toBe(`http://${IP}/sws/app/security/general/reboot/RestartSystem.jsp`);
+    // 4 chamadas: identidade (sem sessão) → login → identidade (autenticada)
+    // → restart. Ver o docblock de rebootHpPrinter para o porquê das 4.
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    const [url, init] = fetchMock.mock.calls[3] as unknown as [string, RequestInit];
+    expect(url).toBe(`https://${IP}/sws/app/security/general/reboot/RestartSystem.jsp`);
     expect(init.method).toBe('POST');
+    // ACHADO AO VIVO: RestartSystem.jsp exige `Referer` além de `Origin` —
+    // sem este teste, remover o header passaria com a suíte inteira verde e
+    // só quebraria contra o dispositivo real (já aconteceu uma vez).
     expect(init.headers).toMatchObject({
       'Content-Type': 'application/x-www-form-urlencoded',
-      Cookie: 'Authentication=Ext1 blob-de-sessao',
+      Origin: `https://${IP}`,
+      Referer: `https://${IP}/sws/index.html`,
+      Cookie: `Authentication=Ext1 blob-de-sessao${SESSION_COOKIE_SUFFIX}`,
     });
 
     const body = new URLSearchParams(String(init.body));
@@ -421,7 +513,7 @@ describe('rebootHpPrinter', () => {
     // literalmente o MAC, MAIÚSCULO, com dois-pontos. Minúsculo seria
     // rejeitado.
     expect(body.get('pinCode')).toBe('50:81:40:D8:6C:7E');
-    expect(body.get('csrf-token')).toBe(IDENTITY.csrfToken);
+    expect(body.get('csrf-token')).toBe(POST_LOGIN_CSRF);
   });
 
   it('não chega a POSTar o restart quando o login é recusado (nenhum reboot com credencial errada)', async () => {

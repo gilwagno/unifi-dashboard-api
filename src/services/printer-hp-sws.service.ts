@@ -1,4 +1,5 @@
 import { createCipheriv, createHash, randomBytes } from 'node:crypto';
+import { Agent, fetch as undiciFetch, type RequestInit as UndiciRequestInit, type Response as UndiciResponse } from 'undici';
 
 // Reboot remoto das impressoras HP via SWS (SyncThru Web Service — o painel
 // web embarcado, de origem Samsung, que roda na linha "HP Laser MFP 13x";
@@ -6,10 +7,11 @@ import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 // vivo contra a HP real do Financeiro (172.16.0.89) e está documentado em
 // docs/printers-snmp-research.md, seções "Payload exato do reboot HP" e
 // "Login programático — RESOLVIDO". Nada aqui foi inventado/adivinhado:
-//   1. GET /sws/data/sws_data.js — arquivo JS ESTÁTICO, servido SEM
-//      autenticação, com o nome do produto, o número de série e o
-//      `csrfToken` (que, apesar do nome, é FIXO por dispositivo/firmware, não
-//      um token de sessão).
+//   1. GET /sws/data/sws_data.js — nome do produto, número de série e
+//      `csrfToken`. O nome do arquivo sugere estático, mas o `csrfToken`
+//      MUDA entre uma leitura sem sessão e uma leitura autenticada
+//      (confirmado ao vivo) — por isso é sempre lido de novo a cada chamada
+//      (`fetchDeviceIdentity`), nunca cacheado entre logins.
 //   2. POST /sws/app/gnb/login/login.jsp — login "Ext1": a senha nunca vai
 //      em claro, vai cifrada em AES-256-CBC no formato do OpenSSL
 //      (`Salted__` + salt + EVP_BytesToKey/MD5), exatamente como a
@@ -26,9 +28,15 @@ import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 //
 // ESTA AÇÃO REINICIA UM EQUIPAMENTO FÍSICO DE VERDADE. Diferente do
 // /reconnect (que só desassocia/reassocia o cliente no controller UniFi),
-// aqui a impressora reinicia o firmware: um job em andamento morre. Nenhuma
-// linha deste módulo foi executada contra a impressora real durante o
-// desenvolvimento — toda a suíte mocka `global.fetch`.
+// aqui a impressora reinicia o firmware: um job em andamento morre. Toda a
+// suíte automatizada mocka `undici.fetch` (nunca fala com uma impressora de
+// verdade). Diferente da subtarefa anterior de sleep-time/auto-power-off da
+// Brother, esta função FOI testada de ponta a ponta contra o equipamento
+// real (172.16.0.89, sessão de continuação) — incluindo o próprio reboot,
+// disparado deliberadamente pelo usuário no navegador (não por este código
+// diretamente) e reproduzido por este código depois, com a resposta real
+// `{success:true}` confirmando. Ver o docblock de `rebootHpPrinter` para o
+// que essa validação corrigiu.
 //
 // SEGREDO: a senha do painel nunca é logada, nunca volta em mensagem de erro
 // e nunca trafega em claro no corpo (vai dentro do blob AES). Toda mensagem
@@ -38,47 +46,85 @@ import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 
 const REQUEST_TIMEOUT_MS = 5000;
 
-// DECISÃO — esquema HTTP (não HTTPS). A SWS atende nas duas portas, mas:
+// DECISÃO — HTTPS com certificado autoassinado aceito (revisão de uma
+// decisão anterior que usava HTTP puro).
 //
-// (a) `HTTP / porta 80 / Enable` está confirmado no Feature Management da HP
-// real (ver docs/printers-snmp-research.md, sessão 2026-09-08).
+// Achado ao vivo (sessão de continuação): a HP real do Financeiro devolve,
+// em HTTP puro, uma página-stub que só redireciona pro HTTPS via JavaScript
+// (`checkSSL()`) em vez do conteúdo de `IDENTITY_PATH` — ou seja, o
+// pressuposto anterior ("a SWS atende em HTTP puro, confirmado no Feature
+// Management") não se sustentou contra o dispositivo real: o Feature
+// Management confirma que a PORTA 80 está habilitada, não que o CONTEÚDO
+// serve por ela sem redirecionar. Confirmado via HTTPS com o certificado
+// autoassinado aceito (`curl -k`) que o conteúdo bate exatamente com o
+// documentado (mesmo `productSerial`/`csrfToken`) — é a mesma impressora, só
+// que exige HTTPS neste caminho.
 //
-// (b) O certificado da SWS é autoassinado, e o que o `fetch` nativo do Node
-// oferece hoje para lidar com isso (medido no Node 24.18 deste ambiente,
-// contra um servidor HTTPS local com certificado autoassinado — não contra
-// impressora nenhuma):
-//   - `fetch(url, { agent: new https.Agent({ rejectUnauthorized: false }) })`
-//     é SILENCIOSAMENTE IGNORADO: falha igual, com DEPTH_ZERO_SELF_SIGNED_CERT;
-//   - `NODE_TLS_REJECT_UNAUTHORIZED=0` funciona, mas é flag de PROCESSO —
-//     relaxa o TLS de todas as chamadas do backend, não só desta. É a flag que
-//     src/services/unifi.service.ts liga condicionalmente para falar com o
-//     controller; depender dela aqui faria esta feature funcionar ou não
-//     conforme a configuração de OUTRO módulo, falhando como "impressora
-//     inalcançável" (mensagem enganosa) quando desligada;
-//   - `fetch(url, { dispatcher })` É de fato honrado pelo fetch nativo (o
-//     inverso da opção `agent`: passar um dispatcher inválido faz a chamada
-//     falhar em vez de ser ignorada). Ou seja, um `undici.Agent` com
-//     `connect: { rejectUnauthorized: false }` daria HTTPS aqui SEM tocar em
-//     nenhuma variável global — só que `undici` não é dependência deste
-//     projeto e o Node não o expõe como built-in (`node:undici` não existe),
-//     então isso custaria uma dependência direta nova. É o caminho de
-//     migração se algum dia o TLS por impressora passar a ser requisito.
+// Implementação — por que `undici.fetch`/`undici.Agent` e não o `fetch`
+// global do Node com um `dispatcher`:
+//   - `fetch(url, { dispatcher: new (require('undici').Agent)(...) })`
+//     usando o `fetch` GLOBAL do Node (que roda sobre uma cópia INTERNA do
+//     undici, embutida no binário) falha com
+//     `InvalidArgumentError: invalid onRequestStart method` — incompatibi-
+//     lidade de versão entre a cópia interna do Node e o pacote `undici` do
+//     npm (medido ao vivo no Node 24.18 deste ambiente). `undici.setGlobal-
+//     Dispatcher()` contorna esse erro específico, mas troca o dispatcher do
+//     `fetch` GLOBAL pra todo o processo — relaxaria a verificação de TLS de
+//     qualquer chamada `fetch()` do backend inteiro (inclusive contra o
+//     controller UniFi), não só desta impressora. Mesmo problema, en-
+//     capsulado diferente, do `NODE_TLS_REJECT_UNAUTHORIZED=0` já descartado
+//     antes por esse motivo.
+//   - Usar `fetch`/`Agent` do PRÓPRIO pacote `undici` (em vez do global)
+//     evita os dois problemas: mesma versão em ambos, e o `Agent` só afeta
+//     as chamadas feitas através dele — nenhum outro `fetch()` do processo é
+//     tocado. Confirmado ao vivo contra a impressora real antes de fixar
+//     esta abordagem.
 //
-// (c) Ainda que se pagasse esse custo, ganho real seria pequeno: um
-// certificado autoassinado de impressora não teria o IP no SAN, então HTTPS
-// por IP só passaria com a verificação desligada de todo jeito — e o material
-// da cifra do login é PÚBLICO (vem do próprio sws_data.js, servido sem
-// autenticação), logo o blob AES não é confidencialidade de verdade: é a
-// proteção que o firmware oferece, nem mais nem menos.
-//
-// Consequência aceita (rede interna da empresa): quem estiver no mesmo
-// segmento vê o endpoint, o timing e o MAC-alvo do reboot em claro — não a
-// senha, que vai dentro do blob. Se este módulo algum dia sair da LAN
-// administrativa, isto precisa ser revisto antes.
-// HTTP direto mantém o comportamento determinístico e é o mesmo que
-// printer-brother-wbm.service.ts já faz.
+// Consequência aceita — `rejectUnauthorized: false` desliga a validação de
+// certificado por completo (não é "aceitar só o certificado autoassinado
+// desta impressora": é aceitar QUALQUER certificado). Um certificado
+// autoassinado de impressora não teria o IP no SAN mesmo que se tentasse
+// validar, então uma verificação "de verdade" exigiria fixar (pin) o
+// certificado específico do dispositivo — não implementado aqui, mesmo
+// modelo de confiança já usado para o controller UniFi (`UNIFI_ALLOW_SELF_
+// SIGNED`): rede interna administrativa, não uma rede hostil. Nessa mesma
+// rede, o material da cifra do login é PÚBLICO (vem do `sws_data.js` sem
+// autenticação), então o blob AES nunca foi confidencialidade forte — é a
+// proteção que o firmware oferece, nem mais nem menos. Se este módulo algum
+// dia sair da LAN administrativa, isto precisa ser revisto antes.
+const insecureAgent = new Agent({ connect: { rejectUnauthorized: false } });
+
 function swsUrl(ipAddress: string, path: string): string {
-  return `http://${ipAddress}${path}`;
+  return `https://${ipAddress}${path}`;
+}
+
+// ACHADO AO VIVO (sessão de continuação, depois de migrar pra HTTPS): os dois
+// POSTs de escrita (`login.jsp`, `RestartSystem.jsp`) devolvem 400 "Invalid
+// Request. Some Error" — uma página genérica do próprio servidor embarcado,
+// não da aplicação SWS — quando a requisição não traz `Referer` NEM `Origin`.
+// Isolado por bisseção contra o dispositivo real: `Referer` sozinho basta,
+// `Origin` sozinho também basta; `User-Agent`/`Accept`/`X-Requested-With`
+// sozinhos NÃO bastam. É uma proteção anti-CSRF/hotlink de baixo nível do
+// servidor HTTP embarcado (rejeita POSTs "sem origem"), não parte do
+// protocolo Ext1/login documentado na pesquisa — um cliente HTTP puro
+// (`fetch`, `curl` sem essas opções) nunca teria passado por isso, ao
+// contrário de um navegador de verdade, que sempre envia pelo menos um dos
+// dois automaticamente em requisições same-origin. Usamos `Origin` (mais
+// simples que reproduzir o path exato da página que faria a chamada de
+// verdade no navegador).
+function swsOrigin(ipAddress: string): string {
+  return `https://${ipAddress}`;
+}
+
+// ACHADO AO VIVO (mesma captura DevTools do reboot real): `RestartSystem.jsp`
+// especificamente também exige `Referer` — só `Origin` (que bastava sozinho
+// para `login.jsp`, confirmado por bisseção numa rodada anterior) não é
+// suficiente aqui. Não generalizamos mais "um dos dois basta" entre
+// endpoints diferentes desta SWS sem confirmar caso a caso. O valor
+// observado na captura real era a página do app (`/sws/index.html`) — é o
+// que o navegador manda de verdade ao clicar o botão a partir dali.
+function swsReferer(ipAddress: string): string {
+  return `${swsOrigin(ipAddress)}/sws/index.html`;
 }
 
 const IDENTITY_PATH = '/sws/data/sws_data.js';
@@ -232,14 +278,45 @@ export interface SwsDeviceIdentity {
   productName: string;
   /** `SWS.DATA.productSerial`, ex.: "BRBSQ2G13Q". */
   productSerial: string;
-  /** `SWS.DATA.csrfToken` — fixo por dispositivo, não é token de sessão. */
+  /** `SWS.DATA.csrfToken` — muda entre leituras sem sessão e autenticadas. */
   csrfToken: string;
 }
 
-/** Sessão autenticada: o cookie a reenviar nas chamadas seguintes. */
+/** Sessão autenticada: o cookie (jar completo) a reenviar nas chamadas seguintes. */
 export interface SwsSession {
   cookie: string;
 }
+
+// ACHADO AO VIVO (captura real via DevTools, sessão de continuação — o
+// usuário clicou "Reiniciar agora" de verdade no navegador e a requisição
+// RestartSystem.jsp resultante foi capturada por completo): a SWS depende de
+// MAIS QUATRO cookies além de `Authentication`, nenhum deles devolvido por
+// `Set-Cookie` do `login.jsp` (só `Authentication` vem por ali) — são
+// setados no NAVEGADOR via JavaScript (`document.cookie`, a função
+// `CreateCookie` que já tínhamos visto em `sws_data.js`) em algum ponto do
+// carregamento da SPA depois do login. Sem eles, o POST de
+// `RestartSystem.jsp` era aceito pelo servidor (200, chegava na lógica da
+// aplicação) mas recusado pela aplicação (`{success:false, errno:2}`) — a
+// causa exata do `errno:2` que bloqueou esta feature até esta sessão.
+//
+// Os quatro valores abaixo são os observados na captura real, tratados como
+// CONSTANTES (não são derivados de nada session-específico, ao contrário de
+// `Authentication`):
+//   - `xuser=SWS2.0`     — identifica a versão do cliente SWS; não parece
+//     variar por sessão/dispositivo.
+//   - `login=true`       — flag booleano simples, esperado sempre "true"
+//     depois de um login aceito.
+//   - `language=bp`      — idioma da UI selecionado (esta impressora está em
+//     pt-BR — mesmo achado de idioma já documentado no CLAUDE.md).
+//   - `ChangePWDFlag=yes` — aviso de "senha ainda é a padrão de fábrica" (a
+//     HP do Financeiro está com `admin`/senha em branco, achado de segurança
+//     já documentado). **Risco conhecido, não verificado**: se este valor for
+//     na verdade calculado a partir da credencial (ex.: "no" para uma senha
+//     já trocada), hardcodar "yes" pode voltar a causar recusa numa
+//     impressora com senha diferente da de fábrica — não há como testar isso
+//     sem uma segunda impressora HP real. Se acontecer, é o primeiro
+//     suspeito a revisar.
+const SESSION_COOKIE_DEFAULTS = 'xuser=SWS2.0; login=true; language=bp; ChangePWDFlag=yes';
 
 // --- Helpers de rede ------------------------------------------------------
 
@@ -267,7 +344,7 @@ function redact(message: string, redactions: string[]): string {
 // projeto (`engines.node >= 22.5`), então um fallback seria código morto que
 // ninguém exercita — e, pior, mascararia com um valor corrompido o dia em que
 // a API mudasse.
-function readSetCookies(res: Response): string[] {
+function readSetCookies(res: UndiciResponse): string[] {
   return res.headers.getSetCookie();
 }
 
@@ -282,17 +359,24 @@ interface SwsResponse {
 // impressora desligada, ou ligada e ocupada imprimindo, não pode pendurar a
 // rota do dashboard) cobrindo TAMBÉM a leitura do corpo — abortar só o
 // handshake deixaria um corpo que nunca termina de chegar travar do mesmo
-// jeito.
+// jeito. Tipos de `undici` (não os globais de lib.dom): `undiciFetch` exige
+// seu próprio `RequestInit`/devolve seu próprio `Response` — misturar com os
+// tipos globais falha a compilação (a lib do undici e o `undici-types` que o
+// lib.dom usa por baixo dos panos divergem em detalhes como `FormData`).
 async function swsRequest(
   ipAddress: string,
   path: string,
-  init: RequestInit,
+  init: UndiciRequestInit,
   redactions: string[],
 ): Promise<SwsResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const res = await fetch(swsUrl(ipAddress, path), { ...init, signal: controller.signal });
+    const res = await undiciFetch(swsUrl(ipAddress, path), {
+      ...init,
+      signal: controller.signal,
+      dispatcher: insecureAgent,
+    });
     const body = await res.text();
     return { status: res.status, ok: res.ok, body, setCookies: readSetCookies(res) };
   } catch (error) {
@@ -314,19 +398,38 @@ function extractSwsDataString(body: string, key: string): string | null {
 }
 
 /**
- * Lê a identidade do dispositivo do arquivo estático `sws_data.js` — o único
- * passo do fluxo que NÃO exige autenticação.
+ * Lê a identidade do dispositivo do arquivo estático `sws_data.js`.
+ *
+ * ACHADO AO VIVO (captura DevTools de um reboot real): o `csrfToken` deste
+ * arquivo MUDA entre uma leitura sem sessão e uma leitura autenticada — e é
+ * o valor PÓS-login que a SWS exige em qualquer POST de escrita autenticado
+ * (confirmado especificamente contra `RestartSystem.jsp`: usar o csrfToken
+ * pré-login, mesmo com sessão/cookies corretos, é recusado). Por isso este
+ * helper aceita um `cookie` opcional — sem ele, é o passo inicial sem
+ * autenticação (`fetchDeviceIdentity(ipAddress)`, usado antes do login,
+ * inclusive pra montar o próprio login); com ele, relê os mesmos dados DEPOIS
+ * de autenticado, pra pegar o csrfToken que passa a valer pro resto da
+ * sessão (ver `rebootHpPrinter`).
  *
  * @param ipAddress IP já resolvido da impressora (ver resolvePrinterIp na
  *   rota — este serviço nunca resolve IP por conta própria).
- * @returns Nome do produto, número de série e csrfToken.
+ * @param cookie Cookie de sessão já autenticado (ver `SwsSession.cookie`).
+ *   Omitido: leitura sem sessão (o único passo do fluxo de login que NÃO
+ *   exige autenticação).
+ * @returns Nome do produto, número de série e csrfToken (válido pro
+ *   contexto — pré ou pós-login — em que foi lido).
  * @throws {PrinterSwsUnreachableError} timeout/falha de rede.
  * @throws {PrinterSwsRequestError} status não-2xx, ou corpo sem os três
  *   campos esperados (o que é o caso de qualquer dispositivo que não seja uma
  *   HP/SWS neste IP).
  */
-export async function fetchDeviceIdentity(ipAddress: string): Promise<SwsDeviceIdentity> {
-  const res = await swsRequest(ipAddress, IDENTITY_PATH, { method: 'GET' }, []);
+export async function fetchDeviceIdentity(ipAddress: string, cookie?: string): Promise<SwsDeviceIdentity> {
+  const res = await swsRequest(
+    ipAddress,
+    IDENTITY_PATH,
+    { method: 'GET', headers: cookie ? { Cookie: cookie } : undefined },
+    [],
+  );
   if (!res.ok) {
     throw new PrinterSwsRequestError(ipAddress, `GET ${IDENTITY_PATH} devolveu status ${res.status}`, res.status);
   }
@@ -392,7 +495,7 @@ export async function loginToSws(
     LOGIN_PATH,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Origin: swsOrigin(ipAddress) },
       body,
     },
     [credentials.password],
@@ -404,19 +507,38 @@ export async function loginToSws(
 
   // A SWS responde 200 tanto no sucesso quanto na recusa da credencial — o
   // que distingue os dois é o `success` do corpo, não o status HTTP.
-  let parsed: { success?: unknown };
+  //
+  // ACHADO AO VIVO: o corpo real do dispositivo NÃO é JSON estrito — é um
+  // literal de objeto JavaScript, com as chaves SEM ASPAS
+  // (`{success: true, passwordExpiration: false}`), confirmado repetidas
+  // vezes contra a HP real. `JSON.parse` falha nisso sempre — sem este
+  // fallback, o login nunca teria funcionado contra o dispositivo de
+  // verdade, mesmo com a credencial certa. Tenta `JSON.parse` primeiro
+  // (cobre um firmware/dispositivo futuro que devolva JSON de verdade) e só
+  // cai pro regex quando o parse falha — mesmo espírito de
+  // extractSwsDataString: extrai só o campo que decide entre "entra" e "não
+  // entra" no reboot, sem tentar escrever um parser tolerante completo.
+  let success: unknown;
   try {
-    parsed = JSON.parse(res.body) as { success?: unknown };
+    success = (JSON.parse(res.body) as { success?: unknown })?.success;
   } catch {
-    throw new PrinterSwsRequestError(ipAddress, `a resposta de ${LOGIN_PATH} não é JSON`, res.status);
+    const match = /\bsuccess\s*:\s*(true|false)\b/.exec(res.body);
+    if (!match) {
+      throw new PrinterSwsRequestError(
+        ipAddress,
+        `a resposta de ${LOGIN_PATH} não é JSON nem contém um campo "success" reconhecível`,
+        res.status,
+      );
+    }
+    success = match[1] === 'true';
   }
 
-  if (parsed?.success !== true) {
+  if (success !== true) {
     throw new PrinterSwsAuthenticationError(ipAddress, credentials.username);
   }
 
-  const cookie = extractAuthenticationCookie(res.setCookies);
-  if (!cookie) {
+  const authCookie = extractAuthenticationCookie(res.setCookies);
+  if (!authCookie) {
     // Sucesso declarado sem cookie: qualquer requisição seguinte seria
     // anônima. Falhar aqui é obrigatório — um POST de reboot anônimo poderia
     // ser rejeitado silenciosamente e nós relataríamos "reiniciada".
@@ -427,25 +549,47 @@ export async function loginToSws(
     );
   }
 
-  return { cookie };
+  // `SESSION_COOKIE_DEFAULTS` — ver a DECISÃO logo acima de `SwsSession`:
+  // sem esses 4 cookies extras (setados só no navegador via JS, nunca por
+  // `Set-Cookie` daqui), o POST de restart é aceito pelo servidor mas
+  // recusado pela aplicação. Combinado uma única vez aqui, no jar devolvido
+  // por `loginToSws` — qualquer chamada futura autenticada (não só o reboot)
+  // reaproveita o mesmo jar completo automaticamente.
+  return { cookie: `${authCookie}; ${SESSION_COOKIE_DEFAULTS}` };
 }
 
 /**
- * Reinicia a impressora HP de verdade: lê a identidade, autentica na SWS e
- * dispara o POST de restart.
+ * Reinicia a impressora HP de verdade: lê a identidade sem sessão, autentica
+ * na SWS, relê a identidade JÁ AUTENTICADO (csrfToken novo — ver a DECISÃO em
+ * `fetchDeviceIdentity`) e só então dispara o POST de restart.
+ *
+ * **CONFIRMADO AO VIVO POR COMPLETO** (não é mais suposição): um reboot real
+ * foi disparado e capturado via DevTools contra a HP do Financeiro
+ * (172.16.0.89) numa sessão de continuação, com a página `Segurança → System
+ * Security → Reiniciar dispositivo` aberta e o botão "Reiniciar agora"
+ * clicado de propósito. Fechou 3 lacunas que a implementação anterior
+ * (baseada só na leitura do código-fonte do `Reboot.js`, nunca testada
+ * contra o dispositivo) tinha:
+ *   1. **Método é POST**, não GET — a pesquisa anterior tratava isso como
+ *      suposição; a captura real confirma.
+ *   2. **`Referer` é obrigatório** neste endpoint especificamente (`Origin`
+ *      sozinho, que basta pro `login.jsp`, NÃO basta aqui — sem os dois, a
+ *      SWS recusa a requisição antes até de chegar na lógica da aplicação,
+ *      com uma página de erro genérica do próprio servidor embarcado).
+ *   3. **4 cookies extras são obrigatórios** além de `Authentication` — ver
+ *      `SESSION_COOKIE_DEFAULTS`. Sem eles (e mesmo com Origin/Referer
+ *      certos), a aplicação aceita a requisição mas RECUSA o reboot
+ *      (`{success:false, errno:2}`) — só descoberto porque a diferença entre
+ *      "aceito pelo servidor" e "aceito pela aplicação" é sutil o bastante
+ *      pra não aparecer em nenhum teste que não seja contra o dispositivo
+ *      real.
  *
  * O `pinCode` exigido pelo firmware é literalmente o MAC da própria
  * impressora em MAIÚSCULAS com dois-pontos (confirmado ao vivo lendo
  * `reboot.json` — ver a pesquisa). Por isso NÃO precisamos chamar
- * `reboot.json`: o MAC já está no cadastro.
- *
- * O método é POST form-urlencoded, o padrão de toda escrita desta SWS
- * (`login.jsp`, `SetAdmin.jsp`): o `SWS.UTIL.ConnRequest` do `reboot.js` não
- * declara o verbo explicitamente e não foi inspecionado a fundo, então
- * seguimos o padrão consistente do resto do painel. Mandamos também o
- * `csrf-token` no corpo — o `reboot.js` só declara `pinCode`, mas o token é
- * fixo e inofensivo se ignorado, enquanto sua AUSÊNCIA numa SWS que o exija
- * quebraria a chamada.
+ * `reboot.json`: o MAC já está no cadastro. O `csrf-token` vai no corpo,
+ * junto do `pinCode` — confirmado que é exatamente esses 2 campos, nada mais
+ * (o corpo capturado ao vivo bate byte a byte com o que este código monta).
  *
  * @param ipAddress IP já resolvido da impressora.
  * @param mac MAC da impressora, como está no cadastro (minúsculo com
@@ -453,10 +597,10 @@ export async function loginToSws(
  * @param credentials Usuário/senha do painel web (do cadastro).
  * @returns Resolve sem valor quando a SWS aceita o comando de restart.
  * @throws {PrinterSwsUnreachableError} timeout/falha de rede em qualquer um
- *   dos três passos.
+ *   dos quatro passos.
  * @throws {PrinterSwsAuthenticationError} credencial recusada no login.
  * @throws {PrinterSwsRequestError} resposta inutilizável/não-2xx em qualquer
- *   um dos três passos.
+ *   um dos quatro passos.
  */
 export async function rebootHpPrinter(
   ipAddress: string,
@@ -466,9 +610,15 @@ export async function rebootHpPrinter(
   const identity = await fetchDeviceIdentity(ipAddress);
   const session = await loginToSws(ipAddress, credentials, identity);
 
+  // Relê a identidade AUTENTICADA (mesmo endpoint, agora com o cookie de
+  // sessão) — o csrfToken pré-login usado pra montar o login não é o que a
+  // SWS aceita nos POSTs de escrita seguintes. Ver a DECISÃO no docblock de
+  // `fetchDeviceIdentity`.
+  const sessionIdentity = await fetchDeviceIdentity(ipAddress, session.cookie);
+
   const body = new URLSearchParams({
     pinCode: mac.toUpperCase(),
-    'csrf-token': identity.csrfToken,
+    'csrf-token': sessionIdentity.csrfToken,
   }).toString();
 
   const res = await swsRequest(
@@ -478,6 +628,8 @@ export async function rebootHpPrinter(
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
+        Origin: swsOrigin(ipAddress),
+        Referer: swsReferer(ipAddress),
         Cookie: session.cookie,
       },
       body,

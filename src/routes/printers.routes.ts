@@ -729,6 +729,31 @@ export default async function printersRoutes(app: FastifyInstance) {
     return printers.map((printer) => withNetworkStatus(printer, resolveNetwork));
   });
 
+  // --- GET /printers/discover-candidates (achado 10 do CLAUDE.md) ---
+  //
+  // Registrada ANTES de `/printers/:id` de propósito (documentação de
+  // leitura, não requisito do Fastify — o router dele já prioriza rotas
+  // estáticas sobre `:id` independente da ordem de registro): fica claro que
+  // "discover-candidates" nunca é interpretado como um `:id`.
+  //
+  // Não faz nenhuma varredura de rede ativa — só cruza o que o controller
+  // UniFi já sabe (`unifiClassicService.getPrinterDiscoveryCandidates`,
+  // filtro por fabricante/hostname) contra o cadastro já existente. Nunca
+  // cadastra nada sozinho: só lista candidatos para confirmação manual.
+  app.get('/printers/discover-candidates', async (_request, reply) => {
+    if (!unifiClassicService.isConfigured()) {
+      return reply.code(503).send({
+        error: 'API clássica do controller não configurada',
+        details: 'Configure UNIFI_CONTROLLER_USER/UNIFI_CONTROLLER_PASSWORD para usar a descoberta de impressoras.',
+      });
+    }
+
+    const candidates = await unifiClassicService.getPrinterDiscoveryCandidates();
+    const registeredMacs = new Set(printersRepository.listAll().map((printer) => printer.mac));
+    const data = candidates.filter((candidate) => !registeredMacs.has(candidate.mac));
+    return reply.send({ data });
+  });
+
   app.get('/printers/:id', async (request, reply) => {
     const { id } = idParam.parse(request.params);
     const record = printersRepository.getById(id);

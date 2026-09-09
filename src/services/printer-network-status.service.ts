@@ -78,11 +78,17 @@ export async function buildNetworkStatusResolver(
     }
   }
 
-  const [integrationResult, classicNetworkInfo] = await Promise.all([
+  const [integrationResult, classicNetworkInfo, connectedMacs] = await Promise.all([
     tryFetch('Integration API', () => unifiService.listClients()),
     unifiClassicService.isConfigured()
       ? tryFetch('API clássica', () => unifiClassicService.getKnownClientsNetworkInfo())
       : Promise.resolve(null as Map<string, ClassicClientNetworkInfo> | null),
+    // stat/sta (conectados agora de verdade) — ver a DECISÃO no branch
+    // 'classic' abaixo. Fonte própria, busca independente das duas acima
+    // (nenhuma falha aqui derruba o merge, mesmo raciocínio de `tryFetch`).
+    unifiClassicService.isConfigured()
+      ? tryFetch('API clássica (stat/sta)', () => unifiClassicService.getConnectedMacs())
+      : Promise.resolve(null as Set<string> | null),
   ]);
 
   // A Integration API (`GET /sites/{id}/clients`) só lista clientes
@@ -109,12 +115,18 @@ export async function buildNetworkStatusResolver(
       return {
         source: 'classic',
         // /rest/user (API clássica) é o registro de clientes CONHECIDOS
-        // pelo controller, não a lista de conectados agora (essa é
-        // /stat/sta) — por isso não dá pra afirmar online/offline a partir
-        // daqui, só o último IP/tipo de conexão conhecidos. `null` aqui é
-        // "não sabemos", propositalmente distinto de `false` ("sabemos que
-        // está offline").
-        online: null,
+        // pelo controller, não a lista de conectados agora — por isso não dá
+        // pra afirmar online/offline só com ele. Cruzamos com /stat/sta
+        // (`connectedMacs`, busca própria acima), que É a lista de
+        // conectados agora de verdade (mesma fonte que fetchClientSignalStrength
+        // já usa, mas sem o filtro de wireless dele — impressora cabeada
+        // também deve poder aparecer online).
+        //
+        // `connectedMacs === null` (API clássica indisponível/erro nesta
+        // busca específica) preserva o `null` de "não sabemos" — só quando a
+        // busca teve sucesso é que a AUSÊNCIA do MAC no Set vira `false`
+        // ("sabemos que não está conectada agora"), nunca o inverso.
+        online: connectedMacs ? connectedMacs.has(mac) : null,
         ipAddress: classicInfo.ipAddress,
         connectionType: classicInfo.connectionType,
       };

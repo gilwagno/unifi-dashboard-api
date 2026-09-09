@@ -111,8 +111,36 @@ describe('Printers page', () => {
     expect(screen.getByText('BRW849E567E0445')).toBeInTheDocument();
 
     expect(screen.getByText(/Online · 172\.16\.0\.89/)).toBeInTheDocument();
-    expect(screen.getByText(/Conhecida pelo controller · 172\.16\.0\.222/)).toBeInTheDocument();
+    // ACHADO AO VIVO (sessão de continuação): a melhoria que faz o backend
+    // cruzar a API clássica com stat/sta (online/offline real, não mais
+    // sempre desconhecido) tinha suíte verde nos dois lados (backend e
+    // frontend) mas a tela continuava sempre mostrando "online desconhecido"
+    // pra fontes "classic" de qualquer jeito — o componente nunca olhava pro
+    // valor de `network.online`, só pro `network.source`. Sem este teste
+    // (que usa `online: null` de propósito, único caso em que o texto
+    // continua sendo "desconhecido"), o bug passava despercebido.
+    expect(screen.getByText(/Conhecida pelo controller · Online desconhecido · 172\.16\.0\.222/)).toBeInTheDocument();
     expect(screen.getByText('Status de rede desconhecido')).toBeInTheDocument();
+  });
+
+  it('mostra Online/Offline de verdade pra fonte "classic" quando o backend já sabe (stat/sta)', async () => {
+    const classicOnline: PrinterWithNetwork = {
+      ...PRINTER_CLASSIC,
+      id: 'p2-online',
+      network: { ...PRINTER_CLASSIC.network, online: true },
+    };
+    const classicOffline: PrinterWithNetwork = {
+      ...PRINTER_CLASSIC,
+      id: 'p2-offline',
+      name: 'DCP-1610NW',
+      network: { ...PRINTER_CLASSIC.network, online: false },
+    };
+    vi.mocked(api.listPrinters).mockResolvedValue([classicOnline, classicOffline]);
+
+    renderPrinters();
+
+    expect(await screen.findByText(/Conhecida pelo controller · Online · 172\.16\.0\.222/)).toBeInTheDocument();
+    expect(screen.getByText(/Conhecida pelo controller · Offline · 172\.16\.0\.222/)).toBeInTheDocument();
   });
 
   it('does not fetch consumables until the user expands a card, and never shows null levelPercent as 0% or NaN%', async () => {

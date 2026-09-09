@@ -31,6 +31,7 @@ vi.mock('../../src/services/unifi-classic.service.js', () => ({
   unifiClassicService: {
     isConfigured: vi.fn(() => false),
     getKnownClientsNetworkInfo: vi.fn(async () => new Map()),
+    getConnectedMacs: vi.fn(async () => new Set()),
   },
   UniFiClassicApiError: class UniFiClassicApiError extends Error {
     constructor(

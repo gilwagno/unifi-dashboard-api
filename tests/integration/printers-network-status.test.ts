@@ -27,6 +27,11 @@ vi.mock('../../src/services/unifi-classic.service.js', () => ({
   unifiClassicService: {
     isConfigured: vi.fn(() => false),
     getKnownClientsNetworkInfo: vi.fn(async () => new Map()),
+    // stat/sta (conectados agora de verdade) — ver a melhoria de online/
+    // offline pra impressoras "classic" (sessão de continuação do reboot
+    // HP). Default vazio: nenhuma impressora "classic" nos testes existentes
+    // é considerada conectada a menos que o teste diga o contrário.
+    getConnectedMacs: vi.fn(async () => new Set()),
   },
   UniFiClassicApiError: class UniFiClassicApiError extends Error {
     constructor(
@@ -56,6 +61,7 @@ afterEach(() => {
   vi.mocked(unifiService.listClients).mockReset().mockResolvedValue({ data: [] });
   vi.mocked(unifiClassicService.isConfigured).mockReset().mockReturnValue(false);
   vi.mocked(unifiClassicService.getKnownClientsNetworkInfo).mockReset().mockResolvedValue(new Map());
+  vi.mocked(unifiClassicService.getConnectedMacs).mockReset().mockResolvedValue(new Set());
 
   // printersRepository é um singleton a nível de módulo (compartilhado por
   // todas as apps criadas via buildApp() neste arquivo, já que todas leem
@@ -121,7 +127,7 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
     await app.close();
   });
 
-  it('impressora NÃO encontrada na Integration API, mas encontrada na API clássica: source classic', async () => {
+  it('impressora NÃO encontrada na Integration API, mas encontrada na API clássica: source classic, online via stat/sta', async () => {
     const { app, token } = await authedApp();
     const auth = { authorization: `Bearer ${token}` };
     const created = await registerPrinter(app, auth, HP_MAC, 'HPLaserMFP135w');
@@ -132,14 +138,65 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
     vi.mocked(unifiClassicService.getKnownClientsNetworkInfo).mockResolvedValueOnce(
       new Map([[HP_MAC, { ipAddress: '172.16.0.89', connectionType: 'WIRELESS' }]]),
     );
+    // ACHADO/MELHORIA (sessão de continuação do reboot HP): stat/sta é quem
+    // decide online/offline de verdade pra impressoras "classic" — rest/user
+    // sozinho nunca afirmava isso (era sempre null antes desta melhoria).
+    vi.mocked(unifiClassicService.getConnectedMacs).mockResolvedValueOnce(new Set([HP_MAC]));
 
     const res = await app.inject({ method: 'GET', url: `/printers/${created.id}`, headers: auth });
     expect(res.statusCode).toBe(200);
     expect(res.json().network).toEqual({
       source: 'classic',
-      // /rest/user é o registro de clientes conhecidos, não a lista de
-      // conectados agora — por isso online fica null (não sabemos), nunca
-      // false (que significaria "sabemos que está offline").
+      online: true,
+      ipAddress: '172.16.0.89',
+      connectionType: 'WIRELESS',
+    });
+
+    await app.close();
+  });
+
+  it('source classic, mas NÃO presente em stat/sta: online false (sabemos que não está conectada agora)', async () => {
+    const { app, token } = await authedApp();
+    const auth = { authorization: `Bearer ${token}` };
+    const created = await registerPrinter(app, auth, HP_MAC, 'HPLaserMFP135w');
+
+    vi.mocked(unifiService.listClients).mockResolvedValueOnce({ data: [] });
+    vi.mocked(unifiClassicService.isConfigured).mockReturnValue(true);
+    vi.mocked(unifiClassicService.getKnownClientsNetworkInfo).mockResolvedValueOnce(
+      new Map([[HP_MAC, { ipAddress: '172.16.0.89', connectionType: 'WIRELESS' }]]),
+    );
+    // stat/sta responde com sucesso, mas SEM o MAC desta impressora — ela
+    // está desconectada agora, não é um caso de "não sabemos".
+    vi.mocked(unifiClassicService.getConnectedMacs).mockResolvedValueOnce(new Set(['aa:aa:aa:aa:aa:aa']));
+
+    const res = await app.inject({ method: 'GET', url: `/printers/${created.id}`, headers: auth });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().network).toEqual({
+      source: 'classic',
+      online: false,
+      ipAddress: '172.16.0.89',
+      connectionType: 'WIRELESS',
+    });
+
+    await app.close();
+  });
+
+  it('source classic, mas stat/sta falhou: online continua null (degrada pra "não sabemos", nunca false)', async () => {
+    const { app, token } = await authedApp();
+    const auth = { authorization: `Bearer ${token}` };
+    const created = await registerPrinter(app, auth, HP_MAC, 'HPLaserMFP135w');
+
+    vi.mocked(unifiService.listClients).mockResolvedValueOnce({ data: [] });
+    vi.mocked(unifiClassicService.isConfigured).mockReturnValue(true);
+    vi.mocked(unifiClassicService.getKnownClientsNetworkInfo).mockResolvedValueOnce(
+      new Map([[HP_MAC, { ipAddress: '172.16.0.89', connectionType: 'WIRELESS' }]]),
+    );
+    vi.mocked(unifiClassicService.getConnectedMacs).mockRejectedValueOnce(new Error('sessão expirada'));
+
+    const res = await app.inject({ method: 'GET', url: `/printers/${created.id}`, headers: auth });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().network).toEqual({
+      source: 'classic',
       online: null,
       ipAddress: '172.16.0.89',
       connectionType: 'WIRELESS',
@@ -187,6 +244,7 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
     });
     // Não deveria nem tentar a API clássica quando ela não está configurada.
     expect(unifiClassicService.getKnownClientsNetworkInfo).not.toHaveBeenCalled();
+    expect(unifiClassicService.getConnectedMacs).not.toHaveBeenCalled();
 
     await app.close();
   });
@@ -252,6 +310,9 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
     vi.mocked(unifiClassicService.getKnownClientsNetworkInfo).mockResolvedValueOnce(
       new Map([[HP_MAC, { ipAddress: '172.16.0.89', connectionType: 'WIRELESS' }]]),
     );
+    // A HP está conectada agora (stat/sta) — deve aparecer online: true,
+    // mesmo vindo pela API clássica.
+    vi.mocked(unifiClassicService.getConnectedMacs).mockResolvedValueOnce(new Set([HP_MAC]));
 
     const res = await app.inject({ method: 'GET', url: '/printers', headers: auth });
     expect(res.statusCode).toBe(200);
@@ -266,7 +327,7 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
     });
     expect(byId.get(hp.id)).toEqual({
       source: 'classic',
-      online: null,
+      online: true,
       ipAddress: '172.16.0.89',
       connectionType: 'WIRELESS',
     });
@@ -277,10 +338,12 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
       connectionType: null,
     });
 
-    // A Integration API e a API clássica só foram chamadas UMA vez cada,
-    // mesmo com 3 impressoras na listagem — nada de N chamadas redundantes.
+    // A Integration API e as duas chamadas da API clássica só foram feitas
+    // UMA vez cada, mesmo com 3 impressoras na listagem — nada de N chamadas
+    // redundantes.
     expect(unifiService.listClients).toHaveBeenCalledTimes(1);
     expect(unifiClassicService.getKnownClientsNetworkInfo).toHaveBeenCalledTimes(1);
+    expect(unifiClassicService.getConnectedMacs).toHaveBeenCalledTimes(1);
 
     await app.close();
   });

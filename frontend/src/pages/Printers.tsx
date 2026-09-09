@@ -43,19 +43,38 @@ const SUPPLY_STATUS_INFO: Record<ConsumableSupplyStatus, { label: string; tone: 
 
 function networkBadge(printer: PrinterWithNetwork) {
   const { network } = printer;
-  if (network.source === 'integration') {
-    return (
-      <Badge tone="success">Online · {network.ipAddress ?? 'IP desconhecido'} ({network.connectionType ?? '—'})</Badge>
-    );
+  if (network.source === 'unknown') {
+    return <Badge tone="neutral">Status de rede desconhecido</Badge>;
   }
-  if (network.source === 'classic') {
+
+  // `source` 'integration' e 'classic' compartilham o mesmo shape desde a
+  // melhoria que cruza a API clássica com stat/sta (conectados agora de
+  // verdade) — `online` já vem true/false/null calculado pelo backend nos
+  // dois casos, não é mais "sempre true na Integration API, sempre
+  // desconhecido na clássica". A UI só precisa decidir o texto/tom pelo
+  // valor de `online`, sem se importar com a origem.
+  const originLabel = network.source === 'integration' ? undefined : 'Conhecida pelo controller';
+  const ipText = `${network.ipAddress ?? 'IP desconhecido'} (${network.connectionType ?? '—'})`;
+
+  if (network.online === true) {
     return (
-      <Badge tone="neutral">
-        Conhecida pelo controller · {network.ipAddress ?? 'IP desconhecido'} (online desconhecido)
+      <Badge tone="success">
+        {originLabel ? `${originLabel} · ` : ''}Online · {ipText}
       </Badge>
     );
   }
-  return <Badge tone="neutral">Status de rede desconhecido</Badge>;
+  if (network.online === false) {
+    return (
+      <Badge tone="warning">
+        {originLabel ? `${originLabel} · ` : ''}Offline · {ipText}
+      </Badge>
+    );
+  }
+  return (
+    <Badge tone="neutral">
+      {originLabel ? `${originLabel} · ` : ''}Online desconhecido · {ipText}
+    </Badge>
+  );
 }
 
 interface FormState {
