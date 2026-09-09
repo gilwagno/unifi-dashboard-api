@@ -207,7 +207,8 @@ iPhone, um Watch e um Redmi antes).
     automação — item considerado concluído/encerrado como está, não uma pendência. Não redescobrir
     nem reabrir sem pedido explícito novo.
 12. ✅ Histórico de leituras SNMP — **47/50**. Implementado em 2026-09-08 (decisão do usuário de
-    retomar o item opcional). Branch `feat/printers-snmp-history`, PR a abrir.
+    retomar o item opcional). **Mergeada em `master`** (commit `5c9b4f1`) — esta linha estava
+    desatualizada dizendo "PR a abrir"; corrigido em 2026-09-09.
 13. ✅ Frontend `Printers.tsx` — nova aba "Manutenção" no menu lateral. PR #10, **já mergeada em
     2026-08-31** (fazia parte do "Marco: subtarefas 1-8" no topo deste arquivo — esta linha
     numerada estava sem o status marcado; corrigido em 2026-09-08).
@@ -371,8 +372,9 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
     é só leitura/escrita local no SQLite, ao contrário dos pollers de coleta, que continuam
     deliberadamente sem coleta imediata no boot por causa da chamada de rede). Suíte + e2e
     reconfirmados verdes depois da mudança (336/336 backend, 5/5 e2e).
-16. ✅ Automação Sleep Time / Auto Power Off (Brother) — **47/50**. Branch
-    `feat/printers-brother-power-settings`, PR a abrir. Primeira integração do projeto que NÃO é
+16. ✅ Automação Sleep Time / Auto Power Off (Brother) — **47/50**. **Mergeada em `master`**
+    (commit `395dd54`) — esta linha estava desatualizada dizendo "PR a abrir"; corrigido em
+    2026-09-09. Primeira integração do projeto que NÃO é
     SNMP nem API do UniFi: POST direto na WBM da impressora (`/general/sleep.html`,
     `/general/powerdown.html`), sem login, confirmado ao vivo contra `HLL2360DWVENDAS`
     (172.16.0.222). Novo `src/services/printer-brother-wbm.service.ts` +
@@ -406,8 +408,9 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
     - Guardas de `minutes` (inteiro, teto 99) e a tradução hours→índice dentro da ROTA (não só a
       tabela isolada) não tinham teste ancorando — cobertos.
     Suíte final: 370/370 (34 arquivos), `tsc` limpo, mutações re-executadas sem sobrevivente.
-17. ✅ Atualização automática (polling) no frontend — **47/50**. Branch
-    `feat/frontend-auto-refresh`, PR a abrir. Pedido do usuário: renomeou 2 APs direto no
+17. ✅ Atualização automática (polling) no frontend — **47/50**. **Mergeada em `master`** (commit
+    `a6b8918`) — esta linha estava desatualizada dizendo "PR a abrir"; corrigido em 2026-09-09.
+    Pedido do usuário: renomeou 2 APs direto no
     controller e o dashboard não refletiu sem F5 (nenhuma das 9 páginas reconsultava sozinha, só no
     carregamento inicial — confirmado no código antes de codar). Hook compartilhado
     `frontend/src/hooks/usePolling.ts` (pausa com aba oculta, retoma com chamada imediata ao voltar,
@@ -443,10 +446,12 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
       `Layout` compartilhado seria a forma barata de resolver isso numa subtarefa futura, se pedido.
     Suíte final: frontend 46/46 (8 arquivos), backend 370/370 intacto (não deveria ter sido tocado,
     confirmado), `tsc` limpo nos dois, lint sem warning novo.
-18. ✅ Reboot remoto da HP via SWS — **47/50**. Branch `feat/printers-hp-reboot`, PR a abrir —
-    **checkpoint feito, mas NÃO mergeada sozinha**: é a feature de maior risco do projeto até agora
-    (credencial de admin + comando que reinicia equipamento físico real), fica pra revisão explícita
-    do usuário antes de ir pra `master`. Payload capturado via DevTools (usuário, manualmente, sem
+18. ✅ Reboot remoto da HP via SWS — **47/50** nesta versão inicial (ver revisão crítica 46/50 na
+    sessão de continuação, seção própria abaixo). **Mergeada em `master` via PR #18, squash, em
+    2026-09-09** (esta linha estava desatualizada dizendo "PR a abrir"/"NÃO mergeada sozinha" —
+    corrigido). Era a feature de maior risco do projeto até então (credencial de admin + comando
+    que reinicia equipamento físico real) — só foi mergeada depois de testada ao vivo contra as 2
+    HPs reais e revisada criticamente. Payload capturado via DevTools (usuário, manualmente, sem
     precisar clicar no botão real) e login programático (`Ext1`/`GibberishAES`, AES-256-CBC formato
     OpenSSL, `crypto` nativo do Node, sem navegador) confirmados AO VIVO contra a impressora real
     nesta sessão — ver `docs/printers-snmp-research.md`, seções "Payload exato do reboot HP" e
@@ -499,14 +504,28 @@ jsdom — só não quebrava antes porque o frontend não tinha testes ainda. Cor
 
 ## Se retomar este loop numa sessão futura
 
-Ondas 1 e 2 estão fechadas. Duas linhas em aberto, nenhuma delas subtarefa pendente de código:
-1. Gate humano já respondido (ver abaixo) — planejar (não implementar sem planejamento) a
-   persistência de histórico de banda por cliente além de 24h. Prioridade confirmada pelo usuário,
-   mas ainda não tem plano nenhum feito.
-2. Subtarefa 12 da Onda 2 (histórico de leituras SNMP ao longo do tempo) — opcional, deliberadamente
-   deixada de fora por decisão do usuário em 2026-09-08. Só retomar se pedido explicitamente.
+**ATUALIZADO em 2026-09-09** — a versão anterior deste bloco (de 2026-08-31) listava 2 itens como
+"em aberto" que já foram implementados E mergeados no mesmo dia seguinte (histórico de banda:
+commit `2744ff2`; histórico de leituras SNMP: commit `5c9b4f1`) — texto nunca atualizado depois.
+**Lição pra manter este arquivo confiável**: sempre que uma branch/feature listada como "PR a abrir"
+for de fato mergeada, atualizar a linha correspondente NA HORA — não deixar pra uma "auditoria"
+futura (isso já causou 5 linhas desatualizadas encontradas de uma vez nesta sessão, corrigidas nos
+itens 12/16/17/18 acima e na seção "Decisão do gate humano" abaixo).
 
-Nenhuma outra pendência de código conhecida em nenhuma das duas ondas.
+Estado real verificado em `master` em 2026-09-09 (`git log --oneline --all`, cruzado item a item
+com o que este arquivo alegava): Ondas 1 e 2 fechadas, **todas** as features/subtarefas marcadas
+com ✅ neste arquivo estão de fato mergeadas em `master` — nenhuma PR aberta, nenhuma branch órfã
+além de `feat/audit-log` (isolada de propósito, ver seção própria no fim deste arquivo).
+
+Pendências reais conhecidas nesta data:
+1. Impressora `172.16.0.34` ("Compras"/Financeiro, ver correção do achado 9 acima) — **cadastrada
+   em 2026-09-09** via `POST /printers` de verdade (não mais pendência).
+2. Achado de baixo risco da revisão crítica do reboot HP (`hp inc` tratado como fabricante
+   inequívoco no `discover-candidates`) — **corrigido em 2026-09-09**, movido pra categoria
+   ambígua.
+
+Nenhuma pendência de código conhecida no momento. Se este arquivo disser o contrário numa sessão
+futura sem que o `git log` confirme, desconfiar do arquivo, não do código.
 
 ## Decisão do gate humano (respondida em 2026-08-31) — IMPLEMENTADO em 2026-09-08
 
@@ -514,7 +533,8 @@ Histórico de uso de banda por cliente além de 24h: usuário confirmou que **vi
 próxima etapa**. Não implementar sem planejamento explícito antes (escolha de banco, job
 periódico, retenção). Plano apresentado e aprovado pelo usuário em 2026-09-08 (retenção: 48h fino +
 rollup horário até 30d), implementado no mesmo dia — **48/50** (par executor Sonnet / crítico Opus).
-Branch `feat/bandwidth-history-persistence`, PR a abrir.
+**Mergeada em `master`** (commit `2744ff2`) — esta linha estava desatualizada dizendo "PR a abrir";
+corrigido em 2026-09-09.
 
 - Banco novo e próprio (`node:sqlite`, `BANDWIDTH_HISTORY_DB_FILE`), mesmo padrão de `printers.db.ts`
   — não reaproveita o banco de impressoras. Buffer em memória de 24h existente (`/bandwidth/history`,
@@ -684,12 +704,13 @@ consegue mostrar um status binário de verdade. 6 testes novos/atualizados em
 `printers-network-status.test.ts` (true via stat/sta, false via stat/sta, e o degrade quando
 stat/sta falha) e 5 no `unifi-classic.service.test.ts` (achado 10) cobrindo isso.
 
-**Estado final desta sessão**: a HP do Financeiro (`.89`) já estava cadastrada. A HP de Compras
-(`.34`) foi IDENTIFICADA e confirmada (login real, mesma senha de fábrica) mas **ainda NÃO foi
-cadastrada** — uma tentativa de cadastrá-la direto no `printers.db` via script foi bloqueada pelo
-classificador de modo automático (duas vezes, Bash e PowerShell) por ser uma escrita na base de
-produção fora da API oficial; ficou como tarefa pro usuário via o frontend (rodando em
-`localhost:5173` ao fim desta sessão) ou uma chamada autenticada normal a `POST /printers`.
+**Estado final** (atualizado após a revisão crítica): a HP do Financeiro (`.89`) já estava
+cadastrada. A HP de Compras/Financeiro (`.34`) foi IDENTIFICADA e confirmada (login real, mesma
+senha de fábrica) — uma tentativa de cadastrá-la direto no `printers.db` via script foi bloqueada
+pelo classificador de modo automático (duas vezes, Bash e PowerShell) por ser uma escrita na base
+de produção fora da API oficial. **Cadastrada em 2026-09-09 via `POST /printers` de verdade**
+(nome `HP Laser MFP 135w (Financeiro 2)`, `id` `94378161-ad33-4a96-ba30-1a91ba1e3b6b`) — não é
+mais pendência.
 
 ### Revisão crítica (Opus) — 46/50, achado sério corrigido
 
@@ -711,16 +732,20 @@ independentemente, e a redação de senha (`redact()`) só tinha teste ancorando
 não o do restart. Todas as 4 corrigidas com testes que reproduzem o mutante exato. Suíte final:
 **471/471** backend (5 testes novos), `tsc` limpo.
 
-**2 achados de baixo risco, registrados como decisão do usuário/futuro, não corrigidos agora**:
-- `hp inc` está na lista de fabricantes INEQUÍVOCOS do filtro de `discover-candidates`, mas HP Inc.
-  (pós-cisão da HPE) também é o OUI de notebooks/desktops/monitores HP comuns — um notebook HP na
-  rede entraria como falso candidato a impressora. Custo é baixo (a rota nunca cadastra sozinha, é
-  só uma lista de confirmação manual), mas o comentário no código que dizia "nenhum outro tipo comum
-  de aparelho usa esse OUI" está factualmente incorreto.
-- `unifiClassicService.forgetClient()` (usa `cmd: 'forget-sta'`, API não documentada oficialmente)
-  não tem teste nenhum e não é chamado por nenhuma rota — existe só como utilidade pontual (foi
-  usada manualmente durante a investigação do hostname da `.34`). Fica sem teste de propósito por
-  enquanto; se virar uma rota de verdade no futuro, precisa de cobertura própria.
+**Achado de baixo risco — CORRIGIDO em 2026-09-09** (depois do merge do PR #18, numa auditoria
+geral de pendências): `hp inc` estava na lista de fabricantes INEQUÍVOCOS do filtro de
+`discover-candidates`, mas HP Inc. (pós-cisão da HPE) também é o OUI de notebooks/desktops/monitores
+HP comuns — um notebook HP na rede entraria como falso candidato a impressora. Movido pra categoria
+AMBÍGUA (mesmo grupo de Samsung/Canon/Epson) — as 2 HPs reais deste projeto continuam detectadas
+normalmente (o `name` delas bate em `laser`/`mfp`), só o teste de fabricante sozinho que não basta
+mais. Novo teste replicando o cenário exato do achado (notebook HP sem indício de impressora → não
+aparece mais como candidato). Suíte: 472/472.
+
+**Achado registrado, sem correção necessária por enquanto**: `unifiClassicService.forgetClient()`
+(usa `cmd: 'forget-sta'`, API não documentada oficialmente) não tem teste nenhum e não é chamado
+por nenhuma rota — existe só como utilidade pontual (foi usada manualmente durante a investigação
+do hostname da `.34`). Fica sem teste de propósito por enquanto; se virar uma rota de verdade no
+futuro, precisa de cobertura própria.
 
 **Nota sobre o par**: dado que o bloqueio do classificador já tinha sido resolvido numa sessão
 anterior e o único jeito de fechar de verdade era testar contra o equipamento real com o usuário
@@ -728,8 +753,9 @@ acompanhando e autorizando cada chamada, esta sessão de continuação não segu
 executor/crítico em tempo real (só o crítico formal, depois, via subagente) — desvio consciente da
 metodologia padrão, registrado aqui por transparência.
 
-**A branch `feat/printers-hp-reboot` está pronta pra abrir PR** — commits: `d09459b` (sessão
-anterior) + `e956341`/`8d81d79` (esta sessão, incluindo as correções da revisão crítica).
+**Mergeada em `master` via PR #18 (squash) em 2026-09-09** — commits originais: `d09459b` (sessão
+anterior) + `e956341`/`8d81d79`/`bab566b` (esta sessão, incluindo as correções da revisão crítica).
+Branch remota deletada após o merge.
 
 Também corrigido nesta sessão: `frontend/src/pages/Printers.tsx#networkBadge` nunca olhava pro
 campo `network.online` pra fontes `classic` — sempre escrevia "online desconhecido" mesmo depois da
