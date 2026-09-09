@@ -510,6 +510,44 @@ describe('unifiClassicService', () => {
       expect((error as InstanceType<typeof LocalDnsRecordRequiresFixedIpError>).status).toBe(409);
     });
 
+    // ACHADO DO CRÍTICO (2026-09-09, validado por mutação): a guarda original
+    // era `use_fixedip !== true || !client.fixed_ip` — mutar cada metade
+    // independentemente (removendo a checagem de `fixed_ip`, ou a de
+    // `use_fixedip`) passava com a suíte inteira verde, porque o único
+    // fixture de 409 testado (`use_fixedip: false`, sem `fixed_ip`) aciona as
+    // duas condições ao mesmo tempo. Este caso isola a combinação real e
+    // alcançável (`use_fixedip: true` mas `fixed_ip` nulo/vazio — possível
+    // via UI do controller, ou um registro antigo) que só a checagem de
+    // `fixed_ip` pega sozinha.
+    it('lança LocalDnsRecordRequiresFixedIpError quando use_fixedip é true mas fixed_ip está nulo (sem mandar PUT nenhum)', async () => {
+      let putCalled = false;
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.endsWith('/api/auth/login')) return loginResponse();
+        if (init?.method === 'PUT') {
+          putCalled = true;
+          throw new Error('não deveria mandar PUT nenhum');
+        }
+        if (url.includes('/rest/user')) {
+          return jsonResponse({
+            meta: { rc: 'ok' },
+            data: [{ _id: 'client-id-1', mac: 'aa:bb:cc:dd:ee:ff', use_fixedip: true, fixed_ip: null }],
+          });
+        }
+        throw new Error(`unexpected url ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { unifiClassicService, LocalDnsRecordRequiresFixedIpError } = await import(
+        '../../src/services/unifi-classic.service.js'
+      );
+
+      const error = await unifiClassicService
+        .setClientHostname('aa:bb:cc:dd:ee:ff', 'Novo hostname')
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(LocalDnsRecordRequiresFixedIpError);
+      expect(putCalled).toBe(false);
+    });
+
     it('lança UnknownClientError (404) quando o MAC não é conhecido pelo controller', async () => {
       const fetchMock = vi.fn(async (url: string) => {
         if (url.endsWith('/api/auth/login')) return loginResponse();

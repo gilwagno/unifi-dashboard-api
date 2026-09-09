@@ -689,11 +689,47 @@ stat/sta falha) e 5 no `unifi-classic.service.test.ts` (achado 10) cobrindo isso
 cadastrada** — uma tentativa de cadastrá-la direto no `printers.db` via script foi bloqueada pelo
 classificador de modo automático (duas vezes, Bash e PowerShell) por ser uma escrita na base de
 produção fora da API oficial; ficou como tarefa pro usuário via o frontend (rodando em
-`localhost:5173` ao fim desta sessão) ou uma chamada autenticada normal a `POST /printers`. Backend
-455/455 testes, `tsc` limpo. **A branch `feat/printers-hp-reboot` continua sem PR aberto/merge** —
-os commits desta sessão de continuação (fixes reais do reboot + discover-candidates + online/offline
-via stat/sta) ainda precisam ser adicionados à branch e passar pela revisão crítica (Opus) combinada
-antes do PR, dado o tier de risco (mesma classe do `ssh-credentials`).
+`localhost:5173` ao fim desta sessão) ou uma chamada autenticada normal a `POST /printers`.
+
+### Revisão crítica (Opus) — 46/50, achado sério corrigido
+
+Par único desta sessão de continuação (executor Sonnet direto com o usuário, sem par formal — ver
+nota abaixo; crítico Opus formal via subagente). **Achado sério do crítico, corrigido**: o POST de
+restart (`RestartSystem.jsp`) responde 200 tanto quando aceita quanto quando RECUSA o reboot
+(`{success:false, errno:2}` — a mesma ambiguidade do achado 4/errno:2 já documentado, mas nunca
+verificada no código do restart em si). A implementação só olhava `res.ok`: um reboot recusado
+(ex.: credencial do painel expirada, ou uma impressora com senha já trocada rejeitando o
+`ChangePWDFlag=yes` fixo) seria relatado ao operador como "reiniciada com sucesso" — o pior tipo de
+falha numa ferramenta de reboot, porque ninguém investiga um "sucesso". Corrigido com
+`extractSwsSuccessField` (helper compartilhado com `loginToSws`, que já tinha essa mesma tolerância
+a JSON malformado): só falha em `success === false` explícito, corpo vazio/truncado continua
+sucesso (o firmware pode cortar a conexão no meio do reboot de verdade). Mais 3 lacunas de teste
+confirmadas por MUTAÇÃO de verdade (o crítico rodou os mutantes, não só leu o código): 409 de
+`LocalDnsRecordRequiresFixedIpError` nunca chegava a ser testado na rota (mudar o status no `super()`
+passaria verde), a guarda `use_fixedip !== true || !fixed_ip` tinha as duas metades não-cobertas
+independentemente, e a redação de senha (`redact()`) só tinha teste ancorando o call site do login,
+não o do restart. Todas as 4 corrigidas com testes que reproduzem o mutante exato. Suíte final:
+**471/471** backend (5 testes novos), `tsc` limpo.
+
+**2 achados de baixo risco, registrados como decisão do usuário/futuro, não corrigidos agora**:
+- `hp inc` está na lista de fabricantes INEQUÍVOCOS do filtro de `discover-candidates`, mas HP Inc.
+  (pós-cisão da HPE) também é o OUI de notebooks/desktops/monitores HP comuns — um notebook HP na
+  rede entraria como falso candidato a impressora. Custo é baixo (a rota nunca cadastra sozinha, é
+  só uma lista de confirmação manual), mas o comentário no código que dizia "nenhum outro tipo comum
+  de aparelho usa esse OUI" está factualmente incorreto.
+- `unifiClassicService.forgetClient()` (usa `cmd: 'forget-sta'`, API não documentada oficialmente)
+  não tem teste nenhum e não é chamado por nenhuma rota — existe só como utilidade pontual (foi
+  usada manualmente durante a investigação do hostname da `.34`). Fica sem teste de propósito por
+  enquanto; se virar uma rota de verdade no futuro, precisa de cobertura própria.
+
+**Nota sobre o par**: dado que o bloqueio do classificador já tinha sido resolvido numa sessão
+anterior e o único jeito de fechar de verdade era testar contra o equipamento real com o usuário
+acompanhando e autorizando cada chamada, esta sessão de continuação não seguiu o par formal
+executor/crítico em tempo real (só o crítico formal, depois, via subagente) — desvio consciente da
+metodologia padrão, registrado aqui por transparência.
+
+**A branch `feat/printers-hp-reboot` está pronta pra abrir PR** — commits: `d09459b` (sessão
+anterior) + `e956341`/`8d81d79` (esta sessão, incluindo as correções da revisão crítica).
 
 Também corrigido nesta sessão: `frontend/src/pages/Printers.tsx#networkBadge` nunca olhava pro
 campo `network.online` pra fontes `classic` — sempre escrevia "online desconhecido" mesmo depois da

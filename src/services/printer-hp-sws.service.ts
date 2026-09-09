@@ -397,6 +397,50 @@ function extractSwsDataString(body: string, key: string): string | null {
   return match ? match[2] : null;
 }
 
+// ACHADO AO VIVO: o corpo do `login.jsp` NÃO é JSON estrito — é um literal
+// de objeto JavaScript, com as chaves SEM ASPAS
+// (`{success: true, passwordExpiration: false}`), confirmado repetidas
+// vezes contra a HP real. `JSON.parse` falha nisso sempre. Tenta `JSON.parse`
+// primeiro (cobre um firmware/dispositivo futuro que devolva JSON de
+// verdade) e só cai pro regex quando o parse falha — mesmo espírito de
+// `extractSwsDataString`: extrai só o campo que decide entre "entra" e "não
+// entra", sem tentar escrever um parser tolerante completo.
+//
+// ACHADO DO CRÍTICO (2026-09-09): `RestartSystem.jsp` tem a MESMA
+// ambiguidade que `login.jsp` já tinha — responde 200 tanto quando aceita o
+// restart quanto quando RECUSA (`{success:false, errno:2}`, confirmado ao
+// vivo na investigação do achado 4/errno:2 documentada no CLAUDE.md). Uma
+// implementação que só olhasse o status HTTP relataria "reiniciada com
+// sucesso" pra um reboot que a impressora recusou de verdade — daí este
+// helper ser compartilhado entre `loginToSws` e `rebootHpPrinter`, não só
+// do login.
+//
+// @returns `{ found: false }` quando o corpo está vazio, truncado, ou não
+//   contém o campo `success` de jeito nenhum (nem como JSON válido, nem como
+//   o literal sem aspas). `{ found: true, value }` caso contrário, com
+//   `value` no tipo CRU (não convertido pra boolean) — importante pro login,
+//   que precisa distinguir um `true` booleano de um valor truthy-mas-não-
+//   -`true` (ex.: a string `"false"`, ou o número `1`): ver o `it.each` de
+//   `loginToSws` que ancora essa distinção. Cada chamador decide o que fazer
+//   com `found: false` — o login exige um veredito claro (sem campo
+//   reconhecível, não dá pra confiar na sessão); o restart trata como
+//   sucesso, já que o firmware pode cortar a conexão no meio do reboot de
+//   verdade antes de terminar de escrever o corpo.
+function extractSwsSuccessField(body: string): { found: boolean; value: unknown } {
+  try {
+    // JSON válido conta como `found`, mesmo sem a chave `success` — o valor
+    // vem `undefined` nesse caso, e cada chamador decide o que fazer com
+    // isso (login: `undefined !== true` → recusa; restart: `undefined !==
+    // false` → não recusa). Só o caso "corpo nem é JSON nem contém o
+    // literal sem aspas" vira `found: false`.
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    return { found: true, value: parsed?.success };
+  } catch {
+    const match = /\bsuccess\s*:\s*(true|false)\b/.exec(body);
+    return match ? { found: true, value: match[1] === 'true' } : { found: false, value: undefined };
+  }
+}
+
 /**
  * Lê a identidade do dispositivo do arquivo estático `sws_data.js`.
  *
@@ -506,34 +550,22 @@ export async function loginToSws(
   }
 
   // A SWS responde 200 tanto no sucesso quanto na recusa da credencial — o
-  // que distingue os dois é o `success` do corpo, não o status HTTP.
-  //
-  // ACHADO AO VIVO: o corpo real do dispositivo NÃO é JSON estrito — é um
-  // literal de objeto JavaScript, com as chaves SEM ASPAS
-  // (`{success: true, passwordExpiration: false}`), confirmado repetidas
-  // vezes contra a HP real. `JSON.parse` falha nisso sempre — sem este
-  // fallback, o login nunca teria funcionado contra o dispositivo de
-  // verdade, mesmo com a credencial certa. Tenta `JSON.parse` primeiro
-  // (cobre um firmware/dispositivo futuro que devolva JSON de verdade) e só
-  // cai pro regex quando o parse falha — mesmo espírito de
-  // extractSwsDataString: extrai só o campo que decide entre "entra" e "não
-  // entra" no reboot, sem tentar escrever um parser tolerante completo.
-  let success: unknown;
-  try {
-    success = (JSON.parse(res.body) as { success?: unknown })?.success;
-  } catch {
-    const match = /\bsuccess\s*:\s*(true|false)\b/.exec(res.body);
-    if (!match) {
-      throw new PrinterSwsRequestError(
-        ipAddress,
-        `a resposta de ${LOGIN_PATH} não é JSON nem contém um campo "success" reconhecível`,
-        res.status,
-      );
-    }
-    success = match[1] === 'true';
+  // que distingue os dois é o `success` do corpo, não o status HTTP. Ver
+  // `extractSwsSuccessField` (helper compartilhado com `rebootHpPrinter` —
+  // achado do crítico: o restart tem a MESMA ambiguidade 200+success:false).
+  const successField = extractSwsSuccessField(res.body);
+  if (!successField.found) {
+    throw new PrinterSwsRequestError(
+      ipAddress,
+      `a resposta de ${LOGIN_PATH} não é JSON nem contém um campo "success" reconhecível`,
+      res.status,
+    );
   }
 
-  if (success !== true) {
+  // Comparação ESTRITA com `true` (não `!successField.value`) de propósito —
+  // ver o `it.each` de teste: um `success` truthy-mas-não-`true` (ex.: a
+  // string `"false"`) precisa ser tratado como recusa, não como sucesso.
+  if (successField.value !== true) {
     throw new PrinterSwsAuthenticationError(ipAddress, credentials.username);
   }
 
@@ -641,8 +673,26 @@ export async function rebootHpPrinter(
     throw new PrinterSwsRequestError(ipAddress, `POST ${REBOOT_PATH} devolveu status ${res.status}`, res.status);
   }
 
-  // Sucesso: a impressora reinicia imediatamente, então o corpo desta
-  // resposta não tem informação útil garantida (o firmware pode até cortar a
-  // conexão no meio). Status 2xx é o único sinal em que podemos confiar —
-  // não tentamos interpretar o corpo.
+  // ACHADO DO CRÍTICO (2026-09-09): status 2xx sozinho NÃO significa que a
+  // SWS aceitou o reboot — confirmado ao vivo (investigação do errno:2,
+  // documentada no CLAUDE.md) que `RestartSystem.jsp` responde 200 tanto
+  // quando aceita quanto quando RECUSA (`{success:false, errno:2}`, ex.: uma
+  // sessão que perdeu validade entre o login e o restart). A versão anterior
+  // deste código não olhava o corpo — um reboot recusado seria relatado ao
+  // operador como "reiniciada com sucesso", exatamente o tipo de falha
+  // silenciosa que este projeto trata como bug sério (mesma classe dos
+  // achados de "invisibilidade silenciosa" de outras subtarefas).
+  //
+  // Só falha em `success === false` explícito — corpo vazio/truncado/sem o
+  // campo (`found: false`) continua sendo tratado como sucesso, porque a
+  // impressora pode legitimamente cortar a conexão no meio do reboot de
+  // verdade antes de terminar de escrever a resposta.
+  const successField = extractSwsSuccessField(res.body);
+  if (successField.found && successField.value === false) {
+    throw new PrinterSwsRequestError(
+      ipAddress,
+      `${REBOOT_PATH} recusou o reboot (success:false) — verifique se a credencial do painel ainda é válida`,
+      res.status,
+    );
+  }
 }

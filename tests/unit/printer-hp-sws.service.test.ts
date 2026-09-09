@@ -570,6 +570,67 @@ describe('rebootHpPrinter', () => {
     expect(error).toBeInstanceOf(PrinterSwsRequestError);
     expect((error as PrinterSwsRequestError).status).toBe(403);
   });
+
+  // ACHADO DO CRÍTICO (2026-09-09) — o bug mais sério encontrado nesta
+  // sessão: RestartSystem.jsp responde 200 tanto quando aceita quanto
+  // quando RECUSA o reboot (`{success:false, errno:2}`, confirmado ao vivo
+  // na investigação do achado 4/errno:2 do CLAUDE.md). A implementação
+  // original só olhava `res.ok` — um reboot recusado seria relatado ao
+  // operador como "reiniciada com sucesso". Este teste falharia (silêncio
+  // enganoso) se essa checagem for removida.
+  it('lança PrinterSwsRequestError quando o restart responde 200 mas com success:false (reboot RECUSADO)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (String(url).endsWith('/sws/data/sws_data.js')) return fakeResponse(200, swsDataBody());
+        if (String(url).endsWith('/login.jsp')) return loginOkResponse();
+        return fakeResponse(200, '{success:false, errors: {}, errno: 2}');
+      }),
+    );
+
+    const error = await rebootHpPrinter(IP, '50:81:40:d8:6c:7e', CREDENTIALS).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PrinterSwsRequestError);
+    expect((error as PrinterSwsRequestError).status).toBe(200);
+  });
+
+  // Contraparte do teste acima: o firmware pode legitimamente cortar a
+  // conexão no meio de um reboot ACEITO, antes de terminar de escrever o
+  // corpo — um corpo vazio/sem campo `success` reconhecível não pode virar
+  // erro, senão todo reboot bem-sucedido de verdade quebraria.
+  it('resolve normalmente quando o restart responde 200 com corpo vazio (firmware cortou a conexão de verdade)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (String(url).endsWith('/sws/data/sws_data.js')) return fakeResponse(200, swsDataBody());
+        if (String(url).endsWith('/login.jsp')) return loginOkResponse();
+        return fakeResponse(200, '');
+      }),
+    );
+
+    await expect(rebootHpPrinter(IP, '50:81:40:d8:6c:7e', CREDENTIALS)).resolves.toBeUndefined();
+  });
+
+  // ACHADO DO CRÍTICO (2026-09-09): a redação de senha (ver "SEGURANÇA" em
+  // loginToSws acima) só tinha teste ancorando o call site do login — o
+  // POST de restart TAMBÉM manda a senha na lista de redactions
+  // (`[credentials.password]`), mas nada provava isso. Sem este teste, quem
+  // remover essa redação do call site do restart (ao contrário do login)
+  // passaria com a suíte inteira verde.
+  it('SEGURANÇA: a senha também não aparece em erro nativo derivado do POST de restart', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (String(url).endsWith('/sws/data/sws_data.js')) return fakeResponse(200, swsDataBody());
+        if (String(url).endsWith('/login.jsp')) return loginOkResponse();
+        throw new Error(`falha ao enviar corpo contendo ${CREDENTIALS.password}`);
+      }),
+    );
+
+    const error = await rebootHpPrinter(IP, '50:81:40:d8:6c:7e', CREDENTIALS).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PrinterSwsUnreachableError);
+    expect((error as Error).message).not.toContain(CREDENTIALS.password);
+    expect((error as Error).message).toContain('[REDACTED]');
+  });
 });
 
 describe('timeout de requisição', () => {

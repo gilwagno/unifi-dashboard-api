@@ -541,6 +541,31 @@ describe('PATCH /clients/:mac/hostname', () => {
     await app.close();
   });
 
+  // ACHADO DO CRÍTICO (2026-09-09): `LocalDnsRecordRequiresFixedIpError`
+  // (unifi-classic.service.ts) existe especificamente pra esta rota, mas
+  // nenhum teste confirmava que o 409 chegava até o cliente HTTP — mudar o
+  // `super(409, ...)` pra qualquer outro status passaria com a suíte
+  // inteira verde (o erro handler central cairia no fallback 502 sem
+  // ninguém notar).
+  it('retorna 409 quando o cliente não tem IP fixo habilitado (LocalDnsRecordRequiresFixedIpError)', async () => {
+    const { app, token } = await authedApp();
+    vi.mocked(unifiClassicService.setClientHostname).mockRejectedValueOnce(
+      new UniFiClassicApiError(409, 'Cliente aa:bb:cc:dd:ee:ff precisa ter IP fixo habilitado'),
+    );
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/clients/aa:bb:cc:dd:ee:ff/hostname',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { hostname: 'Novo hostname' },
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().details).toContain('IP fixo');
+
+    await app.close();
+  });
+
   it('rejeita hostname vazio', async () => {
     const { app, token } = await authedApp();
 
