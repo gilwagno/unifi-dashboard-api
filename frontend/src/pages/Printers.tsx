@@ -716,30 +716,48 @@ export function Printers() {
 
   // Painel de saúde da frota — visão de conjunto que ninguém tinha antes
   // (cada impressora só existia como card isolado na lista). Cruza a lista
-  // (`printers`, status de rede) com os consumíveis já buscados de
+  // (`printers`, status de rede) com os consumíveis já buscados
   // antecipadamente para o medidor da linha (`tonerLevelsGauge` acima) —
   // nenhuma chamada nova, só agregação do que já está em memória.
-  // "Precisa de atenção" unifica 3 sinais bem diferentes (offline, toner
-  // baixo, nunca coletado) num único número acionável, porque pra quem
-  // administra a frota o que importa não é a causa técnica exata, é "quantas
-  // eu preciso olhar agora" — o detalhe de qual sinal foi continua disponível
-  // em cada card.
+  //
+  // "Precisa de atenção" identifica CADA impressora com pelo menos um dos 3
+  // sinais (offline, toner baixo, nunca coletada) e guarda o(s) motivo(s)
+  // por impressora — achado do próprio usuário testando ao vivo: um número
+  // sozinho ("1") sem dizer QUAL impressora e POR QUÊ obriga a abrir cada
+  // card pra descobrir, o oposto do que um painel de resumo deveria fazer.
   const fleetStats = useMemo(() => {
     if (!printers) return null;
     const online = printers.filter((p) => p.network.online === true).length;
     const offline = printers.filter((p) => p.network.online === false).length;
-    const withLowSupply = new Set(
-      printers.filter((p) => consumables[p.id]?.supplies.some((s) => s.status === 'low')).map((p) => p.id),
-    );
-    const neverCollected = new Set(
-      printers.filter((p) => consumables[p.id] && consumables[p.id]!.collectedAt === null).map((p) => p.id),
-    );
-    const offlineIds = new Set(printers.filter((p) => p.network.online === false).map((p) => p.id));
-    const needsAttention = new Set([...withLowSupply, ...neverCollected, ...offlineIds]).size;
+
+    const attentionDetails = printers
+      .map((printer) => {
+        const reasons: string[] = [];
+        if (printer.network.online === false) reasons.push('offline');
+        if (consumables[printer.id]?.supplies.some((s) => s.status === 'low')) reasons.push('toner baixo');
+        if (consumables[printer.id] && consumables[printer.id]!.collectedAt === null) reasons.push('sem leitura SNMP');
+        return reasons.length > 0 ? { name: printer.name, reasons } : null;
+      })
+      .filter((detail): detail is { name: string; reasons: string[] } => detail !== null);
+
     const totalPages = printers.reduce((sum, p) => sum + (consumables[p.id]?.pageCount ?? 0), 0);
     const pagesKnownFor = printers.filter((p) => consumables[p.id]?.pageCount !== undefined && consumables[p.id]?.pageCount !== null).length;
-    return { total: printers.length, online, offline, needsAttention, totalPages, pagesKnownFor };
+    return { total: printers.length, online, offline, attentionDetails, totalPages, pagesKnownFor };
   }, [printers, consumables]);
+
+  // Texto do StatCard "Precisa de atenção" — nome(s) + motivo(s), não um
+  // aviso genérico. Lista até 2 impressoras por extenso; com mais, resume
+  // ("+N impressoras") pra não estourar o card, mas o número no valor do
+  // card já conta o total certo em qualquer caso.
+  const attentionTrend = (() => {
+    if (!fleetStats || fleetStats.attentionDetails.length === 0) return 'tudo em dia';
+    const named = fleetStats.attentionDetails
+      .slice(0, 2)
+      .map((d) => `${d.name} (${d.reasons.join(', ')})`)
+      .join(' · ');
+    const extra = fleetStats.attentionDetails.length - 2;
+    return extra > 0 ? `${named} +${extra} impressora${extra > 1 ? 's' : ''}` : named;
+  })();
 
   return (
     <Layout title="Manutenção">
@@ -779,13 +797,9 @@ export function Printers() {
           />
           <StatCard
             label="Precisa de atenção"
-            value={fleetStats.needsAttention}
-            trend={
-              fleetStats.needsAttention === 0
-                ? 'tudo em dia'
-                : 'offline, toner baixo ou sem leitura — veja os cards abaixo'
-            }
-            trendTone={fleetStats.needsAttention === 0 ? 'success' : 'danger'}
+            value={fleetStats.attentionDetails.length}
+            trend={attentionTrend}
+            trendTone={fleetStats.attentionDetails.length === 0 ? 'success' : 'danger'}
             icon={<AlertTriangle className="h-3.5 w-3.5 text-[oklch(55%_0.18_60)]" strokeWidth={2} />}
             iconBg="oklch(95% 0.06 60 / 0.5)"
           />
