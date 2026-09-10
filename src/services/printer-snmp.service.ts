@@ -309,15 +309,36 @@ export function computeLevelPercent(
 // Brother reais não têm esse sufixo). Âncora no fim da string (`$`) porque é
 // assim que o padrão observado sempre aparece — evita casar um "S/N:" que
 // por acaso apareça no meio de um nome de suprimento diferente.
-const SUPPLY_SERIAL_PATTERN = /\bS\/N:\s*(\S+)\s*$/i;
+//
+// Endurecimento (achado 3 da revisão crítica, não confirmado contra
+// hardware real): o valor capturado exclui explicitamente caracteres de
+// controle (`\x00-\x1f`, inclusive NUL) além de espaço em branco comum —
+// `\S` sozinho não filtra NUL, então um firmware que preenchesse a
+// description com padding NUL depois do serial (nunca observado nas 5
+// impressoras reais, mas nenhuma garantia contra isso) faria o NUL entrar
+// no valor de `serialNumber`. A cauda `[\s\x00-\x1f]*$` continua aceitando
+// esse padding depois do serial, só não deixando ele fazer parte do valor.
+const SUPPLY_SERIAL_PATTERN = /\bS\/N:\s*([^\s\x00-\x1f]+)[\s\x00-\x1f]*$/i;
 
 export function parseSupplyDescription(description: string | null): {
   name: string | null;
   serialNumber: string | null;
 } {
   if (description === null) return { name: null, serialNumber: null };
+
   const match = SUPPLY_SERIAL_PATTERN.exec(description);
-  if (!match) return { name: description, serialNumber: null };
+  if (!match) {
+    // Achado 2 da revisão crítica: o ramo sem "S/N:" não aparava espaço
+    // nem tratava string vazia/só-espaço como ausente — duas descriptions
+    // da MESMA leitura podiam receber tratamento de espaço diferente
+    // (uma com sufixo "S/N:" já era aparada, a outra não), e uma
+    // description vazia virava um rótulo vazio na UI em vez de cair no
+    // fallback (`typeLabel`/"Suprimento <index>") como já acontece quando
+    // description é `null`.
+    const trimmed = description.trim();
+    return { name: trimmed.length > 0 ? trimmed : null, serialNumber: null };
+  }
+
   const name = description.slice(0, match.index).trim();
   return { name: name.length > 0 ? name : null, serialNumber: match[1] };
 }

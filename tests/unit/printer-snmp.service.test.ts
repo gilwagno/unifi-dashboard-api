@@ -362,6 +362,39 @@ describe('parseSupplyDescription', () => {
       serialNumber: null,
     });
   });
+
+  // Achado 2 da revisão crítica: o ramo SEM "S/N:" não aparava espaço nem
+  // tratava vazio/só-espaço como ausente — duas descriptions da MESMA
+  // leitura podiam receber tratamento de espaço diferente (uma com "S/N:"
+  // já saía aparada, a outra não).
+  it('apara espaço também no ramo sem "S/N:" (mesmo tratamento do ramo com serial)', () => {
+    expect(parseSupplyDescription('  Black Toner Cartridge  ')).toEqual({
+      name: 'Black Toner Cartridge',
+      serialNumber: null,
+    });
+  });
+
+  it('description vazia ou só espaço (sem "S/N:") vira name null — cai no fallback (typeLabel/índice), não um rótulo vazio na UI', () => {
+    expect(parseSupplyDescription('')).toEqual({ name: null, serialNumber: null });
+    expect(parseSupplyDescription('   ')).toEqual({ name: null, serialNumber: null });
+  });
+
+  // Achado 3 da revisão crítica (endurecimento, não confirmado contra
+  // hardware real): caracteres de controle (NUL etc.) não são `\s`, então
+  // `\S+` sozinho os deixaria entrar no valor do serial.
+  it('exclui caracteres de controle (NUL) do valor do serial, mesmo como padding no fim', () => {
+    expect(parseSupplyDescription('Black Toner S/N:ABC\u0000')).toEqual({
+      name: 'Black Toner',
+      serialNumber: 'ABC',
+    });
+  });
+
+  it('continua tolerando espaço em branco de verdade (tab/CR/LF) como padding no fim do serial', () => {
+    expect(parseSupplyDescription('Black Toner S/N:ABC\t\r\n')).toEqual({
+      name: 'Black Toner',
+      serialNumber: 'ABC',
+    });
+  });
 });
 
 describe('supplyDisplayName', () => {
