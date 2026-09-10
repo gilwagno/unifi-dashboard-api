@@ -21,12 +21,13 @@ vi.mock('../lib/api', async (importOriginal) => {
       rebootPrinter: vi.fn(),
       getPrinterConsumables: vi.fn(),
       setClientAlias: vi.fn(),
+      changeAdminPassword: vi.fn(),
     },
     getAccessToken: () => null,
   };
 });
 
-import { api, ApiError } from '../lib/api';
+import { AdminPasswordAmbiguousError, api, ApiError } from '../lib/api';
 
 function renderPrinters() {
   return render(
@@ -557,6 +558,79 @@ describe('Printers page', () => {
     await user.click(screen.getByRole('button', { name: /Reiniciar remotamente/ }));
 
     expect(await screen.findByText('Credencial do painel web não configurada')).toBeInTheDocument();
+  });
+
+  // --- Troca de senha de admin do painel web (HP/SWS) ---
+
+  it('troca a senha de admin só após confirmar, e mostra a credencial nova pra copiar', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    vi.mocked(api.changeAdminPassword).mockResolvedValue({
+      username: 'admin',
+      password: 'senha-gerada-forte',
+      ipAddress: '172.16.0.89',
+      ipOrigin: 'override',
+    });
+
+    const user = userEvent.setup();
+    renderPrinters();
+    await screen.findByText('HPLaserMFP135w');
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    await user.click(screen.getByRole('button', { name: /Trocar senha de admin/ }));
+    await user.click(screen.getByRole('button', { name: 'Confirmar troca' }));
+    expect(api.changeAdminPassword).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValue(true);
+    await user.click(screen.getByRole('button', { name: 'Confirmar troca' }));
+
+    await waitFor(() => expect(api.changeAdminPassword).toHaveBeenCalledWith('p1', { username: undefined, password: undefined }));
+    expect(await screen.findByText('senha-gerada-forte')).toBeInTheDocument();
+    expect(screen.getByText(/Senha trocada e confirmada/)).toBeInTheDocument();
+  });
+
+  // ACHADO DO CRÍTICO no backend (2026-09-10): num estado AMBÍGUO, a
+  // credencial TENTADA é a única cópia que existe (o cadastro não foi
+  // atualizado). Sem este teste, a tela poderia simplesmente tratar isso
+  // como "erro comum" e perder o valor no `.catch()`, exatamente o cenário
+  // que motivou a correção no backend.
+  it('mostra a credencial TENTADA (não perde) quando a verificação por relogin fica ambígua', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    vi.mocked(api.changeAdminPassword).mockRejectedValue(
+      new AdminPasswordAmbiguousError(
+        'A SWS respondeu sucesso, mas o login com a nova falhou',
+        'admin',
+        'senha-que-pode-ter-colado',
+        '172.16.0.89',
+        'override',
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderPrinters();
+    await screen.findByText('HPLaserMFP135w');
+
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await user.click(screen.getByRole('button', { name: /Trocar senha de admin/ }));
+    await user.click(screen.getByRole('button', { name: 'Confirmar troca' }));
+
+    expect(await screen.findByText('senha-que-pode-ter-colado')).toBeInTheDocument();
+    expect(screen.getByText(/NÃO FOI POSSÍVEL CONFIRMAR/)).toBeInTheDocument();
+    expect(screen.getByText(/cadastro NÃO foi atualizado/)).toBeInTheDocument();
+  });
+
+  it('mostra o erro da API (não a credencial) quando a troca falha de forma comum (ex.: 403)', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    vi.mocked(api.changeAdminPassword).mockRejectedValue(new ApiError(403, 'Credencial ATUAL do painel web recusada'));
+
+    const user = userEvent.setup();
+    renderPrinters();
+    await screen.findByText('HPLaserMFP135w');
+
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await user.click(screen.getByRole('button', { name: /Trocar senha de admin/ }));
+    await user.click(screen.getByRole('button', { name: 'Confirmar troca' }));
+
+    expect(await screen.findByText('Credencial ATUAL do painel web recusada')).toBeInTheDocument();
   });
 
   it('envia wbmCredentials no cadastro quando usuário e senha do painel são informados', async () => {

@@ -284,6 +284,47 @@ export interface PrinterConsumablesResponse {
   supplies: PrinterConsumableSupply[];
 }
 
+// Resultado de POST /printers/:id/admin-password no caminho de SUCESSO — a
+// ÚNICA vez que a senha nova aparece em texto puro em qualquer resposta desta
+// API (mesmo padrão de `rotateSshCredentials`, ver Security.tsx).
+export interface PrinterAdminPasswordResult {
+  username: string;
+  password: string;
+  ipAddress: string;
+  ipOrigin: 'override' | 'integration' | 'classic';
+}
+
+// A rota pode responder 502 num estado AMBÍGUO — o POST de escrita real já
+// foi despachado pra impressora e não deu pra confirmar se colou (ver
+// PrinterSwsPasswordVerificationError no backend). Nesse caso o corpo da
+// resposta carrega a ÚNICA cópia existente da credencial tentada
+// (`attemptedUsername`/`attemptedPassword`) — se o `request()` genérico
+// tratasse isso como um erro comum, esse valor se perderia pra sempre no
+// `.catch()` do chamador, exatamente o cenário que motivou o crítico a
+// devolvê-lo. Por isso `changeAdminPassword` lança esta classe própria em vez
+// de um `ApiError` genérico.
+export class AdminPasswordAmbiguousError extends ApiError {
+  attemptedUsername: string;
+  attemptedPassword: string;
+  ipAddress: string;
+  ipOrigin: 'override' | 'integration' | 'classic';
+
+  constructor(
+    message: string,
+    attemptedUsername: string,
+    attemptedPassword: string,
+    ipAddress: string,
+    ipOrigin: 'override' | 'integration' | 'classic',
+  ) {
+    super(502, message);
+    this.name = 'AdminPasswordAmbiguousError';
+    this.attemptedUsername = attemptedUsername;
+    this.attemptedPassword = attemptedPassword;
+    this.ipAddress = ipAddress;
+    this.ipOrigin = ipOrigin;
+  }
+}
+
 export interface Pagination {
   page: number;
   pageSize: number;
@@ -493,4 +534,43 @@ export const api = {
       `/printers/${id}/reboot`,
       { method: 'POST' },
     ),
+
+  // Troca a senha de admin do painel SWS (HP) — a ação de MAIOR risco desta
+  // API (ver docblock da rota no backend). NÃO usa o `request()` genérico:
+  // no 502 ambíguo (`persisted: false`), o corpo carrega a credencial
+  // TENTADA — a única cópia que existe se a troca real tiver colado sem
+  // confirmação —, e `request()` descartaria esses campos extras ao montar
+  // só a `message` do `ApiError`. Aqui o corpo é lido primeiro, e só then
+  // decidimos: sucesso, ambíguo (erro especial com a credencial junto), ou
+  // erro comum.
+  async changeAdminPassword(
+    id: string,
+    opts: { username?: string; password?: string } = {},
+  ): Promise<PrinterAdminPasswordResult> {
+    const res = await fetch(`${BASE_URL}/printers/${id}/admin-password`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      },
+      body: JSON.stringify(opts),
+    });
+    const body = await res.json().catch(() => ({}));
+
+    if (res.status === 502 && body?.persisted === false && typeof body.attemptedPassword === 'string') {
+      throw new AdminPasswordAmbiguousError(
+        body.details ?? body.error ?? 'Não foi possível confirmar a troca de senha',
+        body.attemptedUsername,
+        body.attemptedPassword,
+        body.ipAddress,
+        body.ipOrigin,
+      );
+    }
+    if (!res.ok) {
+      const detail =
+        typeof body.details === 'string' ? body.details : body.details ? JSON.stringify(body.details) : undefined;
+      throw new ApiError(res.status, [body.error ?? res.statusText, detail].filter(Boolean).join(': '));
+    }
+    return body as PrinterAdminPasswordResult;
+  },
 };
