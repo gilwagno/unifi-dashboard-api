@@ -27,9 +27,13 @@ antes do resto por serem pequenos, genuínos, e pré-requisito direto do que vem
    `RATE_LIMIT_CLIENT_ACTION_MAX` como as demais rotas de escrita dos mesmos arquivos, caem
    no limite global (100/min) em vez do restrito (10/min). Corrigir por consistência antes
    de replicar o padrão de rotas no módulo de AD.
-3. **Senha em branco no admin da HP (SWS)** — decisão já fechada anteriormente como "não
-   implementado por enquanto" (ver Onda 2 abaixo). Só reafirmando que vale reconsiderar a
-   prioridade agora que o dashboard vai ganhar ainda mais poder de administração.
+3. ✅ **RESOLVIDO em 2026-09-10.** Senha em branco no admin da HP (SWS) — reaberta por pedido
+   explícito do usuário (item 11 da Onda 2 tinha sido fechado em 2026-09-08 como "não implementado",
+   ver detalhe completo na seção "Troca de senha de admin da HP: reaberta e confirmada ao vivo"
+   no fim deste arquivo). Implementada (`changeHpAdminPassword`, `POST /printers/:id/admin-password`)
+   e testada ao vivo ponta a ponta contra as DUAS HPs reais — as duas saíram do padrão de fábrica
+   (usuário `admin`/senha em branco) para uma senha real definitiva, cada troca verificada por
+   relogin antes de persistir.
 
 ## Onda 2 (Módulo de Manutenção de Impressoras) — CONCLUÍDA — iniciada 2026-08-31, fechada 2026-09-08
 
@@ -37,7 +41,8 @@ Todas as subtarefas de código planejadas foram aprovadas (47-48/50 cada), revis
 executor/crítico e mergeadas em `master` (squash) — CRUD/status/reconnect/IP fixo (PR #5), poller
 SNMP + consumíveis (PRs #5/#9), diagnostics (PR #11), agenda de manutenção (PR #12), alias (PR #7),
 frontend (PR #10) e e2e (PR #13). Subtarefa 11 (trocar senha de admin dos painéis web) foi FECHADA
-por decisão explícita do usuário — não implementada, não é uma pendência. Subtarefa 12 (histórico
+por decisão explícita do usuário nesta data — **reaberta e implementada depois, em 2026-09-09/10,
+só para a família HP/SWS; ver a seção própria no fim deste arquivo.** Subtarefa 12 (histórico
 de leituras SNMP) segue em aberto por ser opcional; retomar só se o usuário pedir. Ver "Progresso da
 Onda 2" abaixo para o detalhe de cada subtarefa e achados, e `docs/printers-snmp-research.md` para a
 pesquisa técnica completa (SNMP, OIDs, achados por fabricante, investigação dos painéis WBM/SWS).
@@ -232,11 +237,11 @@ iPhone, um Watch e um Redmi antes).
 10. ✅ **Spike: otimização (Sleep Time/Auto Power Off da Brother) + reboot HP + trocar hostname
     real da impressora (achado 9)** — investigação dedicada contra as impressoras reais. Concluído
     em 2026-09-08, ver item 10 do "Progresso da Onda 2" abaixo.
-11. ❌ **FECHADO por decisão do usuário (2026-09-08), não será implementado.** Trocar senha de
-    admin dos painéis web (WBM Brother + SWS HP) — achado 7. Requer par com Opus (risco alto,
-    credencial mestra sem leitura possível). Usuário decidiu explicitamente não trocar a senha via
-    automação — item considerado concluído/encerrado como está, não uma pendência. Não redescobrir
-    nem reabrir sem pedido explícito novo.
+11. ✅ **REABERTA por pedido explícito do usuário em 2026-09-09/10 (estava fechada desde
+    2026-09-08 — ver histórico abaixo) e IMPLEMENTADA só para a família HP (SWS)**; WBM da Brother
+    segue sem implementação (não foi pedida na reabertura). Ver a seção própria "Troca de senha de
+    admin da HP: reaberta e confirmada ao vivo" no fim deste arquivo para o detalhe completo
+    (protocolo, achados dos testes, e o resultado real contra as 2 HPs de produção).
 12. ✅ Histórico de leituras SNMP — **47/50**. Implementado em 2026-09-08 (decisão do usuário de
     retomar o item opcional). **Mergeada em `master`** (commit `5c9b4f1`) — esta linha estava
     desatualizada dizendo "PR a abrir"; corrigido em 2026-09-09.
@@ -244,6 +249,10 @@ iPhone, um Watch e um Redmi antes).
     2026-08-31** (fazia parte do "Marco: subtarefas 1-8" no topo deste arquivo — esta linha
     numerada estava sem o status marcado; corrigido em 2026-09-08).
 14. ✅ e2e — **47/50**. PR #13, mergeada em 2026-09-08.
+19. 🔍 **Detalhamento de consumíveis SNMP** (serial de cartucho, fusor/rolos, quebra de contadores,
+    power-on count) — investigação concluída em 2026-09-10, implementação ainda não iniciada. Ver
+    item 19 do "Progresso da Onda 2" abaixo e `docs/printers-snmp-research.md`, seção "Investigação
+    SNMP aprofundada — contadores detalhados, vida de fusor/rolos, serial por cartucho".
 
 Regra de alocação de modelo: CRUD/merge simples = Sonnet nos dois papéis (diversidade). Qualquer
 coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel do par em Opus.
@@ -354,8 +363,9 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
     - Nota operacional: o classificador de modo automático do Claude Code bloqueou a mesma
       navegação 2x numa sessão anterior no mesmo dia, e não bloqueou nesta retomada — não é
       determinístico, não assumir que ficou liberado permanentemente.
-11. ❌ Trocar senha de admin dos painéis web — **FECHADO por decisão do usuário (2026-09-08), não
-    será implementado.** Ver item 11 da "Ordem de subtarefas" acima.
+11. ✅ Trocar senha de admin dos painéis web (só HP/SWS) — **REABERTA e IMPLEMENTADA em
+    2026-09-09/10.** Ver item 11 da "Ordem de subtarefas" acima e a seção própria no fim deste
+    arquivo.
 14. ✅ e2e — **47/50**. PR #13, mergeada em 2026-09-08. Fluxo real completo pela UI:
     cadastra impressora (MAC = `SEEDED_CLIENT.mac`, exercita merge de status de rede de verdade),
     confere consumíveis ("nunca coletado" — esperado, sem SNMP real no e2e), renomeia apelido no
@@ -508,6 +518,62 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
     Suíte final: backend 441/441 (36 arquivos), frontend 57/57 (8 arquivos), `tsc` limpo nos dois.
     **Confirmado nas duas rodadas (executor e crítico): nenhuma chamada de rede real foi feita
     contra qualquer impressora real durante todo o desenvolvimento e revisão.**
+19. 🔍 **Detalhamento de consumíveis SNMP** (serial de cartucho, fusor/rolos, quebra de contadores,
+    power-on count) — **investigação concluída em 2026-09-10, implementação PENDENTE.** Motivada por
+    prints reais do painel SWS da HP mostrados pelo usuário (tela de cartucho com Status/Restante/
+    Impressão/Capacidade/Número de série, tela "Contadores de uso" com quebra Imprimir/Copiar/
+    Relatório/Envio, tela de Configurações com "Nível de alerta de pouco toner"). Achados (todos via
+    SNMP GET/GETNEXT real, `community=public`, só leitura, contra as 2 HPs e as 3 Brothers
+    cadastradas — nenhuma chamada de escrita, `printers.db` não tocado):
+    a) **Serial do cartucho já é coletado hoje, só não separado do nome.** `prtMarkerSuppliesDescription`
+       (`1.3.6.1.2.1.43.11.1.1.6.1.1`) devolve `"Black Toner S/N:CRUM-210729A5BB3"` (HP `.89`) e
+       `"Black Toner S/N:CRUM-210322AAFD5"` (HP `.34` — bate com o serial já visto na investigação
+       anterior da SWS). Como `toConsumablesResponse` usa essa descrição crua como `name`, o dado já
+       chega ao frontend hoje, só embutido na string. Brother não tem serial nesse campo.
+    b) **Fusor/rolo de transferência/rolo captador já são coletados hoje — mascarados por bug de
+       firmware, não por lacuna do poller.** As 2 HPs expõem 6 linhas em `prtMarkerSuppliesTable`
+       (não só toner): Transfer Roller, Fuser Life, Pick-up Roller, ADF Roller, ADF Rubber Pad — o
+       poller já lê as 6. As 3 primeiras reportam `level=143065` com `maxCapacity=100` (unidade
+       "percent") nas DUAS HPs — o mesmo bug de firmware já documentado em 2026-08-31, agora
+       reconfirmado numa 2ª unidade física. Nenhum OID alternativo (padrão ou HP privado) dá um
+       percentual coerente pra essas 3 — não é algo pra "corrigir" no poller, é o firmware mesmo.
+       Brother não tem nenhuma dessas linhas (só toner/drum/waste-toner/correia).
+    c) **Quebra de contadores (Imprimir/Copiar/Relatório/Envio) existe, mas numa MIB privada Samsung
+       não documentada oficialmente** (`1.3.6.1.4.1.236.11.5.11.53.11.2.1`, só responde nas HPs — a
+       SWS é firmware de origem Samsung, achado já registrado antes). 2 valores bateram EXATAMENTE
+       com os números do print do usuário (4143 = Copiar, 50 = Relatório) — indício forte de que é a
+       tabela certa, mas o mapeamento coluna→categoria foi inferido por posição/correlação numérica,
+       NUNCA confirmado por um rótulo que o próprio dispositivo devolvesse. **Não expor como dado
+       "oficial" sem uma sondagem nova que cruze contra a tela HTTP da SWS no mesmo instante.**
+    d) **Threshold de alerta de toner do painel (1-30%, tela Configurações) NÃO encontrado via SNMP**
+       — busca completa na MIB padrão e na árvore privada Samsung, sem candidato que desse pra
+       confirmar contra um valor de referência conhecido. Registrado como não encontrado, não como
+       "provavelmente é o OID X" — este projeto trata suposição não verificada como pior que admitir
+       a lacuna.
+    e) **Achado extra, campo novo genuíno**: `prtMarkerPowerOnCount` (`1.3.6.1.2.1.43.10.2.1.5.1.1`,
+       OID PADRÃO RFC 3805, sem MIB privada) responde nas 5 impressoras (HP `.89`=24, Brother
+       `.222`=226) e HOJE NÃO é lido pelo poller — candidato simples a novo campo em
+       `/printers/:id/diagnostics`.
+
+    **Proposta de escopo pra quando esta subtarefa for implementada** (não iniciado, par
+    executor/crítico ainda não formado):
+    - (a)/(b)/(c-exposição-como-hoje)/(e) são leitura pura reaproveitando dado já coletado ou um OID
+      padrão novo — mesmo tier de risco das subtarefas 6/7 (Sonnet nos dois papéis serve).
+    - Extrair `serialNumber` de `prtMarkerSuppliesDescription` via regex (`S/N:(.+)$`) em vez de
+      deixar embutido em `name` — parsing simples, baixo risco.
+    - As 5 linhas de fusor/rolo já aparecem em `/consumables` hoje com `status: 'not-measured'`
+      (comportamento correto dado o bug de firmware) — se o pedido for só melhorar a exibição no
+      frontend, não precisa mudar nada na coleta.
+    - Ler `prtMarkerPowerOnCount` é um campo novo no poller + exposição em `/diagnostics`.
+    - **Antes de expor a quebra Imprimir/Copiar/Relatório/Envio (achado c) como dado confiável**:
+      exigir uma sondagem adicional que confirme a semântica das colunas contra a tela real da SWS no
+      mesmo instante — qualquer par que avance nisso sem essa confirmação estaria repetindo o mesmo
+      erro que este projeto já tratou como grave outras vezes (apresentar inferência como fato). Por
+      lidar com semântica de MIB privada não documentada, exposta como se fosse dado confiável ao
+      usuário final, **pelo menos um papel do par em Opus** (mesma regra já usada pra segredo
+      SNMP/poller).
+    - Threshold de alerta (achado d): não implementar leitura nenhuma sem uma nova sondagem que ache
+      um candidato de verdade — não inventar/supor um OID.
 
 **Nota sobre rate limit do Opus**: bateu o limite durante a subtarefa 2, voltou a funcionar antes
 da subtarefa 3 terminar. Se acontecer de novo numa subtarefa futura, o padrão que funcionou foi:
@@ -555,8 +621,11 @@ Pendências reais conhecidas nesta data:
    inequívoco no `discover-candidates`) — **corrigido em 2026-09-09**, movido pra categoria
    ambígua.
 
-Nenhuma pendência de código conhecida no momento. Se este arquivo disser o contrário numa sessão
-futura sem que o `git log` confirme, desconfiar do arquivo, não do código.
+Nenhuma pendência de código conhecida no momento (a lista acima é de 2026-09-09; ver
+"Troca de senha de admin da HP: reaberta e confirmada ao vivo" no fim deste arquivo pro que mudou
+depois — subtarefa 11 reaberta, implementada, testada ao vivo, ainda **sem commit/PR** até a
+próxima sessão decidir isso). Se este arquivo disser o contrário numa sessão futura sem que o
+`git log` confirme, desconfiar do arquivo, não do código.
 
 ## Decisão do gate humano (respondida em 2026-08-31) — IMPLEMENTADO em 2026-09-08
 
@@ -853,6 +922,117 @@ do usuário: aceitar como está.** O nome certo já aparece nos dois lugares que
 a coluna "Nome" da listagem principal (via Apelido) e o campo "Registro DNS Local" do painel do
 cliente. Não é mais uma pendência; não reabrir sem um motivo novo e concreto (ex: suporte oficial da
 Ubiquiti confirmando alguma outra forma de mudar aquele campo específico).
+
+## Troca de senha de admin da HP: reaberta e confirmada ao vivo (2026-09-10)
+
+Nova queda de energia interrompeu a sessão anterior no meio da subtarefa 11 (reaberta a pedido do
+usuário depois de fechada em 2026-09-08). O código (`changeHpAdminPassword`/`fetchAdminSettings`/
+`makeSwsData` em `printer-hp-sws.service.ts`, rota `POST /printers/:id/admin-password`) já estava
+quase pronto, sem commit — protocolo real documentado no topo da seção correspondente do serviço
+(payload capturado ao vivo, cifra Ext1/AES no campo de senha via `SWS.UTIL.MakeSWSData`, os demais
+campos do formulário "Administrador do sistema" resubmetidos inalterados, verificação obrigatória
+por relogin com a credencial nova antes de persistir).
+
+**O que a queda deixou quebrado, corrigido nesta sessão:**
+- O teste de integração novo (`tests/integration/printers-admin-password.test.ts`) tinha 4 senhas de
+  teste acima do limite de 18 caracteres do formulário real (confirmado ao vivo lendo `Admin.js`) —
+  essas chamadas voltavam 400 ANTES de chegar no serviço mockado. Como `mockRejectedValueOnce` não é
+  limpo por `mockClear()` (só por `mockReset()`), a rejeição enfileirada e nunca consumida vazava pro
+  PRÓXIMO teste que de fato chamasse o mock — um efeito cascata que embaralhou os status code
+  esperados em 8 dos 16 testes do arquivo. Corrigido encurtando as senhas pra caber no limite e
+  trocando `mockClear()` por `mockReset()` no `beforeEach` (blindagem contra a mesma classe de bug no
+  futuro).
+- `tests/unit/printer-hp-sws.service.test.ts` só tinha os imports novos adicionados, nenhum teste de
+  verdade pra `changeHpAdminPassword`/`fetchAdminSettings`/`makeSwsData` — escritos nesta sessão (49
+  testes novos: fluxo feliz completo com verificação de cada campo resubmetido/cifrado, todos os
+  caminhos de erro, e a verificação por relogin falhando tanto por credencial recusada quanto por
+  falha de rede).
+- Suíte ao fim da rodada do executor: backend 510/510 (65 testes no arquivo do serviço HP/SWS),
+  `tsc` limpo. **Depois da revisão crítica abaixo: 521/521** (72 no serviço HP/SWS, 19 na integração
+  de `admin-password`, 21 em `printers-reboot`).
+
+### Revisão crítica (Opus) — 47/50, 4 achados reais corrigidos
+
+Crítico formal (subagente Opus) sobre o código não commitado, antes de qualquer commit/PR. Todos os
+achados foram confirmados por MUTAÇÃO executada de verdade (mutante aplicado, suíte rodada, mutante
+revertido), não por leitura: 8 mutantes no total, todos mortos depois das correções.
+
+1. **Senha nova perdida para sempre num estado ambíguo — o pior caminho da feature.** Quando a
+   escrita já foi despachada mas não dá pra confirmar o resultado, a rota devolvia 502 e DESCARTAVA
+   o valor tentado. Numa chamada sem `password` no corpo (senha gerada por `randomBytes` na própria
+   rota), essa era a única cópia existente da senha que a impressora PODE ter passado a exigir — não
+   podia ir pro log (regra do projeto) e não ia pra resposta: o operador ficaria trancado fora de um
+   equipamento de produção, sem recuperação a não ser reset de fábrica. Corrigido: o 502 ambíguo
+   passa a devolver `attemptedUsername`/`attemptedPassword`/`persisted:false` (não é exposição nova —
+   a rota já devolve a senha em claro no sucesso, pro mesmo chamador autenticado, pelo mesmo canal) +
+   `request.log.error` marcando o estado ambíguo sem a senha.
+2. **Falha de rede NO POST de escrita era reportada como 504 "Impressora não respondeu"** — um status
+   que qualquer cliente/operador lê como "nada aconteceu, tente de novo", quando o POST já pode ter
+   sido processado e a senha já pode ter mudado. Corrigido no serviço: a partir do despacho do
+   `SetAdmin.jsp`, falha sem resposta utilizável vira `PrinterSwsPasswordVerificationError`
+   (ambíguo), não `PrinterSwsUnreachableError`. Falha ANTES do POST (identidade/login/admin.json)
+   segue 504, com teste separando os dois lados.
+3. **`success !== true` do `SetAdmin.jsp` sem nenhum teste ancorando** (mesma classe do achado do
+   crítico anterior no `loginToSws`): trocar por `=== false` deixava a suíte inteira verde — mutação
+   confirmada. Efeito prático: uma recusa limpa do painel ("nada foi tocado") seria reclassificada
+   como o erro AMBÍGUO, assustando o operador com um bloqueio inexistente. 4 casos novos
+   (`"false"` string, `0`, JSON só com `{errors:{...}}` — a forma real da recusa, e corpo vazio).
+4. **Caractere de controle na credencial = trava permanente do painel.** O login da SWS cifra
+   `usuário`+CR+`senha` — o CR é o SEPARADOR. Uma senha com `\r` seria aceita pelo `SetAdmin.jsp`
+   (que cifra o campo sozinho) e depois nenhum login montado por este projeto conseguiria
+   reproduzi-la. Rejeitado nos DOIS lados: no corpo da rota nova E em `wbmCredentialsSchema` (a
+   escrita do cadastro) — validar só a rota deixaria o furo aberto pelo caminho "sem `username` no
+   corpo", que cai no usuário já gravado.
+
+Também corrigido/endurecido: `extractAdminField` não tinha borda à esquerda na regex, então um campo
+mais longo TERMINADO no nome procurado casaria primeiro e o valor errado seria resubmetido no
+formulário (apagando em silêncio a configuração real da impressora — exatamente o que
+`fetchAdminSettings` existe pra evitar); a resposta de sucesso passou a devolver
+`ipAddress`/`ipOrigin` como TODAS as outras rotas de escrita deste arquivo (era a única sem isso,
+justamente a de pior consequência ao acertar o dispositivo errado — o aviso de `last_ip` histórico
+existia só no log); e a cifra da senha agora tem teste provando que usa a identidade AUTENTICADA
+(pós-login), não a leitura anônima.
+
+**Não verificado de propósito** (registrado pra não virar suposição futura): nenhuma chamada de rede
+real foi feita nesta revisão (só código/teste); `printers.db` real confirmado intocado (mtime
+inalterado). A rota NÃO tem frontend — `POST /printers/:id/admin-password` só existe pela API, ao
+contrário do /reboot (que ganhou botão na Onda 2). O limite 8-18 do campo de senha e os nomes dos
+campos do `admin.json` seguem apoiados na investigação ao vivo já documentada, sem reconfirmação
+nesta revisão.
+
+**Confirmado AO VIVO, ponta a ponta, contra as DUAS HPs reais** (algo que a sessão anterior à queda
+não tinha chegado a fazer — só o login, nunca a troca de senha em si, apesar do docblock do serviço
+já alegar isso; não confiar em alegações de teste ao vivo escritas em comentário sem reconferir).
+Rodado via `buildApp()` + `app.inject()` direto contra o `printers.db` real (mesmo padrão dos testes,
+sem servidor HTTP de verdade), nunca com a senha em claro no console:
+1. **172.16.0.34** ("Financeiro 2"/ex-Compras): trocada pra uma senha de teste gerada
+   (`TesteRodada2026`), verificada com sucesso (200, relogin confirmado pela própria rota).
+2. **Achado real ao tentar reverter pra senha original**: a 2ª chamada (reverter pra senha antiga)
+   foi recusada com 400 pela validação da PRÓPRIA rota (`password` exige mínimo de 8 caracteres) —
+   porque a senha ORIGINAL guardada no cadastro tinha menos de 8 caracteres. Consistente com o achado
+   de segurança já documentado (achado 9 do "Progresso da Onda 2", item 9): as duas HPs estavam com
+   `admin`/senha em BRANCO, o padrão de fábrica. Ou seja, o mínimo de 8 caracteres da rota — pensado
+   como proteção contra alguém setar sem querer uma senha fraca/vazia na credencial mestra do painel —
+   também bloqueia (corretamente) uma tentativa de voltar pro padrão de fábrica inseguro. Nenhuma
+   chamada real chegou a ser feita nessa tentativa de reversão (a validação rejeitou antes do
+   `fetch`); a impressora ficou com a senha de teste, sincronizada com o cadastro.
+3. **Decisão do usuário**: em vez de reverter pro padrão de fábrica (que reintroduziria a
+   vulnerabilidade), definir uma senha REAL permanente pras duas HPs — mesmo valor pras duas, escolhido
+   pelo usuário. Aplicada e verificada por relogin nas duas: **172.16.0.34** (a mesma sessão, trocando
+   da senha de teste pra definitiva) e depois **172.16.0.89** ("Financeiro", a impressora de uso
+   diário, resolvida via UniFi de verdade — sem `ipOverride`, ao contrário da `.34`). As duas
+   confirmadas com `success` na resposta E o cadastro local batendo com o valor aplicado.
+4. **A vulnerabilidade de senha em branco (achado 9 do "Progresso da Onda 2", reforçada em vários
+   pontos deste arquivo) está RESOLVIDA nas duas HPs reais** — não é mais uma pendência de segurança
+   conhecida. WBM da Brother não foi tocada (fora do pedido desta reabertura; a Brother nem tem essa
+   automação implementada, só a leitura/investigação documentada no achado 3).
+
+**Risco operacional aceito, registrado por transparência**: a senha definitiva escolhida pelo usuário
+não foi gerada por este código (função teria sido trivial — `randomBytes` já é usada como fallback na
+rota quando `password` não vem no corpo) — foi um valor específico pedido pelo usuário na conversa.
+Não é uma prática recomendada guardar/repetir esse valor em documentação; ele não está neste arquivo
+nem em nenhum outro lugar do repo, só no `wbmCredentials` do `printers.db` local (nunca devolvido por
+nenhuma rota GET, mesmo padrão do segredo SNMP).
 
 ## Nota sobre audit-log
 

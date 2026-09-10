@@ -490,6 +490,183 @@ o teste de login foi só até confirmar a autenticação, o endpoint de reboot e
 equipamento de verdade) não foi chamado, fica pra quando o usuário confirmar explicitamente que quer
 seguir com a implementação completa.
 
+## Investigação SNMP aprofundada — contadores detalhados, vida de fusor/rolos, serial por cartucho (2026-09-10)
+
+Investigação leitura-somente (GET/GETNEXT via `net-snmp`, nunca SET) contra as 5 impressoras reais
+cadastradas em `printers.db`, disparada por um print do usuário da própria SWS mostrando 3 telas com
+mais detalhe do que o dashboard expõe hoje: tela de cartucho individual (status/restante/impressões
+do cartucho/serial), tela "Contadores de uso" (Uso total Imprimir/Copiar/Relatório/Total + Uso envio
+Env. p/PC/outros/Total) e a seção "Gerenciamento de suprimentos" (alerta de toner baixo on/off +
+nível de alerta 1-30%). Sonda descartável (script `.cjs` fora do repo, no diretório temp do SO,
+apagado ao final), `community="public"`, mesmo padrão de walk manual por `getNext` já documentado
+acima (GETBULK não é confiável nestas impressoras). Todas as 5 responderam.
+
+### 1. Serial por cartucho — JÁ EXPOSTO HOJE, ninguém tinha reparado
+
+`prtMarkerSuppliesDescription` (`1.3.6.1.2.1.43.11.1.1.6`) da HP **inclui o número de série do
+cartucho embutido no próprio texto**, não é um campo separado:
+
+```
+1.3.6.1.2.1.43.11.1.1.6.1.1 = "Black Toner S/N:CRUM-210729A5BB3"   (HP Financeiro, 172.16.0.89)
+1.3.6.1.2.1.43.11.1.1.6.1.1 = "Black Toner S/N:CRUM-210322AAFD5"   (HP Financeiro 2, 172.16.0.34)
+```
+
+O segundo valor bate **exatamente** com o serial já visto na investigação da SWS de 2026-08-31
+(seção acima, "Investigação da HP via SWS real"). Como `toConsumablesResponse`
+(`src/routes/printers.routes.ts`) já usa `supply.description` como `name` da resposta de
+`/printers/:id/consumables` sem nenhum recorte, **esse serial já chega ao frontend hoje**, só que
+embutido dentro do nome (`"Black Toner S/N:CRUM-210729A5BB3"`) em vez de num campo próprio
+`serialNumber`. Nenhuma coleta nova é necessária — é só um parse de string do que já é lido a cada
+15 minutos.
+
+As 2 Brother (`.222` mono, `.80` colorida) **não** embutem serial na descrição
+(`"Black Toner Cartridge"`, `"Cyan Toner Cartridge"`, etc., sem sufixo `S/N:`) — o achado é
+específico da linha HP/Samsung (SyncThru), não generalizável.
+
+### 2. Fusor / rolo de transferência / rolo de coleta — JÁ SÃO COLETADOS HOJE, só ficam mascarados por um bug de firmware já conhecido
+
+As duas HPs expõem **6 linhas** na `prtMarkerSuppliesTable` (não só o toner) — confirmado por walk
+completo da tabela (`1.3.6.1.2.1.43.11.1`, colunas type/description/unit/maxCapacity/level):
+
+| Linha | Descrição (`.6`) | `prtMarkerSuppliesType` (`.5`) | `typeLabel` já mapeado no poller | `level`/`maxCapacity` (unit=`percent`) |
+|---|---|---|---|---|
+| `.1.1` | `Black Toner S/N:...` | `3` (toner) | `toner` | `0`/`100` (HP `.89`, nesta leitura) |
+| `.1.2` | `Transfer Roller` | `1` (other) | `null` (código 1 = "other" não está na tabela `SUPPLY_TYPE_LABELS`) | `143065`/`100` |
+| `.1.3` | `Fuser Life` | `15` (fuser) | `fuser` (já mapeado) | `143065`/`100` |
+| `.1.4` | `Pick-up Roller` | `1` (other) | `null` | `143065`/`100` |
+| `.1.5` | `ADF Roller` | `1` (other) | `null` | `100`/`100` |
+| `.1.6` | `ADF Rubber Pad` | `1` (other) | `null` | `100`/`100` |
+
+Valores idênticos (mesmo padrão `143065`≈`143066`, achado 3 do plano original já documentado acima)
+nas DUAS HPs — confirmado de novo em `172.16.0.34` nesta sessão, não é uma anomalia de uma unidade
+só.
+
+**Conclusão importante: o poller (`printer-snmp.service.ts`) já varre e já devolve estas 5 linhas
+extras hoje** — `toConsumablesResponse` já inclui Transfer Roller/Fuser Life/Pick-up Roller/ADF
+Roller/ADF Rubber Pad na resposta de `/printers/:id/consumables`, com `name` = a descrição acima.
+O que falta não é coleta nova, é:
+- **`typeLabel: null`** pras 3 linhas com `type=1` (other) — o mapa `SUPPLY_TYPE_LABELS` já tem
+  `15: 'fuser'` mas não tem entrada específica pra "rolo" (não existe um código RFC 3805 dedicado a
+  "transfer roller"/"pickup roller" — a própria HP usa o valor genérico `other(1)` pra eles, então
+  não há nada de errado no código, é o firmware que não diferencia). Confiar em `description`, não
+  em `typeLabel`, pra identificar essas 3 linhas continua sendo a única forma confiável.
+- **`levelPercent: null` / `status: 'not-measured'`** nas 3 linhas de `other` — já é o comportamento
+  correto e já documentado (achado 3 antigo: `computeLevelPercent` devolve `null` quando
+  `level > maxCapacity`, o bug real do firmware da HP). Confirmado de novo, nas duas HPs: não é um
+  valor "quase certo" que dá pra recuperar com uma conta diferente — `143065` não bate com nenhuma
+  outra grandeza plausível (não é o page count, que é `59910`/`72347` nesta sessão, nem uma
+  proporção redonda dele). **Não há como calcular um percentual de vida útil real do fusor/rolos via
+  SNMP nestas impressoras** — o valor bruto do firmware está incoerente com a unidade que ele mesmo
+  declara (`percent`, `maxCapacity=100`), e não existe OID alternativo nesta MIB (padrão ou privada)
+  que devolva a mesma grandeza de forma coerente.
+
+Nas Brother (`.222`, `.80`): **nenhuma linha de fusor/rolo existe** — só toners + drum/waste
+toner/belt unit (2 e 10 linhas respectivamente, já documentado acima). Fusor/rolo detectável via
+SNMP é específico da linha HP/Samsung desta rede, não generalizável para Brother.
+
+### 3. Contador de páginas por função (Imprimir/Copiar/Relatório + Envio p/PC/outros) — achado real, fora do Printer-MIB padrão, em MIB privada Samsung
+
+O `prtMarkerCounterTable` padrão (`1.3.6.1.2.1.43.10.2.1`) só tem **uma linha** (`.1.1`) nas 5
+impressoras — é o contador de vida ÚNICO (`prtMarkerLifeCount`, coluna `.4`) já usado pelo poller.
+Não há como obter a quebra por função (impressão/cópia/relatório/envio) nesta tabela — confirmado
+por walk completo da tabela inteira (colunas `.2` a `.15`), sem nenhuma linha adicional.
+
+A quebra existe, mas numa **MIB privada da Samsung** (`1.3.6.1.4.1.236`, "SyncThru" — confirma a
+origem Samsung já documentada acima), que as duas HPs respondem (as Brother não — confirmado, um
+`getNext` na base `1.3.6.1.4.1.236` contra a Brother pula direto pra outro ramo, sem nenhuma linha).
+Tabela `1.3.6.1.4.1.236.11.5.11.53.11.2.1` (14 linhas, 7 colunas), achada por walk exploratório —
+**confirmada empiricamente contra as 2 HPs, valores batendo com o exemplo do usuário**:
+
+| Índice | col`.2` (categoria) | col`.3` (subtipo) | col`.7` (contador, `Counter32`) — HP `.89` | col`.7` — HP `.34` |
+|---|---|---|---|---|
+| 1 | `1` | `3` | `20` | `81` |
+| 2 | `1` | `4` | `15` | `10` |
+| 3 | `1` | `5` | `59286` | `68042` |
+| 4 | `1` | `1` | `0` | `0` |
+| 5 | `2` | `3` | `0` | `0` |
+| 6 | `2` | `4` | `0` | `0` |
+| 7 | `2` | `5` | `535` | **`4143`** |
+| 8 | `2` | `1` | `0` | `0` |
+| 9 | `6` | `3` | `0` | `0` |
+| 10 | `6` | `4` | `0` | `0` |
+| 11 | `6` | `5` | `33` | **`50`** |
+| 12 | `6` | `1` | `0` | `0` |
+| 13 | `5` | `1` | `760` | `2331` |
+| 14 | `11` | `1` | `0` | `0` |
+
+Os valores da coluna `.2=1` (linhas 1-4) somam `59321`/`68133` nas duas HPs — muito próximo do
+`prtMarkerLifeCount` da mesma impressora naquele momento (`59910`/`72347`; a diferença é esperada,
+contadores lidos em momentos ligeiramente diferentes do ciclo de coleta, e o total de vida inclui
+também os grupos 2/6/5/11). **Os valores `4143` (índice 7, HP `.34`) e `50` (índice 11, HP `.34`)
+batem EXATAMENTE com os números "Copiar: 4143" e "Relatório: 50" do exemplo trazido pelo usuário**
+(`Mono Simples: 68150/4143/50/72343`, Imprimir/Copiar/Relatório/Total) — coincidência estatisticamente
+improvável o suficiente pra tratar como confirmação forte, não circunstancial.
+
+**Interpretação proposta (estrutural, não confirmada por rótulo textual algum — a MIB não expõe
+nenhuma string identificando as colunas, é inferência de posição + correlação numérica)**:
+- col`.2` = categoria de job: `1`=Imprimir, `2`=Copiar, `6`=Relatório, `5`=Envio p/PC, `11`=Envio p/
+  outros (as 2 últimas só têm 1 linha cada, sem sub-quebra por col`.3` — bate com a tela "Uso envio"
+  do usuário ter só "Env. p/PC / Envi p/ outros / Total", sem sub-linhas).
+- col`.3` = sub-tipo dentro da categoria (provavelmente tamanho de papel ou duplex/simplex — os
+  valores `3`/`4`/`5`/`1` se repetem em padrão fixo dentro de cada categoria de 4 linhas); não
+  identificado com confiança.
+- **Total "Imprimir"** = soma das 4 linhas da categoria `1` (não uma única linha) — `68133` pra HP
+  `.34`, contra os `68150` do exemplo do usuário (diferença de 17, plausivelmente só o relógio da
+  sonda vs. do print estarem alguns minutos/páginas distantes um do outro, já que os dois números
+  exatos de Copiar e Relatório bateram perfeito).
+
+**Isto é uma MIB privada não documentada publicamente pela Samsung/HP para este produto** (mesma
+observação já registrada acima sobre a ausência de manual oficial da linha SWS) — a interpretação
+acima é a MELHOR HIPÓTESE com base em correlação numérica real contra um exemplo relatado pelo
+usuário, não uma confirmação por documentação ou rótulo de string lido do dispositivo. Antes de
+qualquer implementação de produção que dependa desta tabela, vale uma validação adicional: ler a
+tela "Contadores de uso" da SWS (HTTP, autenticado) no MESMO instante de uma leitura SNMP desta
+tabela, e comparar os 8 números lado a lado — não feito nesta sessão (ficou fora do escopo
+leitura-somente-SNMP pedido).
+
+**Não encontrado nesta MIB privada, ou em nenhuma outra investigada**: nenhuma coluna/linha
+identificável como "vida útil do fusor/rolo de transferência/rolo de coleta" com uma unidade
+coerente (a tabela `.53.11` acima é só contagem de páginas por função, não vida de peça). O achado 2
+acima (fusor/rolos já vêm da `prtMarkerSuppliesTable` padrão, com o bug de incoerência já conhecido)
+continua sendo a única fonte SNMP para esse dado — incompleta, mas é a única que existe.
+
+### 4. Contador de "power-on" (ciclos de energização) — achado novo, padrão RFC 3805, não coletado hoje
+
+`prtMarkerPowerOnCount` (`1.3.6.1.2.1.43.10.2.1.5.1.1`) responde nas 5 impressoras — é um campo
+PADRÃO da MIB (não precisa de OID privado), mas **o poller atual não lê essa coluna** (só lê a `.4`,
+`prtMarkerLifeCount`). Valores observados: HP `.89` = `24`, Brother `.222` = `226`. É uma métrica
+operacional genuinamente nova (quantas vezes a impressora foi ligada/reiniciada) que sairia de
+graça, com uma única linha adicional na mesma requisição escalar já usada pra `prtMarkerLifeCount`
+— sem custo adicional de rede relevante, sem OID novo pra confirmar (já confirmado nesta sessão).
+
+### 5. Threshold de alerta de toner configurado NO PRÓPRIO PAINEL — NÃO ENCONTRADO via SNMP
+
+A tela "Gerenciamento de suprimentos" da SWS (aba Configurações) mostra "Alerta de toner baixo"
+(on/off) + "Nível de alerta de pouco toner" (1-30%) — **isso é uma configuração HTTP do painel
+próprio, não confirmada como legível via SNMP nesta sessão**. Não foi encontrado, na varredura desta
+sessão (Printer-MIB padrão completo + MIB privada Samsung `1.3.6.1.4.1.236.11.5.1.*`, ~250 escalares
+lidos), nenhum campo cujo valor batesse com um percentual plausível de 1-30 associado a um rótulo de
+"alerta"/"threshold"/"low". Muitos escalares da árvore `236.11.5.1.1.*` são inteiros pequenos sem
+rótulo textual (ex.: `.1.1.6.4.0 = 1000`, `.1.1.6.3.0 = 64`) que PODERIAM ser candidatos, mas sem um
+valor de referência conhecido pra cruzar (o usuário não informou o valor exato configurado no
+painel), qualquer associação seria adivinhação — **não registrado como achado, por decisão
+explícita de não extrapolar sem confirmação real** (regra desta investigação). Se o usuário informar
+o valor exato configurado na tela real, uma nova sonda pode procurar esse número específico entre os
+candidatos coletados nesta sessão (preservados no output do walk, não neste documento) antes de
+assumir que não é legível via SNMP de jeito nenhum.
+
+### Resumo da investigação (o que é novo vs. o que já existia)
+
+| Item pedido pelo usuário | Já coletado hoje? | Precisa de OID novo? |
+|---|---|---|
+| Serial do cartucho | **Sim** (embutido em `description`, nunca parseado) | Não — só parsing de string |
+| Fusor/rolo de transferência/rolo de coleta (presença + nome) | **Sim** (já na `prtMarkerSuppliesTable`, HP/Samsung only) | Não |
+| Fusor/rolo — percentual de vida útil coerente | **Não** (bug de firmware, `level` incoerente com `maxCapacity`) | Não existe OID alternativo — limitação do firmware, não do poller |
+| Quebra Imprimir/Copiar/Relatório | Não | Sim — MIB privada Samsung, semântica inferida (não 100% confirmada) |
+| Quebra Envio p/PC/Envio p/outros | Não | Sim — mesma tabela acima |
+| Contador de power-on (ciclos de energização) | Não | Não — já é OID PADRÃO (RFC 3805), só falta ler |
+| Threshold de alerta de toner do painel (1-30%) | Não | Não encontrado — pode não ser legível via SNMP |
+
 ## Consequência prática pro plano da Onda 2
 
 1. Subtarefa 2 (merge com status UniFi) precisa de fallback pra API clássica — 2 das 3
