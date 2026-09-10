@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Calendar,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Copy,
   Gauge,
   Hash,
   KeyRound,
@@ -12,9 +15,11 @@ import {
   Printer as PrinterIcon,
   RefreshCw,
   Trash2,
+  WifiOff,
 } from 'lucide-react';
 import { Badge } from '../components/Badge';
 import { Layout } from '../components/Layout';
+import { StatCard } from '../components/StatCard';
 import { usePolling } from '../hooks/usePolling';
 import {
   api,
@@ -74,6 +79,47 @@ const NEUTRAL_SUPPLY_FILL = '#94a3b8'; // slate-400 — suprimento sem cor de to
 function supplyFillColor(name: string): string {
   const match = SUPPLY_COLOR_RULES.find((rule) => rule.pattern.test(name));
   return match?.fill ?? NEUTRAL_SUPPLY_FILL;
+}
+
+// Medidor visual de toner na LINHA DA LISTA (fora do "Ver consumíveis") —
+// pedido do usuário: ver de cara, com cor, se cada cartucho "está cheio ou
+// precisa trocar", sem expandir o card (mesma ideia de um app de fabricante
+// mostrando os cartuchos coloridos). Um "tubo" vertical por suprimento com
+// percentual conhecido, preenchido de baixo pra cima na cor do toner
+// (`supplyFillColor`, já usada no detalhe expandido — cor por palavra-chave
+// no nome; sem cor identificada, cinza neutro, ex.: fusor/rolo/correia).
+// Nunca inventa um número quando não há leitura confiável (sentinela/não
+// suportado/nunca coletado) — esses suprimentos simplesmente não entram no
+// medidor; o "Ver consumíveis" continua sendo a fonte da explicação.
+function tonerLevelsGauge(c: PrinterConsumablesResponse | undefined) {
+  if (!c) return null;
+  const measured = c.supplies.filter((s): s is typeof s & { levelPercent: number } => s.levelPercent !== null);
+  if (measured.length === 0) return null;
+
+  return (
+    <div className="flex items-end gap-1.5" title="Níveis de suprimentos">
+      {measured.map((supply, i) => {
+        const pct = Math.max(0, Math.min(100, supply.levelPercent));
+        const fill = supplyFillColor(supply.name);
+        const isLow = supply.status === 'low';
+        return (
+          <div key={i} className="flex flex-col items-center gap-0.5" title={`${supply.name}: ${pct}%`}>
+            <div
+              className={`relative h-7 w-3 overflow-hidden rounded-[3px] bg-slate-100 ring-1 ${isLow ? 'ring-[oklch(70%_0.18_25)]' : 'ring-slate-200'}`}
+            >
+              <div
+                className="absolute inset-x-0 bottom-0 transition-[height]"
+                style={{ height: `${pct}%`, backgroundColor: fill }}
+              />
+            </div>
+            <span className={`text-[8.5px] font-semibold ${isLow ? 'text-[oklch(45%_0.18_25)]' : 'text-slate-500'}`}>
+              {pct}%
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function formatCollectedAt(iso: string | null): string {
@@ -284,6 +330,11 @@ export function Printers() {
   >({});
 
   const requestSeqRef = useRef(0);
+  // IDs já buscados (ou em busca) via fetchConsumablesFor — evita refazer a
+  // chamada a cada ciclo de polling da lista (a cada 60s), já que o próprio
+  // poller SNMP do backend só atualiza a cada 15min. Removido do Set numa
+  // falha, para uma tentativa futura (próximo `load()`) poder tentar de novo.
+  const consumablesFetchedRef = useRef<Set<string>>(new Set());
 
   // `silent = true` (polling em segundo plano) nunca reseta `printers` pra `null` — é esse
   // `null` que a tela usa como sinal de "carregando". Falha silenciosa só loga no console e
@@ -516,31 +567,51 @@ export function Printers() {
     }
   }
 
-  async function toggleConsumables(printer: PrinterWithNetwork) {
-    if (expandedId === printer.id) {
-      setExpandedId(null);
-      return;
-    }
-    setExpandedId(printer.id);
-    if (consumables[printer.id]) return; // já buscado — não refaz a requisição
+  // Compartilhada entre o clique em "Ver consumíveis" (toggleConsumables) e o
+  // carregamento antecipado (useEffect abaixo, pedido do usuário: mostrar o
+  // nível de toner na LINHA da lista, sem precisar expandir) — o guard pelo
+  // ref garante que os dois caminhos nunca disparem a mesma requisição duas
+  // vezes em paralelo.
+  function fetchConsumablesFor(printer: PrinterWithNetwork) {
+    if (consumablesFetchedRef.current.has(printer.id)) return;
+    consumablesFetchedRef.current.add(printer.id);
     setConsumablesLoading((prev) => ({ ...prev, [printer.id]: true }));
     setConsumablesError((prev) => {
       const next = { ...prev };
       delete next[printer.id];
       return next;
     });
-    try {
-      const data = await api.getPrinterConsumables(printer.id);
-      setConsumables((prev) => ({ ...prev, [printer.id]: data }));
-    } catch (err) {
-      setConsumablesError((prev) => ({
-        ...prev,
-        [printer.id]: err instanceof Error ? err.message : 'Falha ao carregar consumíveis',
-      }));
-    } finally {
-      setConsumablesLoading((prev) => ({ ...prev, [printer.id]: false }));
-    }
+    api
+      .getPrinterConsumables(printer.id)
+      .then((data) => setConsumables((prev) => ({ ...prev, [printer.id]: data })))
+      .catch((err) => {
+        consumablesFetchedRef.current.delete(printer.id);
+        setConsumablesError((prev) => ({
+          ...prev,
+          [printer.id]: err instanceof Error ? err.message : 'Falha ao carregar consumíveis',
+        }));
+      })
+      .finally(() => setConsumablesLoading((prev) => ({ ...prev, [printer.id]: false })));
   }
+
+  function toggleConsumables(printer: PrinterWithNetwork) {
+    if (expandedId === printer.id) {
+      setExpandedId(null);
+      return;
+    }
+    setExpandedId(printer.id);
+    fetchConsumablesFor(printer);
+  }
+
+  // Carregamento ANTECIPADO dos consumíveis de toda impressora da lista —
+  // antes desta mudança, só existiam depois do usuário clicar em "Ver
+  // consumíveis" de cada uma. Necessário para o badge de toner
+  // (tonerSummaryBadge) aparecer direto na linha da lista, sem exigir clique.
+  useEffect(() => {
+    if (!printers) return;
+    for (const printer of printers) fetchConsumablesFor(printer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [printers]);
 
   function startAliasEdit(printer: PrinterWithNetwork) {
     setAliasEditingId(printer.id);
@@ -643,6 +714,33 @@ export function Printers() {
     }
   }
 
+  // Painel de saúde da frota — visão de conjunto que ninguém tinha antes
+  // (cada impressora só existia como card isolado na lista). Cruza a lista
+  // (`printers`, status de rede) com os consumíveis já buscados de
+  // antecipadamente para o medidor da linha (`tonerLevelsGauge` acima) —
+  // nenhuma chamada nova, só agregação do que já está em memória.
+  // "Precisa de atenção" unifica 3 sinais bem diferentes (offline, toner
+  // baixo, nunca coletado) num único número acionável, porque pra quem
+  // administra a frota o que importa não é a causa técnica exata, é "quantas
+  // eu preciso olhar agora" — o detalhe de qual sinal foi continua disponível
+  // em cada card.
+  const fleetStats = useMemo(() => {
+    if (!printers) return null;
+    const online = printers.filter((p) => p.network.online === true).length;
+    const offline = printers.filter((p) => p.network.online === false).length;
+    const withLowSupply = new Set(
+      printers.filter((p) => consumables[p.id]?.supplies.some((s) => s.status === 'low')).map((p) => p.id),
+    );
+    const neverCollected = new Set(
+      printers.filter((p) => consumables[p.id] && consumables[p.id]!.collectedAt === null).map((p) => p.id),
+    );
+    const offlineIds = new Set(printers.filter((p) => p.network.online === false).map((p) => p.id));
+    const needsAttention = new Set([...withLowSupply, ...neverCollected, ...offlineIds]).size;
+    const totalPages = printers.reduce((sum, p) => sum + (consumables[p.id]?.pageCount ?? 0), 0);
+    const pagesKnownFor = printers.filter((p) => consumables[p.id]?.pageCount !== undefined && consumables[p.id]?.pageCount !== null).length;
+    return { total: printers.length, online, offline, needsAttention, totalPages, pagesKnownFor };
+  }, [printers, consumables]);
+
   return (
     <Layout title="Manutenção">
       {error && (
@@ -654,6 +752,54 @@ export function Printers() {
       {notice && (
         <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
           {notice}
+        </div>
+      )}
+
+      {fleetStats && fleetStats.total > 0 && (
+        <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <StatCard
+            label="Impressoras"
+            value={fleetStats.total}
+            icon={<PrinterIcon className="h-3.5 w-3.5 text-accent" strokeWidth={2} />}
+            iconBg="oklch(94% 0.03 255 / 0.6)"
+          />
+          <StatCard
+            label="Online"
+            value={`${fleetStats.online}/${fleetStats.total}`}
+            trend={fleetStats.offline === 0 ? 'todas operacionais' : `${fleetStats.offline} offline`}
+            trendTone={fleetStats.offline === 0 ? 'success' : 'danger'}
+            icon={
+              fleetStats.offline === 0 ? (
+                <CheckCircle2 className="h-3.5 w-3.5 text-[oklch(50%_0.13_150)]" strokeWidth={2} />
+              ) : (
+                <WifiOff className="h-3.5 w-3.5 text-[oklch(55%_0.18_25)]" strokeWidth={2} />
+              )
+            }
+            iconBg={fleetStats.offline === 0 ? 'oklch(94% 0.05 150 / 0.5)' : 'oklch(95% 0.05 25 / 0.5)'}
+          />
+          <StatCard
+            label="Precisa de atenção"
+            value={fleetStats.needsAttention}
+            trend={
+              fleetStats.needsAttention === 0
+                ? 'tudo em dia'
+                : 'offline, toner baixo ou sem leitura — veja os cards abaixo'
+            }
+            trendTone={fleetStats.needsAttention === 0 ? 'success' : 'danger'}
+            icon={<AlertTriangle className="h-3.5 w-3.5 text-[oklch(55%_0.18_60)]" strokeWidth={2} />}
+            iconBg="oklch(95% 0.06 60 / 0.5)"
+          />
+          <StatCard
+            label="Páginas impressas"
+            value={fleetStats.pagesKnownFor > 0 ? fleetStats.totalPages.toLocaleString('pt-BR') : '—'}
+            trend={
+              fleetStats.pagesKnownFor > 0
+                ? `soma de ${fleetStats.pagesKnownFor} de ${fleetStats.total} impressora(s)`
+                : 'aguardando o poller SNMP'
+            }
+            icon={<Copy className="h-3.5 w-3.5 text-accent" strokeWidth={2} />}
+            iconBg="oklch(95% 0.03 255 / 0.6)"
+          />
         </div>
       )}
 
@@ -908,7 +1054,10 @@ export function Printers() {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2">{networkBadge(printer)}</div>
+                <div className="flex items-center gap-2">
+                  {networkBadge(printer)}
+                  {tonerLevelsGauge(consumables[printer.id])}
+                </div>
 
                 <div className="flex items-center gap-1.5">
                   <button
