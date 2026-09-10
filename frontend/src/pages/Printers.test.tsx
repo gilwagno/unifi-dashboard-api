@@ -19,7 +19,18 @@ vi.mock('../lib/api', async (importOriginal) => {
       deletePrinter: vi.fn(),
       reconnectPrinter: vi.fn(),
       rebootPrinter: vi.fn(),
-      getPrinterConsumables: vi.fn(),
+      // Default resolvido (não um vi.fn() vazio): a página busca consumíveis
+      // de TODA impressora assim que a lista carrega (badge de toner na
+      // linha da lista), não só quando o usuário clica em "Ver
+      // consumíveis" — testes que não se importam com consumíveis não
+      // precisam configurar isso individualmente para não quebrar.
+      getPrinterConsumables: vi.fn(async () => ({
+        printerId: 'unused',
+        collectedAt: null,
+        pageCount: null,
+        lowThresholdPct: null,
+        supplies: [],
+      })),
       setClientAlias: vi.fn(),
       changeAdminPassword: vi.fn(),
     },
@@ -144,7 +155,14 @@ describe('Printers page', () => {
     expect(screen.getByText(/Conhecida pelo controller · Offline · 172\.16\.0\.222/)).toBeInTheDocument();
   });
 
-  it('does not fetch consumables until the user expands a card, and never shows null levelPercent as 0% or NaN%', async () => {
+  // Pedido do usuário: ver o nível de CADA suprimento, colorido, "de cara"
+  // na linha da lista (um medidor vertical por cartucho, tipo o app de uma
+  // fabricante) — sem precisar clicar em "Ver consumíveis". Por isso a
+  // busca de consumíveis passou a ser ANTECIPADA (toda impressora da
+  // lista, assim que ela carrega), não mais sob demanda. "Ver consumíveis"
+  // continua existindo pro detalhe completo, mas reaproveita o mesmo dado
+  // já buscado (não refaz a chamada).
+  it('busca consumíveis de toda impressora assim que a lista carrega, mostra um medidor por suprimento na linha, e expandir reaproveita o mesmo dado (sem refazer a chamada)', async () => {
     vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
     const consumablesResponse: PrinterConsumablesResponse = {
       printerId: 'p1',
@@ -163,15 +181,22 @@ describe('Printers page', () => {
     renderPrinters();
 
     await screen.findByText('HPLaserMFP135w');
-    expect(api.getPrinterConsumables).not.toHaveBeenCalled();
+    // Busca automática — sem clicar em nada, já chamou.
+    await waitFor(() => expect(api.getPrinterConsumables).toHaveBeenCalledWith('p1'));
+    // Medidor na linha da lista: "Black Toner" é o único suprimento com
+    // percentual conhecido (os outros dois são null, sem medidor pra
+    // eles), então é o único que aparece — mesmo antes de expandir o card.
+    expect(await screen.findByTitle('Black Toner: 42%')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: /Ver consumíveis/ }));
 
     expect(await screen.findByText('Black Toner')).toBeInTheDocument();
-    expect(api.getPrinterConsumables).toHaveBeenCalledWith('p1');
+    // Reaproveita o dado já buscado — nenhuma chamada nova ao expandir.
     expect(api.getPrinterConsumables).toHaveBeenCalledTimes(1);
 
-    expect(screen.getByText('42%')).toBeInTheDocument();
+    // "42%" aparece 2x agora: o rótulo pequeno do medidor da linha (sempre
+    // visível) + o número grande do detalhe expandido.
+    expect(screen.getAllByText('42%')).toHaveLength(2);
     const supplyRows = screen.getAllByText('sem dado');
     expect(supplyRows).toHaveLength(2);
     expect(screen.queryByText('0%')).not.toBeInTheDocument();
@@ -183,6 +208,76 @@ describe('Printers page', () => {
     await user.click(screen.getByRole('button', { name: /Ver consumíveis/ }));
     await user.click(screen.getByRole('button', { name: /Ver consumíveis/ }));
     expect(api.getPrinterConsumables).toHaveBeenCalledTimes(1);
+  });
+
+  describe('painel de saúde da frota', () => {
+    it('mostra tudo em dia quando todas online e sem toner baixo', async () => {
+      vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+      vi.mocked(api.getPrinterConsumables).mockResolvedValue({
+        printerId: 'p1',
+        collectedAt: '2026-08-31T12:00:00.000Z',
+        pageCount: 500,
+        lowThresholdPct: null,
+        supplies: [{ name: 'Black Toner', serialNumber: null, levelPercent: 90, status: 'ok' }],
+      });
+
+      renderPrinters();
+
+      await screen.findByText('HPLaserMFP135w');
+      expect(await screen.findByText('1/1')).toBeInTheDocument();
+      expect(screen.getByText('todas operacionais')).toBeInTheDocument();
+      // "Precisa de atenção" com valor 0 — o StatCard mostra label e valor em
+      // spans irmãos de níveis diferentes, por isso sobe até o card inteiro
+      // (`.rounded-xl`) e busca o valor DENTRO dele, não como texto solto na
+      // tela (que colidiria com outros "0"/"1" de outros cards).
+      const attentionCard = screen.getByText('Precisa de atenção').closest('.rounded-xl');
+      expect(attentionCard).not.toBeNull();
+      expect(within(attentionCard!).getByText('0')).toBeInTheDocument();
+      expect(screen.getByText('tudo em dia')).toBeInTheDocument();
+    });
+
+    it('"Precisa de atenção" conta cada impressora uma vez só, mesmo com mais de um sinal (offline E toner baixo)', async () => {
+      const offlineWithLowToner: PrinterWithNetwork = {
+        ...PRINTER_CLASSIC,
+        network: { ...PRINTER_CLASSIC.network, online: false },
+      };
+      vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION, offlineWithLowToner]);
+      vi.mocked(api.getPrinterConsumables).mockImplementation(async (id: string) =>
+        id === 'p1'
+          ? {
+              printerId: 'p1',
+              collectedAt: '2026-08-31T12:00:00.000Z',
+              pageCount: 500,
+              lowThresholdPct: null,
+              supplies: [{ name: 'Black Toner', serialNumber: null, levelPercent: 90, status: 'ok' }],
+            }
+          : {
+              // A mesma impressora está OFFLINE *e* com toner baixo — só deve
+              // contar 1 vez em "Precisa de atenção", não 2.
+              printerId: 'p2',
+              collectedAt: '2026-08-31T12:00:00.000Z',
+              pageCount: 500,
+              lowThresholdPct: 20,
+              supplies: [{ name: 'Toner Preto', serialNumber: null, levelPercent: 5, status: 'low' }],
+            },
+      );
+
+      renderPrinters();
+
+      await screen.findByText('HPLaserMFP135w');
+      expect(await screen.findByText('1/2')).toBeInTheDocument();
+      expect(screen.getByText('1 offline')).toBeInTheDocument();
+      const attentionCard = screen.getByText('Precisa de atenção').closest('.rounded-xl');
+      expect(attentionCard).not.toBeNull();
+      expect(within(attentionCard!).getByText('1')).toBeInTheDocument();
+    });
+
+    it('não mostra o painel quando não há impressora nenhuma cadastrada', async () => {
+      vi.mocked(api.listPrinters).mockResolvedValue([]);
+      renderPrinters();
+      await screen.findByText('Nenhuma impressora cadastrada.');
+      expect(screen.queryByText('Precisa de atenção')).not.toBeInTheDocument();
+    });
   });
 
   it('shows the serial number under a supply when the backend reports one, and hides the line when it does not', async () => {
