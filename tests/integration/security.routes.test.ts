@@ -37,11 +37,16 @@ const { buildApp } = await import('../../src/app.js');
 const { unifiClassicService, ClassicApiNotConfiguredError } = await import(
   '../../src/services/unifi-classic.service.js'
 );
+// Mockado globalmente em tests/setup.ts (o hook onResponse de src/app.ts
+// chama record() em toda requisição não-GET) — aqui só precisamos do
+// getHistory() pra testar a rota GET /security/audit-log.
+const { auditLogService } = await import('../../src/services/audit-log.service.js');
 
 beforeEach(() => {
   vi.mocked(unifiClassicService.getSecuritySummary).mockClear();
   vi.mocked(unifiClassicService.getCriticalEvents).mockClear();
   vi.mocked(unifiClassicService.getAdmins).mockClear();
+  vi.mocked(auditLogService.getHistory).mockClear();
 });
 
 async function authedApp() {
@@ -181,6 +186,68 @@ describe('GET /security/admins', () => {
     const { app } = await authedApp();
 
     const res = await app.inject({ method: 'GET', url: '/security/admins' });
+
+    expect(res.statusCode).toBe(401);
+
+    await app.close();
+  });
+});
+
+describe('GET /security/audit-log', () => {
+  it('retorna o histórico de ações do dashboard', async () => {
+    const { app, token } = await authedApp();
+    vi.mocked(auditLogService.getHistory).mockReturnValueOnce([
+      {
+        timestamp: '2026-01-01T00:00:00.000Z',
+        actor: 'admin',
+        method: 'POST',
+        route: '/clients/:mac/block',
+        params: { mac: 'aa:bb:cc:dd:ee:ff' },
+        statusCode: 200,
+      },
+    ]);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/security/audit-log',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toEqual([
+      {
+        timestamp: '2026-01-01T00:00:00.000Z',
+        actor: 'admin',
+        method: 'POST',
+        route: '/clients/:mac/block',
+        params: { mac: 'aa:bb:cc:dd:ee:ff' },
+        statusCode: 200,
+      },
+    ]);
+    expect(auditLogService.getHistory).toHaveBeenCalledWith();
+
+    await app.close();
+  });
+
+  it('passa o limit da query pro serviço', async () => {
+    const { app, token } = await authedApp();
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/security/audit-log?limit=5',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(auditLogService.getHistory).toHaveBeenCalledWith(5);
+
+    await app.close();
+  });
+
+  it('retorna 401 sem token', async () => {
+    const { app } = await authedApp();
+
+    const res = await app.inject({ method: 'GET', url: '/security/audit-log' });
 
     expect(res.statusCode).toBe(401);
 
