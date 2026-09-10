@@ -270,6 +270,10 @@ describe('Printers page', () => {
       const attentionCard = screen.getByText('Precisa de atenção').closest('.rounded-xl');
       expect(attentionCard).not.toBeNull();
       expect(within(attentionCard!).getByText('1')).toBeInTheDocument();
+      // Achado do usuário testando ao vivo: um número sozinho não diz QUAL
+      // impressora nem POR QUÊ — o texto precisa nomear a impressora e
+      // listar os dois motivos (offline, toner baixo), não um aviso genérico.
+      expect(within(attentionCard!).getByText('HLL2360DWVENDAS (offline, toner baixo)')).toBeInTheDocument();
     });
 
     it('não mostra o painel quando não há impressora nenhuma cadastrada', async () => {
