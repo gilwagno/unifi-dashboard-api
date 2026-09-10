@@ -477,4 +477,36 @@ describe('credencial do painel web no cadastro (POST/PATCH /printers)', () => {
 
     await app.close();
   });
+
+  // ACHADO DO CRÍTICO (2026-09-10, revisão de POST /printers/:id/admin-password):
+  // o login da SWS cifra "usuário" + CR + "senha" — o CR é o SEPARADOR (ver
+  // buildLoginAuthentication). Uma credencial GRAVADA com caractere de
+  // controle é aceita pelo firmware na escrita mas nunca mais consegue abrir o
+  // painel por este projeto (o dispositivo corta no primeiro CR), e o cadastro
+  // é justamente de onde a rota de troca de senha tira o usuário quando o
+  // corpo não manda um. Recusar na escrita do cadastro é o que fecha o furo
+  // pelos dois lados.
+  it('rejeita 400 quando wbmCredentials tem caractere de controle no usuário ou na senha', async () => {
+    const { app, auth } = await authedApp();
+
+    for (const [i, credentials] of [
+      { username: `ad${String.fromCharCode(13)}min`, password: 'senha-ok' },
+      { username: 'admin', password: `sen${String.fromCharCode(10)}ha` },
+    ].entries()) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/printers',
+        headers: auth,
+        payload: {
+          name: 'HP com credencial inválida',
+          mac: `aa:bb:cc:00:01:1${i}`,
+          snmp: { version: 'v2c', community: SNMP_SECRET },
+          wbmCredentials: credentials,
+        },
+      });
+      expect(res.statusCode).toBe(400);
+    }
+
+    await app.close();
+  });
 });

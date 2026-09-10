@@ -48,10 +48,14 @@ import {
 // erro diferentes.
 import {
   rebootHpPrinter,
+  changeHpAdminPassword,
   PrinterSwsAuthenticationError,
   PrinterSwsRequestError,
   PrinterSwsUnreachableError,
+  PrinterSwsPasswordVerificationError,
 } from '../services/printer-hp-sws.service.js';
+import { randomBytes } from 'node:crypto';
+import type { WbmCredentials } from '../db/printers.db.js';
 
 // Cadastro (nome, MAC, segredo SNMP, política de manutenção) do módulo de
 // manutenção de impressoras — primeira rota do projeto com persistência em
@@ -136,16 +140,28 @@ const snmpSchema = z
     }
   });
 
+// Caractere de CONTROLE nunca é credencial legítima aqui, e a razão é de
+// protocolo, não higiene genérica: o login da SWS cifra literalmente
+// "usuário" + CR + "senha" (o CR é o SEPARADOR — ver buildLoginAuthentication em
+// printer-hp-sws.service.ts). Um CR dentro do usuário ou da senha faz o
+// dispositivo cortar o valor no meio, e a credencial guardada aqui deixa de
+// abrir o painel (nem /reboot, nem a troca de senha). ACHADO DO CRÍTICO
+// (2026-09-10): recusar na ESCRITA do cadastro, e não só no corpo de
+// POST /printers/:id/admin-password, porque essa rota cai no usuário JÁ
+// GRAVADO quando o corpo não traz "username" — validar só a entrada da rota
+// deixaria o mesmo furo aberto por outro caminho.
+const noControlChars = (value: string) => !/[\u0000-\u001f\u007f]/.test(value);
+
 // Credencial de admin do PAINEL WEB (WBM/SWS) — aceita na escrita, NUNCA
 // devolvida em leitura (toPublic remove). Não confundir com o segredo SNMP
 // acima: o SNMP só lê contadores, esta credencial administra o firmware.
 const wbmCredentialsSchema = z.object({
-  username: z.string().min(1).max(64),
+  username: z.string().min(1).max(64).refine(noControlChars, 'Usuário não pode conter caractere de controle'),
   // `min(0)` implícito de propósito: a HP real do Financeiro está com a senha
   // de fábrica EM BRANCO (ver docs/printers-snmp-research.md). Exigir
   // `min(1)` aqui impediria de cadastrar exatamente a impressora que motivou
   // esta feature. O teto de 128 é só sanidade de tamanho.
-  password: z.string().max(128),
+  password: z.string().max(128).refine(noControlChars, 'Senha não pode conter caractere de controle'),
 });
 
 const maintenanceSchema = z.object({
@@ -1096,6 +1112,186 @@ export default async function printersRoutes(app: FastifyInstance) {
       }
 
       return reply.send({ ok: true, ipAddress: target.ipAddress, ipOrigin: target.origin });
+    },
+  );
+
+  // --- POST /printers/:id/admin-password — troca a senha de admin da SWS (HP) ---
+  //
+  // Onda 3, subtarefa 11 — reaberta por pedido explícito do usuário (estava
+  // fechada desde 2026-09-08, ver CLAUDE.md). É a ação de MAIOR risco do
+  // projeto: mexe na credencial mestra do painel admin de um equipamento de
+  // produção real, sem forma de ler a senha de volta se algo der errado. Ver
+  // o comentário de topo da seção "Troca de senha de admin" em
+  // printer-hp-sws.service.ts para o protocolo completo (payload real
+  // capturado ao vivo, cifra Ext1/AES obrigatória no campo de senha) e a
+  // DECISÃO de verificar por relogin antes de persistir qualquer coisa.
+  //
+  // ESPECÍFICO DA FAMÍLIA HP (SWS) — mesma ressalva do /reboot: chamar contra
+  // uma Brother resulta em 502 (a WBM não tem /sws/*), nunca sucesso enganoso.
+  //
+  // Corpo: `{ username?, password? }`, ambos opcionais — mesmo espírito do
+  // já existente `POST /ssh-credentials/rotate`
+  // (`unifi-classic.service.ts#generateStrongPassword`): sem `password`, gera
+  // uma forte aleatória aqui mesmo. `password` limitado a 18 caracteres — o
+  // MESMO limite (`maxLength: 18`) do campo `GSI_ADMIN_WUI_LOGIN_PASS` no
+  // formulário real da SWS (confirmado lendo `Admin.js` ao vivo); mandar algo
+  // maior arriscaria uma truncagem silenciosa no firmware que a verificação
+  // por relogin ainda pegaria, mas só depois de já ter mexido na senha real.
+  //
+  // DECISÃO — a resposta devolve `username`/`password` em texto puro (mais
+  // `ipAddress`/`ipOrigin`, como as outras escritas deste arquivo, e o mesmo
+  // par em `attemptedUsername`/`attemptedPassword` no 502 ambíguo — ver o
+  // catch): é a ÚNICA vez que a senha nova aparece em claro em qualquer lugar da API,
+  // mesmo padrão do `ssh-credentials/rotate` (não existe outra rota que
+  // devolva isso depois — se for perdida, só gerando outra). Diferente do SSH,
+  // aqui a credencial TAMBÉM é persistida em `wbmCredentials` (obrigatório:
+  // /reboot e as automações Brother-equivalentes desta família dependem dela
+  // para continuar funcionando depois da troca).
+  //
+  // ACHADO DO CRÍTICO (2026-09-10) — nem `username` nem `password` podem
+  // conter caractere de CONTROLE, e isso não é higiene genérica de input: o
+  // login da SWS cifra literalmente `usuário\rsenha` (CR como separador, ver
+  // `buildLoginAuthentication`). Uma senha (ou usuário) com `\r` seria
+  // aceita pelo firmware no SetAdmin.jsp — que cifra o campo sozinho, sem
+  // separador — e depois NENHUM login montado por este projeto conseguiria
+  // reproduzi-la: o dispositivo cortaria no primeiro CR. Resultado: a
+  // verificação por relogin falha, e a impressora fica com uma senha que o
+  // dashboard nunca mais consegue usar (nem pro /reboot). Rejeitar antes de
+  // qualquer chamada de rede é a única correção barata. Nenhum desses
+  // caracteres é digitável no formulário real da SWS, então isto não recusa
+  // nada que um operador consiga configurar pelo painel. O mesmo
+  // `noControlChars` guarda `wbmCredentialsSchema` (a ESCRITA do cadastro) —
+  // sem os dois lados, o caminho "sem `username` no corpo" reintroduziria o
+  // furo usando o valor já gravado.
+  const adminPasswordBody = z.object({
+    username: z
+      .string()
+      .min(1)
+      .max(18)
+      .refine(noControlChars, 'Usuário não pode conter caractere de controle')
+      .optional(),
+    // 8-18: sem mínimo documentado pelo próprio firmware (só o maxLength do
+    // formulário), mas exigir algum mínimo evita gerar/aceitar uma senha
+    // trivial para a credencial mestra do painel.
+    password: z
+      .string()
+      .min(8)
+      .max(18)
+      .refine(noControlChars, 'Senha não pode conter caractere de controle')
+      .optional(),
+  });
+
+  app.post(
+    '/printers/:id/admin-password',
+    { config: { rateLimit: { max: env.RATE_LIMIT_CLIENT_ACTION_MAX, timeWindow: env.RATE_LIMIT_WINDOW } } },
+    async (request, reply) => {
+      const { id } = idParam.parse(request.params);
+      const body = adminPasswordBody.parse(request.body ?? {});
+      const record = printersRepository.getById(id);
+      if (!record) {
+        return reply.code(404).send({ error: 'Impressora não encontrada' });
+      }
+
+      const currentCredentials = parseWbmCredentials(record.wbmCredentials);
+      if (!currentCredentials) {
+        return reply.code(409).send({
+          error: 'Credencial do painel web não configurada',
+          details:
+            'Configure a credencial ATUAL do painel web desta impressora (campo wbmCredentials em ' +
+            'PATCH /printers/:id) antes de trocar a senha — é preciso logar com ela primeiro.',
+        });
+      }
+
+      const target = await resolvePrinterIp(record, request.log);
+      if (!target) {
+        return reply.code(409).send({
+          error: 'IP da impressora desconhecido',
+          details: `Impressora ${id} não tem ipOverride configurado e não foi encontrada pelo controller UniFi.`,
+        });
+      }
+
+      if (target.origin === 'classic') {
+        request.log.warn(
+          { printerId: id, ipAddress: target.ipAddress, ipOrigin: target.origin },
+          'TROCA DE SENHA DE ADMIN usando IP HISTÓRICO da API clássica (last_ip) — não há garantia de que ' +
+            'este IP ainda pertence a esta impressora. Configure ipOverride antes de trocar credenciais.',
+        );
+      }
+
+      const newUsername = body.username ?? currentCredentials.username;
+      const newPassword = body.password ?? randomBytes(12).toString('base64url');
+
+      try {
+        await changeHpAdminPassword(target.ipAddress, currentCredentials, newUsername, newPassword);
+      } catch (error) {
+        if (error instanceof PrinterSwsUnreachableError) {
+          return reply.code(504).send({ error: 'Impressora não respondeu', details: error.message });
+        }
+        if (error instanceof PrinterSwsAuthenticationError) {
+          return reply.code(403).send({ error: 'Credencial ATUAL do painel web recusada', details: error.message });
+        }
+        // ACHADO DO CRÍTICO (2026-09-10) — o pior caminho desta rota, e o
+        // único que pode INUTILIZAR um equipamento de produção: aqui o POST
+        // de escrita já saiu e não deu pra confirmar o resultado (ver
+        // PrinterSwsPasswordVerificationError). Não persistir a credencial
+        // nova está certo (o dispositivo pode ter ficado com a antiga), mas a
+        // versão anterior desta rota também DESCARTAVA o valor tentado: numa
+        // chamada sem `password` no corpo (senha gerada aqui por
+        // `randomBytes`), a única cópia existente da senha que a impressora
+        // PODE ter passado a exigir morria neste `return` — sem aparecer na
+        // resposta, e sem poder aparecer no log (regra do projeto: senha nunca
+        // vai pro log). O operador ficaria trancado fora do painel de uma
+        // impressora de produção, sem recuperação a não ser reset de fábrica.
+        // Devolver o valor tentado não cria exposição nova: esta mesma rota já
+        // devolve a senha em claro no caminho de sucesso, pro mesmo chamador
+        // autenticado, pelo mesmo canal (a DECISÃO acima).
+        if (error instanceof PrinterSwsPasswordVerificationError) {
+          request.log.error(
+            { printerId: id, ipAddress: target.ipAddress, ipOrigin: target.origin },
+            'TROCA DE SENHA DE ADMIN EM ESTADO AMBÍGUO — o POST de escrita já havia sido despachado e não foi ' +
+              'possível confirmar o resultado. O cadastro NÃO foi alterado (segue com a credencial antiga); a ' +
+              'credencial tentada foi devolvida em texto puro APENAS no corpo desta resposta HTTP.',
+          );
+          return reply.code(502).send({
+            error: 'Não foi possível confirmar a troca de senha',
+            details: error.message,
+            // Estes dois campos são a ÚNICA cópia da credencial tentada que
+            // sai do processo — sem eles não há como recuperar o acesso se a
+            // troca tiver colado de verdade no dispositivo.
+            attemptedUsername: newUsername,
+            attemptedPassword: newPassword,
+            persisted: false,
+            ipAddress: target.ipAddress,
+            ipOrigin: target.origin,
+          });
+        }
+        if (error instanceof PrinterSwsRequestError) {
+          return reply.code(502).send({ error: 'Painel da impressora recusou a requisição', details: error.message });
+        }
+        throw error;
+      }
+
+      // Só chega aqui depois do relogin de verificação ter confirmado a senha
+      // nova de verdade (ver changeHpAdminPassword) — persistir antes disso
+      // deixaria o cadastro dessincronizado se a troca real tivesse falhado
+      // parcialmente.
+      const newCredentials: WbmCredentials = { username: newUsername, password: newPassword };
+      printersRepository.update(id, { wbmCredentials: newCredentials });
+
+      // `ipAddress`/`ipOrigin` na resposta pelo mesmo motivo já documentado em
+      // handleWbmAction e /reboot (as outras rotas de ESCRITA deste arquivo, que
+      // já devolvem os dois): quem chama precisa saber em qual endereço a
+      // escrita caiu de fato, e se ele veio do `last_ip` HISTÓRICO da API
+      // clássica. ACHADO DO CRÍTICO (2026-09-10): esta rota era a única escrita
+      // do arquivo sem isso, justamente a de maior consequência ao acertar o
+      // dispositivo errado (trocar a senha de admin de um equipamento que
+      // ninguém pediu) — o aviso existia só no log do servidor.
+      return reply.send({
+        username: newUsername,
+        password: newPassword,
+        ipAddress: target.ipAddress,
+        ipOrigin: target.origin,
+      });
     },
   );
 

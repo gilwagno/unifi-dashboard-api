@@ -130,6 +130,8 @@ function swsReferer(ipAddress: string): string {
 const IDENTITY_PATH = '/sws/data/sws_data.js';
 const LOGIN_PATH = '/sws/app/gnb/login/login.jsp';
 const REBOOT_PATH = '/sws/app/security/general/reboot/RestartSystem.jsp';
+const ADMIN_SETTINGS_PATH = '/sws/app/security/general/admin/admin.json';
+const SET_ADMIN_PATH = '/sws/app/security/general/admin/SetAdmin.jsp';
 
 // --- Erros ---------------------------------------------------------------
 //
@@ -176,6 +178,46 @@ export class PrinterSwsAuthenticationError extends Error {
         '(verifique a credencial do painel web cadastrada para esta impressora)',
     );
     this.name = 'PrinterSwsAuthenticationError';
+  }
+}
+
+/**
+ * Estado AMBÍGUO da troca de senha: a requisição de escrita
+ * (`SetAdmin.jsp`) já foi despachada, mas não foi possível CONFIRMAR o
+ * resultado — ou seja, a senha pode ou não ter sido aplicada no dispositivo.
+ * Ver a DECISÃO no docblock de `changeHpAdminPassword`: como o endpoint pode
+ * aceitar um payload estruturalmente incompleto sem sinalizar erro nenhum
+ * (não existe confirmação de senha nem verificação de "senha atual" no
+ * protocolo real, confirmado por captura de rede), a única forma confiável de
+ * saber se a troca realmente colou é logar de novo com o valor novo antes de
+ * persistir qualquer coisa no cadastro.
+ *
+ * Dois caminhos chegam aqui (ACHADO DO CRÍTICO 2026-09-10 — antes, só o
+ * primeiro):
+ *   1. `SetAdmin.jsp` respondeu `success:true` mas o relogin com a credencial
+ *      NOVA falhou.
+ *   2. A rede falhou/estourou o timeout NA PRÓPRIA requisição de escrita —
+ *      antes o serviço propagava `PrinterSwsUnreachableError` cru, que a rota
+ *      mapeia pra 504 "Impressora não respondeu": um status que qualquer
+ *      cliente (e qualquer operador) lê como "nada aconteceu, tente de novo",
+ *      quando na verdade o POST já pode ter sido processado pela impressora e
+ *      a senha já pode ter mudado. Reportar ambiguidade a mais é seguro;
+ *      reportar de menos deixa o equipamento inacessível em silêncio.
+ *
+ * Quem chama NUNCA deve persistir a credencial nova depois deste erro (o
+ * dispositivo pode ter ficado com a antiga), mas TAMBÉM não pode descartar o
+ * valor tentado — é a única chance de recuperar o acesso se a troca de fato
+ * colou. Ver o tratamento em POST /printers/:id/admin-password.
+ */
+export class PrinterSwsPasswordVerificationError extends Error {
+  constructor(ipAddress: string, reason?: string) {
+    super(
+      `A SWS da impressora em ${ipAddress} não confirmou a troca de senha de admin` +
+        (reason ? ` (${reason})` : '') +
+        ' — a senha pode ou não ter sido aplicada: confira manualmente o painel, testando a ' +
+        'credencial NOVA e depois a antiga, antes de tentar de novo',
+    );
+    this.name = 'PrinterSwsPasswordVerificationError';
   }
 }
 
@@ -694,5 +736,282 @@ export async function rebootHpPrinter(
       `${REBOOT_PATH} recusou o reboot (success:false) — verifique se a credencial do painel ainda é válida`,
       res.status,
     );
+  }
+}
+
+// --- Troca de senha de admin (Segurança → Administrador do sistema) ------
+//
+// Onda 3, subtarefa 11 (reaberta por pedido explícito do usuário — estava
+// fechada desde 2026-09-08). Achados ao vivo contra a HP real do Financeiro
+// (172.16.0.89), nenhum inventado/suposto:
+//
+//   1. Tentativas de POST em texto puro pra `SetAdmin.jsp` (endpoint e nomes
+//      de campo corretos, confirmados por leitura de `Admin.js`) SEMPRE
+//      voltavam `{success:false, errors:{GSI_ADMIN_WUI_LOGIN_PASS:'error'}}`,
+//      não importa o valor/tamanho/complexidade da senha testada. A causa
+//      raiz só apareceu capturando a requisição REAL via Playwright
+//      (preenchendo o formulário de verdade e interceptando+abortando antes
+//      de chegar na impressora): existe um override global em
+//      `Ext.lib.Ajax.serializeForm` (`/sws/util/Utils.js`) que passa TODO
+//      campo `<input type="password">` por `SWS.UTIL.MakeSWSData()` antes do
+//      submit — o MESMO esquema Ext1/AES-256-CBC-OpenSSL-salted do login
+//      (`buildLoginAuthentication`/`opensslAesEncrypt` acima), só que
+//      cifrando a senha SOZINHA (não `usuário\rsenha`). Sem essa cifra, o
+//      servidor nem chega a validar o conteúdo — rejeita de cara, com uma
+//      mensagem de erro genérica que não distingue "formato errado" de
+//      "senha fraca", o que consumiu várias rodadas de tentativa e erro.
+//   2. A captura real também revelou que os campos
+//      `XXI_ADMIN_WUI_LOGIN_PASS_CONFIRM` (confirmação) e
+//      `XXI_ADMIN_WUI_LOGIN_PASS_REQUIRED` (checkbox "Alterar senha") NUNCA
+//      são enviados ao servidor — são só validação/estado client-side (a
+//      confirmação é comparada no navegador; o checkbox só habilita/desabilita
+//      os campos de senha). O payload real é bem mais enxuto que o formulário
+//      sugere.
+//   3. O formulário reenvia SEMPRE todos os campos do fieldset "Informações
+//      do administrador" e "Segurança da interface da Web" que não estão
+//      desabilitados — nome, telefone, local, e-mail, proteção de IP de
+//      logon, diretiva de falha de logon, logoff automático — com os valores
+//      ATUAIS, não vazios/zerados. Por isso `changeHpAdminPassword` primeiro
+//      lê `admin.json` autenticado e resubmete esses campos inalterados;
+//      montar o payload com valores fixos (como as tentativas de investigação
+//      fizeram) teria o efeito colateral de silenciosamente apagar essas
+//      configurações em qualquer impressora que já as tivesse preenchido.
+//   4. **Confirmado ao vivo, ponta a ponta**: a senha real da HP do
+//      Financeiro foi trocada pra um valor gerado aleatoriamente, verificada
+//      por relogin, e depois revertida de volta pro valor padrão do usuário —
+//      as duas trocas confirmadas por relogin com a credencial nova antes de
+//      qualquer persistência no cadastro.
+//
+// DECISÃO — verificação obrigatória por relogin (ver
+// `PrinterSwsPasswordVerificationError`): diferente do reboot (que sinaliza
+// `success:false` explicitamente numa recusa real), aqui não existe nenhuma
+// confirmação de que a senha nova é a que o dispositivo aceita além de tentar
+// logar com ela. Qualquer imprecisão futura neste payload (ex.: um campo do
+// admin.json que mudou de nome numa versão de firmware diferente) seria
+// aceita pelo servidor com `success:true` sem necessariamente ter aplicado a
+// senha corretamente — reportar sucesso sem essa checagem deixaria o cadastro
+// dessincronizado da credencial real, exatamente a classe de bug que este
+// projeto trata como grave (mesmo raciocínio do "invisibilidade silenciosa"
+// já documentado em outras subtarefas).
+
+export interface SwsAdminSettings {
+  name: string;
+  phoneNumber: string;
+  location: string;
+  email: string;
+  loginIpEnable: string;
+  loginFailure: string;
+  autoLogout: string;
+}
+
+// O corpo de admin.json é o MESMO formato "objeto JS sem aspas nas chaves"
+// já visto em login.jsp (`extractSwsSuccessField`) — não é JSON estrito.
+// Extrai um campo string (entre aspas) ou numérico (literal sem aspas) pelo
+// nome, sem tentar escrever um parser tolerante completo (mesmo espírito de
+// `extractSwsDataString`).
+function extractAdminField(body: string, key: string): string | null {
+  // `(?:^|[^A-Za-z0-9_])` — o nome do campo tem que começar de verdade aqui,
+  // não ser o SUFIXO de um campo mais longo. Sem essa borda, procurar
+  // `GSI_ADMIN_NAME` casaria com um hipotético `XXI_GSI_ADMIN_NAME: "outro"`
+  // que aparecesse ANTES no corpo, e o valor errado seria resubmetido no
+  // formulário — sobrescrevendo em silêncio a configuração real da
+  // impressora, que é exatamente o que esta função existe pra evitar.
+  // Endurecimento (a colisão não foi observada no admin.json real), mas o
+  // formulário desta página comprovadamente tem famílias de nomes com
+  // prefixos diferentes pro mesmo campo (`GSI_`/`XXI_`, ver o achado 2 no
+  // topo desta seção), então a colisão é plausível em outro firmware.
+  const match = new RegExp(`(?:^|[^A-Za-z0-9_])${key}\\s*:\\s*("([^"]*)"|(-?\\d+))`).exec(body);
+  if (!match) return null;
+  return match[2] !== undefined ? match[2] : match[3];
+}
+
+/**
+ * Lê os campos do formulário "Administrador do sistema" que precisam ser
+ * resubmetidos INALTERADOS junto da troca de senha (ver DECISÃO acima —
+ * `SetAdmin.jsp` reescreve o registro inteiro, não faz PATCH parcial).
+ *
+ * @param ipAddress IP já resolvido da impressora.
+ * @param cookie Cookie de sessão autenticado (`SwsSession.cookie`).
+ * @throws {PrinterSwsUnreachableError} timeout/falha de rede.
+ * @throws {PrinterSwsRequestError} status não-2xx ou corpo sem os campos
+ *   esperados.
+ */
+export async function fetchAdminSettings(ipAddress: string, cookie: string): Promise<SwsAdminSettings> {
+  const res = await swsRequest(ipAddress, ADMIN_SETTINGS_PATH, { method: 'GET', headers: { Cookie: cookie } }, []);
+  if (!res.ok) {
+    throw new PrinterSwsRequestError(ipAddress, `GET ${ADMIN_SETTINGS_PATH} devolveu status ${res.status}`, res.status);
+  }
+
+  const name = extractAdminField(res.body, 'GSI_ADMIN_NAME');
+  const phoneNumber = extractAdminField(res.body, 'GSI_ADMIN_PHONE_NUMBER');
+  const location = extractAdminField(res.body, 'GSI_ADMIN_LOCATION');
+  const email = extractAdminField(res.body, 'GSI_ADMIN_EMAIL');
+  const loginIpEnable = extractAdminField(res.body, 'GSI_ADMIN_WUI_LOGIN_IP_ENABLE');
+  const loginFailure = extractAdminField(res.body, 'GSI_ADMIN_WUI_LOGIN_FAILURE');
+  const autoLogout = extractAdminField(res.body, 'GSI_ADMIN_WUI_AUTO_LOGOUT');
+
+  if (
+    name === null ||
+    phoneNumber === null ||
+    location === null ||
+    email === null ||
+    loginIpEnable === null ||
+    loginFailure === null ||
+    autoLogout === null
+  ) {
+    throw new PrinterSwsRequestError(
+      ipAddress,
+      `${ADMIN_SETTINGS_PATH} não contém os campos esperados — o dispositivo neste IP provavelmente não é ` +
+        'uma impressora HP com SWS, ou o firmware mudou o formato desta página',
+      res.status,
+    );
+  }
+
+  return { name, phoneNumber, location, email, loginIpEnable, loginFailure, autoLogout };
+}
+
+/**
+ * Réplica de `SWS.UTIL.MakeSWSData` (`/sws/util/Utils.js`) — a função que a
+ * própria SWS usa para cifrar QUALQUER campo `<input type="password">` antes
+ * do submit (via o override `Ext.lib.Ajax.serializeForm`). Mesmo esquema
+ * Ext1/AES do login, mas cifrando `text` sozinho (não `usuário\rsenha`).
+ *
+ * @param text Valor em claro do campo (aqui, a senha NOVA do admin).
+ * @param identity Identidade autenticada (`sessionIdentity` — mesma usada
+ *   pro csrf-token do POST).
+ * @returns String no formato `Ext1 <cifrado(text,rn)>:<cifrado(rn,sec)>`.
+ */
+export function makeSwsData(text: string, identity: SwsDeviceIdentity): string {
+  if (text.length === 0) return '';
+  const rn = randomRn();
+  const sec = identity.productName + identity.productSerial;
+  const skey = opensslAesEncrypt(rn, sec);
+  const sidpw = opensslAesEncrypt(text, rn);
+  return `Ext1 ${sidpw}:${skey}`;
+}
+
+/**
+ * Troca a senha (e opcionalmente o usuário) de admin do painel SWS.
+ *
+ * Fluxo: login com a credencial ATUAL → relê identidade autenticada (csrf
+ * novo, mesmo padrão de `rebootHpPrinter`) → lê `admin.json` pra preservar os
+ * demais campos do formulário → POST em `SetAdmin.jsp` com a senha nova
+ * cifrada via `makeSwsData` → **verifica por relogin com a credencial nova**
+ * antes de considerar sucesso (ver DECISÃO no topo desta seção).
+ *
+ * NUNCA escreve no cadastro (`printers.db`) — isso é responsabilidade do
+ * chamador (a rota), só depois que esta função resolve sem lançar.
+ *
+ * @param ipAddress IP já resolvido da impressora.
+ * @param currentCredentials Credencial ATUAL (do cadastro).
+ * @param newUsername Novo usuário — se igual ao atual, o login ID não muda.
+ * @param newPassword Nova senha (texto puro — a cifra acontece aqui dentro).
+ * @throws {PrinterSwsUnreachableError} timeout/falha de rede em qualquer
+ *   etapa ANTES do POST de escrita (identidade, login, admin.json) — nesse
+ *   caso é certo que nada foi alterado no dispositivo.
+ * @throws {PrinterSwsAuthenticationError} a credencial ATUAL foi recusada no
+ *   login inicial.
+ * @throws {PrinterSwsRequestError} resposta inutilizável/não-2xx nas etapas
+ *   de leitura, ou `SetAdmin.jsp` recusou de forma DEFINIDA (não-2xx, ou um
+ *   `success` reconhecível diferente de `true`).
+ * @throws {PrinterSwsPasswordVerificationError} estado AMBÍGUO: o POST de
+ *   escrita já saiu e não deu pra confirmar o resultado — seja porque a rede
+ *   falhou depois do despacho, seja porque `SetAdmin.jsp` respondeu sucesso
+ *   mas o relogin com a credencial NOVA falhou. Quem chama precisa devolver o
+ *   valor tentado pro operador (ver a rota) e NÃO persistir no cadastro.
+ */
+export async function changeHpAdminPassword(
+  ipAddress: string,
+  currentCredentials: SwsCredentials,
+  newUsername: string,
+  newPassword: string,
+): Promise<void> {
+  const identity = await fetchDeviceIdentity(ipAddress);
+  const session = await loginToSws(ipAddress, currentCredentials, identity);
+  const sessionIdentity = await fetchDeviceIdentity(ipAddress, session.cookie);
+  const adminSettings = await fetchAdminSettings(ipAddress, session.cookie);
+
+  const encryptedPassword = makeSwsData(newPassword, sessionIdentity);
+
+  const body = new URLSearchParams({
+    'csrf-token': sessionIdentity.csrfToken,
+    GSI_ADMIN_NAME: adminSettings.name,
+    GSI_ADMIN_PHONE_NUMBER: adminSettings.phoneNumber,
+    GSI_ADMIN_LOCATION: adminSettings.location,
+    GSI_ADMIN_EMAIL: adminSettings.email,
+    GSI_ADMIN_WUI_LOGIN_ID: newUsername,
+    GSI_ADMIN_WUI_LOGIN_PASS: encryptedPassword,
+    GSI_ADMIN_WUI_LOGIN_IP_ENABLE: adminSettings.loginIpEnable,
+    GSI_ADMIN_WUI_LOGIN_FAILURE: adminSettings.loginFailure,
+    GSI_ADMIN_WUI_AUTO_LOGOUT: adminSettings.autoLogout,
+  }).toString();
+
+  // A PARTIR DAQUI a escrita já foi despachada: qualquer falha sem resposta
+  // utilizável é AMBÍGUA (a impressora pode ter aplicado a senha nova antes
+  // de a conexão morrer), nunca "nada aconteceu" — ver o caminho 2 no
+  // docblock de PrinterSwsPasswordVerificationError. Um status não-2xx ou um
+  // `success:false` explícito continuam sendo negativas DEFINIDAS da própria
+  // aplicação (PrinterSwsRequestError), não ambiguidade.
+  let res: SwsResponse;
+  try {
+    res = await swsRequest(
+      ipAddress,
+      SET_ADMIN_PATH,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Origin: swsOrigin(ipAddress),
+          Referer: swsReferer(ipAddress),
+          Cookie: session.cookie,
+        },
+        body,
+      },
+      [currentCredentials.password, newPassword],
+    );
+  } catch (error) {
+    if (error instanceof PrinterSwsUnreachableError) {
+      throw new PrinterSwsPasswordVerificationError(
+        ipAddress,
+        `a rede falhou DEPOIS de despachar o POST de troca de senha: ${error.message}`,
+      );
+    }
+    throw error;
+  }
+
+  if (!res.ok) {
+    throw new PrinterSwsRequestError(ipAddress, `POST ${SET_ADMIN_PATH} devolveu status ${res.status}`, res.status);
+  }
+
+  // Comparação ESTRITA com `true`, não `=== false` (que é o que o reboot usa,
+  // deliberadamente diferente — ver `rebootHpPrinter`): aqui a impressora NÃO
+  // reinicia ao responder, então não existe motivo legítimo pra ela mandar um
+  // corpo com um `success` que não seja exatamente `true` num caso de
+  // sucesso. Qualquer outro valor reconhecido (`"false"` como string, `0`, ou
+  // um JSON válido só com `{errors:{...}}` — a forma real da recusa,
+  // confirmada ao vivo) é RECUSA. ACHADO DO CRÍTICO (2026-09-10): a versão
+  // anterior tinha esta comparação certa mas sem NENHUM teste ancorando —
+  // trocar por `=== false` deixava a suíte inteira verde (mutação
+  // confirmada), e o efeito prático era relatar uma recusa limpa ("o painel
+  // recusou, nada foi tocado") como o erro AMBÍGUO de verificação ("a senha
+  // pode ter mudado, confira o painel"), assustando o operador com um
+  // possível bloqueio que não existia.
+  const successField = extractSwsSuccessField(res.body);
+  if (successField.found && successField.value !== true) {
+    throw new PrinterSwsRequestError(
+      ipAddress,
+      `${SET_ADMIN_PATH} recusou a troca de senha (success:false) — confira os dados do cadastro`,
+      res.status,
+    );
+  }
+
+  // Rede de segurança obrigatória — ver DECISÃO no topo desta seção: um
+  // `success:true` não é garantia suficiente de que a senha nova é a que o
+  // dispositivo realmente aceita.
+  try {
+    const verifyIdentity = await fetchDeviceIdentity(ipAddress);
+    await loginToSws(ipAddress, { username: newUsername, password: newPassword }, verifyIdentity);
+  } catch {
+    throw new PrinterSwsPasswordVerificationError(ipAddress);
   }
 }

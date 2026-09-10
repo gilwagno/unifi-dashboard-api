@@ -1,13 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronDown, ChevronUp, Pencil, Power, Printer as PrinterIcon, RefreshCw, Trash2 } from 'lucide-react';
+import {
+  Calendar,
+  ChevronDown,
+  ChevronUp,
+  Gauge,
+  Hash,
+  KeyRound,
+  Package,
+  Pencil,
+  Power,
+  Printer as PrinterIcon,
+  RefreshCw,
+  Trash2,
+} from 'lucide-react';
 import { Badge } from '../components/Badge';
 import { Layout } from '../components/Layout';
 import { usePolling } from '../hooks/usePolling';
 import {
   api,
+  AdminPasswordAmbiguousError,
   ApiError,
   type ConsumableSupplyStatus,
   type CreatePrinterBody,
+  type PrinterAdminPasswordResult,
   type PrinterConsumablesResponse,
   type PrinterSnmpInput,
   type PrinterSnmpVersion,
@@ -40,6 +55,31 @@ const SUPPLY_STATUS_INFO: Record<ConsumableSupplyStatus, { label: string; tone: 
   unsupported: { label: 'Não suportado', tone: 'neutral', hint: 'Este modelo não expõe esse dado via SNMP.' },
   error: { label: 'Erro de leitura', tone: 'neutral', hint: 'Falha pontual ao ler este campo — tente novamente mais tarde.' },
 };
+
+// O nome do suprimento vem cru do SNMP (`hrDeviceDescr` do fabricante, ex.:
+// "Black Toner Cartridge", "Cartucho de toner preto", "Waste Toner Box") —
+// sem um enum fechado do backend pra mapear, a cor é inferida por palavra-
+// -chave (pt/en) no nome, só pra dar o mesmo feedback visual que o próprio
+// painel da impressora já mostra (cartucho colorido, ver print da SWS real).
+// Suprimentos sem cor associada (fusor, correia, coletor de resíduo, rolo)
+// ficam neutros de propósito — inventar uma cor pra eles seria enganoso.
+const SUPPLY_COLOR_RULES: { pattern: RegExp; fill: string }[] = [
+  { pattern: /preto|black|k(?:\b|toner)/i, fill: '#27272a' },
+  { pattern: /ciano|cyan/i, fill: '#06b6d4' },
+  { pattern: /magenta/i, fill: '#db2777' },
+  { pattern: /amarel|yellow/i, fill: '#eab308' },
+];
+const NEUTRAL_SUPPLY_FILL = '#94a3b8'; // slate-400 — suprimento sem cor de toner associada (fusor, rolo, correia…)
+
+function supplyFillColor(name: string): string {
+  const match = SUPPLY_COLOR_RULES.find((rule) => rule.pattern.test(name));
+  return match?.fill ?? NEUTRAL_SUPPLY_FILL;
+}
+
+function formatCollectedAt(iso: string | null): string {
+  if (!iso) return 'nunca coletado';
+  return new Date(iso).toLocaleString('pt-BR');
+}
 
 function networkBadge(printer: PrinterWithNetwork) {
   const { network } = printer;
@@ -227,6 +267,22 @@ export function Printers() {
   const [aliasDraft, setAliasDraft] = useState('');
   const [aliasSubmitting, setAliasSubmitting] = useState(false);
 
+  // Painel de troca de senha de admin do painel web (HP/SWS) — mesma
+  // disciplina do apelido (um só aberto por vez), mas com estado próprio
+  // porque a credencial nova aparece na tela e não pode ser perdida se o
+  // polling recarregar a lista (ver `usePolling` abaixo: desligado enquanto
+  // este painel está aberto, mesmo padrão do editor de IP fixo/senha Wi-Fi).
+  const [adminPasswordEditingId, setAdminPasswordEditingId] = useState<string | null>(null);
+  const [adminPasswordUsernameDraft, setAdminPasswordUsernameDraft] = useState('');
+  const [adminPasswordDraft, setAdminPasswordDraft] = useState('');
+  const [adminPasswordSubmitting, setAdminPasswordSubmitting] = useState(false);
+  const [adminPasswordError, setAdminPasswordError] = useState<Record<string, string>>({});
+  // Resultado bem-sucedido OU o estado AMBÍGUO (ver AdminPasswordAmbiguousError)
+  // — os dois mostram a credencial em texto puro, só o tom visual muda.
+  const [adminPasswordResult, setAdminPasswordResult] = useState<
+    Record<string, PrinterAdminPasswordResult & { ambiguous: boolean }>
+  >({});
+
   const requestSeqRef = useRef(0);
 
   // `silent = true` (polling em segundo plano) nunca reseta `printers` pra `null` — é esse
@@ -262,7 +318,9 @@ export function Printers() {
   // separado da lista (`printers`), então um refresh em segundo plano não afetaria os campos
   // preenchidos — mas evita qualquer risco de a lista trocar de posição/tamanho embaixo do
   // usuário no meio de um cadastro, o que seria confuso mesmo sem quebrar nada.
-  usePolling(() => load(true), POLL_INTERVAL_MS, { enabled: !showForm && aliasEditingId === null });
+  usePolling(() => load(true), POLL_INTERVAL_MS, {
+    enabled: !showForm && aliasEditingId === null && adminPasswordEditingId === null,
+  });
 
   function resetForm() {
     setForm(EMPTY_FORM);
@@ -501,6 +559,87 @@ export function Printers() {
       setError(err instanceof ApiError ? err.message : 'Falha ao renomear apelido no UniFi');
     } finally {
       setAliasSubmitting(false);
+    }
+  }
+
+  function startAdminPasswordEdit(printer: PrinterWithNetwork) {
+    setAdminPasswordEditingId(printer.id);
+    setAdminPasswordUsernameDraft('');
+    setAdminPasswordDraft('');
+    setAdminPasswordError((prev) => {
+      const next = { ...prev };
+      delete next[printer.id];
+      return next;
+    });
+  }
+
+  function cancelAdminPasswordEdit() {
+    setAdminPasswordEditingId(null);
+    setAdminPasswordUsernameDraft('');
+    setAdminPasswordDraft('');
+  }
+
+  // AÇÃO DE MAIOR RISCO desta tela: mexe na credencial mestra do painel admin
+  // de um equipamento de produção real. O `confirm` explica que a senha nova
+  // (gerada por nós se o campo ficar em branco) só aparece UMA VEZ na tela —
+  // mesmo espírito do aviso já usado pro reboot/reconectar, mas mais forte
+  // porque aqui não dá pra simplesmente tentar de novo sem risco (ver o
+  // estado AMBÍGUO tratado abaixo).
+  async function submitAdminPassword(printer: PrinterWithNetwork) {
+    const confirmed = window.confirm(
+      `Trocar a senha de admin do painel web de "${printer.name}"?\n\n` +
+        'Isso reescreve a credencial MESTRA do painel administrativo da própria impressora (não é a senha ' +
+        'do Wi-Fi nem do UniFi). A senha nova só aparece nesta tela UMA VEZ — copie antes de fechar.',
+    );
+    if (!confirmed) return;
+
+    setAdminPasswordSubmitting(true);
+    setAdminPasswordError((prev) => {
+      const next = { ...prev };
+      delete next[printer.id];
+      return next;
+    });
+    setAdminPasswordResult((prev) => {
+      const next = { ...prev };
+      delete next[printer.id];
+      return next;
+    });
+    try {
+      const result = await api.changeAdminPassword(printer.id, {
+        username: adminPasswordUsernameDraft.trim() || undefined,
+        password: adminPasswordDraft || undefined,
+      });
+      setAdminPasswordResult((prev) => ({ ...prev, [printer.id]: { ...result, ambiguous: false } }));
+      setAdminPasswordEditingId(null);
+      setAdminPasswordUsernameDraft('');
+      setAdminPasswordDraft('');
+    } catch (err) {
+      if (err instanceof AdminPasswordAmbiguousError) {
+        // Estado AMBÍGUO: o dispositivo pode ou não ter aceitado a troca real
+        // — a credencial TENTADA é a única cópia que existe, então ela some
+        // do formulário e vira o resultado exibido (mesmo lugar do sucesso,
+        // com um tom visual bem mais alarmante — ver renderização abaixo).
+        setAdminPasswordResult((prev) => ({
+          ...prev,
+          [printer.id]: {
+            username: err.attemptedUsername,
+            password: err.attemptedPassword,
+            ipAddress: err.ipAddress,
+            ipOrigin: err.ipOrigin,
+            ambiguous: true,
+          },
+        }));
+        setAdminPasswordEditingId(null);
+        setAdminPasswordUsernameDraft('');
+        setAdminPasswordDraft('');
+      } else {
+        setAdminPasswordError((prev) => ({
+          ...prev,
+          [printer.id]: err instanceof ApiError ? err.message : 'Falha ao trocar a senha de admin',
+        }));
+      }
+    } finally {
+      setAdminPasswordSubmitting(false);
     }
   }
 
@@ -802,6 +941,18 @@ export function Printers() {
                   </button>
                   <button
                     type="button"
+                    onClick={() =>
+                      adminPasswordEditingId === printer.id ? cancelAdminPasswordEdit() : startAdminPasswordEdit(printer)
+                    }
+                    disabled={pendingId === printer.id}
+                    title="Troca a senha de admin do PAINEL WEB da impressora (HP/SWS) — a credencial mestra do painel, não a do Wi-Fi/UniFi."
+                    className="flex items-center gap-1 rounded-md border border-[oklch(85%_0.08_300)] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[oklch(45%_0.15_300)] disabled:opacity-50"
+                  >
+                    <KeyRound className="h-3.5 w-3.5" />
+                    Trocar senha de admin
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => startEdit(printer)}
                     className="flex items-center gap-1 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-[11.5px] font-semibold text-slate-700"
                   >
@@ -856,50 +1007,181 @@ export function Printers() {
                 )}
               </div>
 
+              {adminPasswordEditingId === printer.id && (
+                <div className="flex flex-wrap items-end gap-2.5 border-t border-slate-50 bg-[oklch(98%_0.02_300)] px-5 py-3">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[11px] font-semibold text-slate-500">Novo usuário (opcional)</label>
+                    <input
+                      autoFocus
+                      value={adminPasswordUsernameDraft}
+                      onChange={(e) => setAdminPasswordUsernameDraft(e.target.value)}
+                      maxLength={18}
+                      placeholder="deixe em branco para manter o atual"
+                      className="w-56 rounded-md border border-slate-300 px-2.5 py-1.5 text-[13px]"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[11px] font-semibold text-slate-500">Nova senha (opcional, 8–18 caracteres)</label>
+                    <input
+                      value={adminPasswordDraft}
+                      onChange={(e) => setAdminPasswordDraft(e.target.value)}
+                      type="text"
+                      autoComplete="off"
+                      maxLength={18}
+                      placeholder="deixe em branco para gerar uma forte automaticamente"
+                      className="w-72 rounded-md border border-slate-300 px-2.5 py-1.5 font-mono text-[13px]"
+                    />
+                  </div>
+                  <button
+                    onClick={() => submitAdminPassword(printer)}
+                    disabled={adminPasswordSubmitting}
+                    className="rounded-md bg-[oklch(45%_0.15_300)] px-3 py-1.5 text-[11.5px] font-semibold text-white disabled:opacity-50"
+                  >
+                    {adminPasswordSubmitting ? 'Trocando…' : 'Confirmar troca'}
+                  </button>
+                  <button
+                    onClick={cancelAdminPasswordEdit}
+                    className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11.5px] font-semibold text-slate-500"
+                  >
+                    Cancelar
+                  </button>
+                  <span className="w-full max-w-md text-[10.5px] text-slate-400">
+                    Credencial do PAINEL WEB da própria impressora (HP/SWS) — diferente da senha do Wi-Fi ou do login
+                    deste dashboard. Só funciona se a impressora já tiver uma credencial atual cadastrada.
+                  </span>
+                </div>
+              )}
+
+              {adminPasswordError[printer.id] && (
+                <div className="border-t border-slate-50 bg-[oklch(97%_0.03_25)] px-5 py-2.5 text-[12.5px] text-[oklch(40%_0.15_25)]">
+                  {adminPasswordError[printer.id]}
+                </div>
+              )}
+
+              {adminPasswordResult[printer.id] && (
+                <div
+                  className={`border-t border-slate-50 px-5 py-3.5 ${
+                    adminPasswordResult[printer.id].ambiguous
+                      ? 'bg-[oklch(96%_0.06_25)]'
+                      : 'bg-[oklch(97%_0.05_150)]'
+                  }`}
+                >
+                  <div
+                    className={`mb-1.5 text-[12.5px] font-bold ${
+                      adminPasswordResult[printer.id].ambiguous
+                        ? 'text-[oklch(42%_0.15_25)]'
+                        : 'text-[oklch(38%_0.1_150)]'
+                    }`}
+                  >
+                    {adminPasswordResult[printer.id].ambiguous
+                      ? 'NÃO FOI POSSÍVEL CONFIRMAR — copie esta credencial agora, ela pode já estar valendo no painel.'
+                      : 'Senha trocada e confirmada — copie agora, ela não aparece de novo.'}
+                  </div>
+                  <div className="flex flex-col gap-0.5 font-mono text-[13px] text-slate-900">
+                    <div>
+                      usuário: <span className="font-semibold">{adminPasswordResult[printer.id].username}</span>
+                    </div>
+                    <div className="break-all">
+                      senha: <span className="font-semibold">{adminPasswordResult[printer.id].password}</span>
+                    </div>
+                  </div>
+                  <div className="mt-1.5 text-[10.5px] text-slate-500">
+                    Endereço: {adminPasswordResult[printer.id].ipAddress} (origem do IP:{' '}
+                    {adminPasswordResult[printer.id].ipOrigin})
+                    {adminPasswordResult[printer.id].ambiguous &&
+                      ' — o cadastro NÃO foi atualizado; confira manualmente o painel da impressora antes de tentar de novo.'}
+                  </div>
+                  <button
+                    onClick={() =>
+                      setAdminPasswordResult((prev) => {
+                        const next = { ...prev };
+                        delete next[printer.id];
+                        return next;
+                      })
+                    }
+                    className="mt-2 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-500"
+                  >
+                    Já copiei, fechar
+                  </button>
+                </div>
+              )}
+
               {isExpanded && (
                 <div className="border-t border-slate-100 bg-slate-50 px-5 py-4">
                   {cLoading && <div className="text-[12.5px] text-slate-400">Carregando consumíveis…</div>}
                   {cError && <div className="text-[12.5px] text-[oklch(45%_0.18_25)]">{cError}</div>}
                   {c && !cLoading && !cError && (
                     <>
-                      <div className="mb-2 flex flex-wrap gap-4 text-[11.5px] text-slate-500">
-                        <span>Coletado em: {c.collectedAt ?? 'nunca coletado'}</span>
-                        <span>Contador de páginas: {c.pageCount ?? '—'}</span>
-                        <span>Limite de "baixo": {c.lowThresholdPct !== null ? `${c.lowThresholdPct}%` : 'não configurado'}</span>
+                      <div className="mb-3 flex flex-wrap gap-2">
+                        <div className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5">
+                          <Calendar className="h-3.5 w-3.5 text-slate-400" strokeWidth={2} />
+                          <span className="text-[11px] text-slate-400">Coletado em</span>
+                          <span className="text-[11.5px] font-semibold text-slate-700">{formatCollectedAt(c.collectedAt)}</span>
+                        </div>
+                        <div className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5">
+                          <Hash className="h-3.5 w-3.5 text-slate-400" strokeWidth={2} />
+                          <span className="text-[11px] text-slate-400">Páginas impressas</span>
+                          <span className="text-[11.5px] font-semibold text-slate-700">{c.pageCount ?? '—'}</span>
+                        </div>
+                        <div className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5">
+                          <Gauge className="h-3.5 w-3.5 text-slate-400" strokeWidth={2} />
+                          <span className="text-[11px] text-slate-400">Alerta de "baixo"</span>
+                          <span className="text-[11.5px] font-semibold text-slate-700">
+                            {c.lowThresholdPct !== null ? `${c.lowThresholdPct}%` : 'não configurado'}
+                          </span>
+                        </div>
                       </div>
                       {c.supplies.length === 0 && (
-                        <div className="text-[12.5px] text-slate-400">Nenhum suprimento coletado ainda.</div>
+                        <div className="flex flex-col items-center gap-1.5 rounded-lg bg-white px-5 py-8 text-center">
+                          <Package className="h-5 w-5 text-slate-300" strokeWidth={1.5} />
+                          <span className="text-[12.5px] text-slate-400">Nenhum suprimento coletado ainda.</span>
+                          <span className="text-[10.5px] text-slate-300">
+                            O poller SNMP consulta a impressora a cada 15 minutos — aparece aqui após a primeira leitura.
+                          </span>
+                        </div>
                       )}
-                      <div className="flex flex-col gap-2">
+                      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
                         {c.supplies.map((supply, i) => {
                           const info = SUPPLY_STATUS_INFO[supply.status];
+                          const fill = supplyFillColor(supply.name);
                           return (
-                            <div key={i} className="flex items-center justify-between gap-3 rounded-lg bg-white px-3.5 py-2.5">
-                              <div className="flex flex-col">
-                                <span className="text-[13px] font-semibold text-slate-800">{supply.name}</span>
-                                {supply.serialNumber !== null && (
-                                  <span className="truncate text-[10.5px] text-slate-400">S/N: {supply.serialNumber}</span>
-                                )}
-                              </div>
-                              <div className="flex flex-1 items-center gap-2">
-                                <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100">
-                                  {supply.levelPercent !== null && (
-                                    <div
-                                      className="h-full rounded-full bg-accent"
-                                      style={{ width: `${Math.max(0, Math.min(100, supply.levelPercent))}%` }}
-                                    />
-                                  )}
+                            <div key={i} className="rounded-lg bg-white px-3.5 py-3">
+                              <div className="mb-1.5 flex items-center justify-between gap-2">
+                                <div className="flex min-w-0 items-center gap-1.5">
+                                  <span
+                                    className="h-2.5 w-2.5 shrink-0 rounded-full"
+                                    style={{ backgroundColor: fill }}
+                                    aria-hidden
+                                  />
+                                  <span className="truncate text-[12.5px] font-semibold text-slate-800">{supply.name}</span>
                                 </div>
-                                <span className="w-12 text-right font-mono text-[11.5px] text-slate-500">
+                                <Badge tone={info.tone}>{info.label}</Badge>
+                              </div>
+                              <div className="mb-1 flex items-baseline gap-1.5">
+                                <span className="text-[19px] font-bold leading-none text-slate-900">
                                   {supply.levelPercent !== null ? `${supply.levelPercent}%` : 'sem dado'}
                                 </span>
+                                <span className="text-[10.5px] text-slate-400">restante</span>
                               </div>
-                              <div className="flex flex-col items-end gap-0.5">
-                                <Badge tone={info.tone}>{info.label}</Badge>
-                                {info.tone === 'neutral' && (
-                                  <span className="max-w-52 text-right text-[10.5px] text-slate-400">{info.hint}</span>
+                              <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                                {supply.levelPercent !== null && (
+                                  <div
+                                    className="h-full rounded-full transition-[width]"
+                                    style={{
+                                      width: `${Math.max(0, Math.min(100, supply.levelPercent))}%`,
+                                      backgroundColor: fill,
+                                    }}
+                                  />
                                 )}
                               </div>
+                              {info.tone === 'neutral' && (
+                                <span className="mt-1.5 block text-[10.5px] text-slate-400">{info.hint}</span>
+                              )}
+                              {supply.serialNumber !== null && (
+                                <span className="mt-1.5 block truncate text-[10.5px] text-slate-400">
+                                  S/N: {supply.serialNumber}
+                                </span>
+                              )}
                             </div>
                           );
                         })}

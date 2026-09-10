@@ -25,9 +25,13 @@ import {
   loginToSws,
   opensslAesEncrypt,
   rebootHpPrinter,
+  changeHpAdminPassword,
+  fetchAdminSettings,
+  makeSwsData,
   PrinterSwsAuthenticationError,
   PrinterSwsRequestError,
   PrinterSwsUnreachableError,
+  PrinterSwsPasswordVerificationError,
   type SwsDeviceIdentity,
 } from '../../src/services/printer-hp-sws.service.js';
 
@@ -66,6 +70,46 @@ function swsDataBody(overrides: Partial<Record<'buyorProductName' | 'productSeri
     `SWS.DATA.productSerial = "${values.productSerial}";`,
     `SWS.DATA.csrfToken = "${values.csrfToken}";`,
     'SWS.DATA.somethingElse = "irrelevante";',
+  ].join('\n');
+}
+
+// Corpo típico de admin.json (Segurança → Administrador do sistema): mesmo
+// formato "literal de objeto JS sem aspas nas chaves" do sws_data.js, mas os
+// campos texto vêm entre aspas e os numéricos (flags/limites) sem aspas —
+// ver `extractAdminField` em printer-hp-sws.service.ts.
+function adminSettingsBody(
+  overrides: Partial<{
+    name: string;
+    phoneNumber: string;
+    location: string;
+    email: string;
+    loginIpEnable: string;
+    loginFailure: string;
+    autoLogout: string;
+  }> = {},
+) {
+  const values = {
+    name: 'Administrador',
+    phoneNumber: '11999999999',
+    location: 'Sala TI',
+    email: 'admin@example.com',
+    loginIpEnable: '0',
+    loginFailure: '3',
+    autoLogout: '5',
+    ...overrides,
+  };
+  return [
+    'var SWS = SWS || {};',
+    'SWS.DATA = SWS.DATA || {};',
+    'SWS.DATA.admin = {',
+    `  GSI_ADMIN_NAME: "${values.name}",`,
+    `  GSI_ADMIN_PHONE_NUMBER: "${values.phoneNumber}",`,
+    `  GSI_ADMIN_LOCATION: "${values.location}",`,
+    `  GSI_ADMIN_EMAIL: "${values.email}",`,
+    `  GSI_ADMIN_WUI_LOGIN_IP_ENABLE: ${values.loginIpEnable},`,
+    `  GSI_ADMIN_WUI_LOGIN_FAILURE: ${values.loginFailure},`,
+    `  GSI_ADMIN_WUI_AUTO_LOGOUT: ${values.autoLogout},`,
+    '};',
   ].join('\n');
 }
 
@@ -630,6 +674,446 @@ describe('rebootHpPrinter', () => {
     expect(error).toBeInstanceOf(PrinterSwsUnreachableError);
     expect((error as Error).message).not.toContain(CREDENTIALS.password);
     expect((error as Error).message).toContain('[REDACTED]');
+  });
+});
+
+describe('makeSwsData (SWS.UTIL.MakeSWSData)', () => {
+  it('cifra o texto SOZINHO (não "usuario\\rsenha", ao contrário do login) no formato Ext1 <sidpw>:<skey>', () => {
+    const value = makeSwsData('nova-senha-forte', IDENTITY);
+
+    expect(value.startsWith('Ext1 ')).toBe(true);
+    const [sidpw, skey] = value.slice('Ext1 '.length).split(':');
+    const rn = opensslAesDecrypt(skey, IDENTITY.productName + IDENTITY.productSerial);
+    expect(rn).toHaveLength(16);
+    expect(opensslAesDecrypt(sidpw, rn)).toBe('nova-senha-forte');
+  });
+
+  it('retorna string vazia quando o texto é vazio (campo de senha não alterado no formulário)', () => {
+    expect(makeSwsData('', IDENTITY)).toBe('');
+  });
+
+  it('gera um rn aleatório a cada chamada (duas cifras do mesmo texto diferem)', () => {
+    const a = makeSwsData('mesma-senha', IDENTITY);
+    const b = makeSwsData('mesma-senha', IDENTITY);
+    expect(a).not.toBe(b);
+  });
+
+  it('SEGURANÇA: o texto em claro não aparece em nenhuma parte do valor gerado', () => {
+    const value = makeSwsData('minha-senha-secreta', IDENTITY);
+    expect(value).not.toContain('minha-senha-secreta');
+  });
+});
+
+describe('fetchAdminSettings', () => {
+  it('faz GET em admin.json com o cookie de sessão e extrai os campos do formulário "Administrador do sistema"', async () => {
+    const fetchMock = vi.fn(async () => fakeResponse(200, adminSettingsBody()));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const settings = await fetchAdminSettings(IP, 'Authentication=Ext1 blob; xuser=SWS2.0');
+
+    expect(settings).toEqual({
+      name: 'Administrador',
+      phoneNumber: '11999999999',
+      location: 'Sala TI',
+      email: 'admin@example.com',
+      loginIpEnable: '0',
+      loginFailure: '3',
+      autoLogout: '5',
+    });
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(`https://${IP}/sws/app/security/general/admin/admin.json`);
+    expect(init.method).toBe('GET');
+    expect(init.headers).toEqual({ Cookie: 'Authentication=Ext1 blob; xuser=SWS2.0' });
+  });
+
+  // Estes campos são resubmetidos INALTERADOS no POST de troca de senha (ver
+  // changeHpAdminPassword) — se um deles sumir do admin.json (firmware
+  // diferente, página mudou), é melhor falhar aqui do que resubmeter um
+  // formulário incompleto e apagar essa configuração da impressora em
+  // silêncio.
+  it.each([
+    'GSI_ADMIN_NAME',
+    'GSI_ADMIN_PHONE_NUMBER',
+    'GSI_ADMIN_LOCATION',
+    'GSI_ADMIN_EMAIL',
+    'GSI_ADMIN_WUI_LOGIN_IP_ENABLE',
+    'GSI_ADMIN_WUI_LOGIN_FAILURE',
+    'GSI_ADMIN_WUI_AUTO_LOGOUT',
+  ] as const)('lança PrinterSwsRequestError quando só %s está ausente', async (missingKey) => {
+    const body = adminSettingsBody()
+      .split('\n')
+      .filter((line) => !line.includes(`${missingKey}:`))
+      .join('\n');
+    vi.stubGlobal('fetch', vi.fn(async () => fakeResponse(200, body)));
+
+    await expect(fetchAdminSettings(IP, 'Authentication=Ext1 blob')).rejects.toBeInstanceOf(PrinterSwsRequestError);
+  });
+
+  it('lança PrinterSwsRequestError com o status quando a resposta é não-2xx', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => fakeResponse(403, 'forbidden')));
+
+    const error = await fetchAdminSettings(IP, 'Authentication=Ext1 blob').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PrinterSwsRequestError);
+    expect((error as PrinterSwsRequestError).status).toBe(403);
+  });
+
+  it('lança PrinterSwsUnreachableError quando o fetch rejeita', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('ECONNRESET');
+      }),
+    );
+
+    await expect(fetchAdminSettings(IP, 'Authentication=Ext1 blob')).rejects.toBeInstanceOf(PrinterSwsUnreachableError);
+  });
+
+  // ACHADO DO CRÍTICO (2026-09-10): o nome do campo é interpolado numa regex
+  // sem borda à esquerda, então um campo mais longo TERMINADO no nome
+  // procurado (e que apareça antes no corpo) casaria primeiro e o valor
+  // errado seria resubmetido no formulário — apagando/sobrescrevendo em
+  // silêncio a configuração real da impressora, exatamente o efeito colateral
+  // que `fetchAdminSettings` existe pra evitar. O formulário desta página tem
+  // famílias de nomes com prefixos diferentes pro mesmo campo (`GSI_`/`XXI_`,
+  // ver o achado 2 no serviço), então a colisão é plausível.
+  it('não confunde um campo cujo nome TERMINA com o nome procurado', async () => {
+    const body = ['SWS.DATA.admin = {', '  XXI_GSI_ADMIN_NAME: "valor de outro campo",', adminSettingsBody(), '};'].join(
+      '\n',
+    );
+    vi.stubGlobal('fetch', vi.fn(async () => fakeResponse(200, body)));
+
+    const settings = await fetchAdminSettings(IP, 'Authentication=Ext1 blob');
+    expect(settings.name).toBe('Administrador');
+  });
+});
+
+describe('changeHpAdminPassword', () => {
+  // "Atual" reaproveita a credencial genérica do arquivo (CREDENTIALS) — o
+  // nome só existe aqui pra deixar explícito qual das duas credenciais (atual
+  // vs nova) cada chamada de login usa, já que a função lida com as duas.
+  const CURRENT_CREDENTIALS = CREDENTIALS;
+  const NEW_USERNAME = 'admin';
+  const NEW_PASSWORD = 'nova-senha-forte';
+  const POST_LOGIN_CSRF = 'cG9zLWxvZ2luLWFkbWluLWNzcmY=';
+
+  // Sequencia as respostas dos MESMOS três endpoints reaproveitados do fluxo
+  // de login/reboot (sws_data.js, login.jsp) por ORDEM DE CHAMADA — não por
+  // presença de cookie sozinha, porque a 1ª e a 3ª leitura de identidade (a
+  // inicial e a de verificação) são AMBAS sem cookie, e a 1ª e a 2ª chamada
+  // de login usam credenciais diferentes (atual, depois nova) mas o mesmo
+  // corpo de resposta serviria pras duas se só olhássemos a URL.
+  function buildFetchMock(options: { setAdminBody?: string; verifyLoginFails?: boolean } = {}) {
+    let identityCalls = 0;
+    let loginCalls = 0;
+    return vi.fn(async (url: string) => {
+      if (String(url).endsWith('/sws/data/sws_data.js')) {
+        identityCalls += 1;
+        // 2ª leitura = pós-login, autenticada — csrfToken PÓS-login, mesmo
+        // achado já coberto em rebootHpPrinter. 1ª e 3ª (verificação) usam o
+        // csrfToken pré-login normal.
+        return fakeResponse(200, swsDataBody(identityCalls === 2 ? { csrfToken: POST_LOGIN_CSRF } : {}));
+      }
+      if (String(url).endsWith('/login.jsp')) {
+        loginCalls += 1;
+        if (loginCalls === 1) return loginOkResponse('Authentication=Ext1 sessao-atual; Path=/; HttpOnly');
+        // 2ª chamada de login = verificação com a credencial NOVA.
+        return options.verifyLoginFails
+          ? fakeResponse(200, JSON.stringify({ success: false }))
+          : loginOkResponse('Authentication=Ext1 sessao-verificacao; Path=/; HttpOnly');
+      }
+      if (String(url).endsWith('/admin.json')) return fakeResponse(200, adminSettingsBody());
+      if (String(url).endsWith('/SetAdmin.jsp')) return fakeResponse(200, options.setAdminBody ?? '{success:true}');
+      throw new Error(`URL inesperada nos testes: ${url}`);
+    });
+  }
+
+  it(
+    'login com a credencial ATUAL → relê identidade autenticada → lê admin.json → POST SetAdmin.jsp com a senha ' +
+      'cifrada e os demais campos INALTERADOS → verifica por relogin com a credencial NOVA',
+    async () => {
+      const fetchMock = buildFetchMock();
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(
+        changeHpAdminPassword(IP, CURRENT_CREDENTIALS, NEW_USERNAME, NEW_PASSWORD),
+      ).resolves.toBeUndefined();
+
+      // 7 chamadas: identidade(sem sessão) → login(atual) → identidade(autenticada)
+      // → admin.json → SetAdmin.jsp → identidade(verificação, sem sessão) → login(nova).
+      expect(fetchMock).toHaveBeenCalledTimes(7);
+
+      const [adminUrl, adminInit] = fetchMock.mock.calls[3] as unknown as [string, RequestInit];
+      expect(adminUrl).toBe(`https://${IP}/sws/app/security/general/admin/admin.json`);
+      expect(adminInit.headers).toEqual({
+        Cookie: `Authentication=Ext1 sessao-atual${SESSION_COOKIE_SUFFIX}`,
+      });
+
+      const [setAdminUrl, setAdminInit] = fetchMock.mock.calls[4] as unknown as [string, RequestInit];
+      expect(setAdminUrl).toBe(`https://${IP}/sws/app/security/general/admin/SetAdmin.jsp`);
+      expect(setAdminInit.method).toBe('POST');
+      // Mesma exigência de Origin+Referer+Cookie já confirmada ao vivo pro
+      // reboot — SetAdmin.jsp é outro POST de escrita autenticado da mesma SWS.
+      expect(setAdminInit.headers).toMatchObject({
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Origin: `https://${IP}`,
+        Referer: `https://${IP}/sws/index.html`,
+        Cookie: `Authentication=Ext1 sessao-atual${SESSION_COOKIE_SUFFIX}`,
+      });
+
+      const body = new URLSearchParams(String(setAdminInit.body));
+      // csrf-token é o PÓS-login (mesmo achado do reboot — ver buildFetchMock).
+      expect(body.get('csrf-token')).toBe(POST_LOGIN_CSRF);
+      expect(body.get('GSI_ADMIN_WUI_LOGIN_ID')).toBe(NEW_USERNAME);
+      // Os demais campos do formulário voltam EXATAMENTE como lidos do
+      // admin.json — reenviar valores fixos/vazios apagaria essa configuração
+      // da impressora (ver a DECISÃO no topo da seção do serviço).
+      expect(body.get('GSI_ADMIN_NAME')).toBe('Administrador');
+      expect(body.get('GSI_ADMIN_PHONE_NUMBER')).toBe('11999999999');
+      expect(body.get('GSI_ADMIN_LOCATION')).toBe('Sala TI');
+      expect(body.get('GSI_ADMIN_EMAIL')).toBe('admin@example.com');
+      expect(body.get('GSI_ADMIN_WUI_LOGIN_IP_ENABLE')).toBe('0');
+      expect(body.get('GSI_ADMIN_WUI_LOGIN_FAILURE')).toBe('3');
+      expect(body.get('GSI_ADMIN_WUI_AUTO_LOGOUT')).toBe('5');
+
+      // A senha nova nunca vai em claro — só dentro do blob Ext1/AES.
+      expect(String(setAdminInit.body)).not.toContain(NEW_PASSWORD);
+      const encryptedPassword = body.get('GSI_ADMIN_WUI_LOGIN_PASS') ?? '';
+      expect(encryptedPassword.startsWith('Ext1 ')).toBe(true);
+      const [sidpw, skey] = encryptedPassword.slice('Ext1 '.length).split(':');
+      const rn = opensslAesDecrypt(skey, IDENTITY.productName + IDENTITY.productSerial);
+      expect(opensslAesDecrypt(sidpw, rn)).toBe(NEW_PASSWORD);
+
+      // A verificação final relogou com a credencial NOVA (usuário + senha),
+      // não a antiga — é a garantia central desta função.
+      const [, verifyLoginInit] = fetchMock.mock.calls[6] as unknown as [string, RequestInit];
+      const verifyBody = new URLSearchParams(String(verifyLoginInit.body));
+      const verifyAuth = verifyBody.get('Authentication') ?? '';
+      const [verifySidpw, verifySkey] = verifyAuth.slice('Ext1 '.length).split(':');
+      const verifyRn = opensslAesDecrypt(verifySkey, IDENTITY.productName + IDENTITY.productSerial);
+      expect(opensslAesDecrypt(verifySidpw, verifyRn)).toBe(`${NEW_USERNAME}\r${NEW_PASSWORD}`);
+    },
+  );
+
+  it('propaga PrinterSwsAuthenticationError quando a credencial ATUAL é recusada (nunca chega a ler admin.json)', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/sws/data/sws_data.js')) return fakeResponse(200, swsDataBody());
+      if (String(url).endsWith('/login.jsp')) return fakeResponse(200, JSON.stringify({ success: false }));
+      throw new Error(`URL inesperada: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      changeHpAdminPassword(IP, CURRENT_CREDENTIALS, NEW_USERNAME, NEW_PASSWORD),
+    ).rejects.toBeInstanceOf(PrinterSwsAuthenticationError);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('admin.json'))).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('SetAdmin.jsp'))).toBe(false);
+  });
+
+  it('propaga o erro de admin.json sem campos esperados, sem chegar a POSTar SetAdmin.jsp', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/sws/data/sws_data.js')) return fakeResponse(200, swsDataBody());
+      if (String(url).endsWith('/login.jsp')) return loginOkResponse();
+      if (String(url).endsWith('/admin.json')) return fakeResponse(200, '<html>não é uma SWS</html>');
+      throw new Error(`URL inesperada: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      changeHpAdminPassword(IP, CURRENT_CREDENTIALS, NEW_USERNAME, NEW_PASSWORD),
+    ).rejects.toBeInstanceOf(PrinterSwsRequestError);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('SetAdmin.jsp'))).toBe(false);
+  });
+
+  it('lança PrinterSwsRequestError com o status quando SetAdmin.jsp responde não-2xx', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/sws/data/sws_data.js')) return fakeResponse(200, swsDataBody());
+      if (String(url).endsWith('/admin.json')) return fakeResponse(200, adminSettingsBody());
+      if (String(url).endsWith('/login.jsp')) return loginOkResponse();
+      if (String(url).endsWith('/SetAdmin.jsp')) return fakeResponse(500, 'erro interno');
+      throw new Error(`URL inesperada: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const error = await changeHpAdminPassword(IP, CURRENT_CREDENTIALS, NEW_USERNAME, NEW_PASSWORD).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(PrinterSwsRequestError);
+    expect((error as PrinterSwsRequestError).status).toBe(500);
+  });
+
+  it('lança PrinterSwsRequestError quando SetAdmin.jsp recusa (success:false) e NÃO tenta verificar por relogin', async () => {
+    const fetchMock = buildFetchMock({ setAdminBody: '{success:false}' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      changeHpAdminPassword(IP, CURRENT_CREDENTIALS, NEW_USERNAME, NEW_PASSWORD),
+    ).rejects.toBeInstanceOf(PrinterSwsRequestError);
+
+    // Só o login inicial (credencial atual) — nenhuma tentativa de
+    // verificação com a credencial nova depois de uma recusa explícita.
+    const loginCalls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/login.jsp'));
+    expect(loginCalls).toHaveLength(1);
+  });
+
+  it(
+    'lança PrinterSwsPasswordVerificationError quando SetAdmin.jsp diz sucesso mas o relogin com a senha NOVA falha',
+    async () => {
+      const fetchMock = buildFetchMock({ verifyLoginFails: true });
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(
+        changeHpAdminPassword(IP, CURRENT_CREDENTIALS, NEW_USERNAME, NEW_PASSWORD),
+      ).rejects.toBeInstanceOf(PrinterSwsPasswordVerificationError);
+    },
+  );
+
+  // Contraparte do teste acima: mesmo quando a etapa de verificação falha por
+  // um motivo totalmente diferente (rede, não credencial recusada), o
+  // resultado pro chamador precisa ser o MESMO erro — a rota só sabe agir
+  // sobre "não deu pra confirmar a senha nova", não sobre a causa específica.
+  it('também converte falha de REDE na verificação em PrinterSwsPasswordVerificationError', async () => {
+    let identityCalls = 0;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/sws/data/sws_data.js')) {
+        identityCalls += 1;
+        if (identityCalls <= 2) return fakeResponse(200, swsDataBody(identityCalls === 2 ? { csrfToken: POST_LOGIN_CSRF } : {}));
+        throw new Error('ECONNRESET'); // 3ª leitura = identidade de verificação
+      }
+      if (String(url).endsWith('/admin.json')) return fakeResponse(200, adminSettingsBody());
+      if (String(url).endsWith('/SetAdmin.jsp')) return fakeResponse(200, '{success:true}');
+      if (String(url).endsWith('/login.jsp')) return loginOkResponse();
+      throw new Error(`URL inesperada: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      changeHpAdminPassword(IP, CURRENT_CREDENTIALS, NEW_USERNAME, NEW_PASSWORD),
+    ).rejects.toBeInstanceOf(PrinterSwsPasswordVerificationError);
+  });
+
+  // ACHADO DO CRÍTICO (2026-09-10): falha de rede NO PRÓPRIO POST de escrita
+  // é AMBÍGUA, não "a impressora não respondeu". A versão anterior propagava
+  // PrinterSwsUnreachableError cru daqui, e a rota mapeia isso pra 504
+  // ("Impressora não respondeu") — um status que qualquer cliente/operador lê
+  // como "nada aconteceu", quando a impressora já pode ter aplicado a senha
+  // nova antes da conexão morrer. Este teste (que ANTES exigia
+  // PrinterSwsUnreachableError) é o que separa "certamente nada foi escrito"
+  // de "pode ter sido escrito".
+  it('converte falha de rede NO POST de SetAdmin.jsp em PrinterSwsPasswordVerificationError (estado ambíguo)', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/sws/data/sws_data.js')) return fakeResponse(200, swsDataBody());
+      if (String(url).endsWith('/admin.json')) return fakeResponse(200, adminSettingsBody());
+      if (String(url).endsWith('/login.jsp')) return loginOkResponse();
+      if (String(url).endsWith('/SetAdmin.jsp')) {
+        throw new Error(
+          `falha ao enviar corpo contendo ${CURRENT_CREDENTIALS.password} e também ${NEW_PASSWORD}`,
+        );
+      }
+      throw new Error(`URL inesperada: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const error = await changeHpAdminPassword(IP, CURRENT_CREDENTIALS, NEW_USERNAME, NEW_PASSWORD).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(PrinterSwsPasswordVerificationError);
+    // SEGURANÇA: a mensagem embute o erro nativo (que aqui contém as duas
+    // senhas) — a redação de `swsRequest` tem que continuar valendo depois do
+    // reembrulho.
+    expect((error as Error).message).not.toContain(CURRENT_CREDENTIALS.password);
+    expect((error as Error).message).not.toContain(NEW_PASSWORD);
+    expect((error as Error).message).toContain('[REDACTED]');
+  });
+
+  // Contraparte: falha de rede ANTES do POST (na leitura de admin.json) NÃO é
+  // ambígua — nada foi escrito, e a rota precisa poder responder 504 nesse
+  // caso. Sem este teste, "embrulhar tudo como ambíguo" passaria verde.
+  it('mantém PrinterSwsUnreachableError quando a rede falha ANTES do POST (leitura de admin.json)', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/sws/data/sws_data.js')) return fakeResponse(200, swsDataBody());
+      if (String(url).endsWith('/login.jsp')) return loginOkResponse();
+      if (String(url).endsWith('/admin.json')) throw new Error('ETIMEDOUT');
+      throw new Error(`URL inesperada: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const error = await changeHpAdminPassword(IP, CURRENT_CREDENTIALS, NEW_USERNAME, NEW_PASSWORD).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(PrinterSwsUnreachableError);
+    expect(error).not.toBeInstanceOf(PrinterSwsPasswordVerificationError);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('SetAdmin.jsp'))).toBe(false);
+  });
+
+  // ACHADO DO CRÍTICO (2026-09-10) — a comparação `success !== true` do
+  // SetAdmin.jsp não tinha NENHUM teste ancorando: trocar por `=== false`
+  // deixava a suíte inteira verde (mutação executada e confirmada). Estes
+  // dois casos matam o mutante. Consequência prática dele: uma recusa limpa
+  // do painel ("nada foi tocado") seria reclassificada como o erro AMBÍGUO de
+  // verificação ("a senha pode ter mudado, confira o painel") — pânico
+  // desnecessário num equipamento intacto.
+  it.each([
+    ['string truthy-mas-não-true', '{"success":"false"}'],
+    ['número no lugar do booleano', '{"success":1}'],
+    ['JSON válido só com o objeto de erros do formulário (forma real da recusa)', '{"errors":{"GSI_ADMIN_WUI_LOGIN_PASS":"error"}}'],
+  ])('trata `success` %s no SetAdmin.jsp como RECUSA, e não tenta verificar por relogin', async (_label, setAdminBody) => {
+    const fetchMock = buildFetchMock({ setAdminBody });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      changeHpAdminPassword(IP, CURRENT_CREDENTIALS, NEW_USERNAME, NEW_PASSWORD),
+    ).rejects.toBeInstanceOf(PrinterSwsRequestError);
+    const loginCalls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/login.jsp'));
+    expect(loginCalls).toHaveLength(1);
+  });
+
+  // Corpo vazio/truncado (`found: false`) segue caindo na verificação por
+  // relogin, que é quem dá o veredito — mesmo raciocínio já documentado em
+  // extractSwsSuccessField, mas aqui o desfecho é o OPOSTO do reboot: sem
+  // confirmação, a senha nova não é persistida.
+  it('corpo vazio no SetAdmin.jsp não é recusa por si só — quem decide é o relogin de verificação', async () => {
+    vi.stubGlobal('fetch', buildFetchMock({ setAdminBody: '' }));
+    await expect(changeHpAdminPassword(IP, CURRENT_CREDENTIALS, NEW_USERNAME, NEW_PASSWORD)).resolves.toBeUndefined();
+
+    vi.stubGlobal('fetch', buildFetchMock({ setAdminBody: '', verifyLoginFails: true }));
+    await expect(
+      changeHpAdminPassword(IP, CURRENT_CREDENTIALS, NEW_USERNAME, NEW_PASSWORD),
+    ).rejects.toBeInstanceOf(PrinterSwsPasswordVerificationError);
+  });
+
+  // A cifra do campo de senha usa `productName + productSerial` da identidade
+  // AUTENTICADA (a 2ª leitura), não da leitura anônima inicial. Nos outros
+  // testes as duas identidades têm o mesmo nome/série, então trocar
+  // `sessionIdentity` por `identity` no `makeSwsData` passaria verde; aqui a
+  // 2ª leitura devolve uma série diferente de propósito pra travar isso (um
+  // firmware que mascare a série antes do login quebraria a cifra em
+  // silêncio, e o único sintoma seria a verificação falhar DEPOIS de já ter
+  // escrito).
+  it('cifra a senha com a identidade AUTENTICADA (pós-login), não com a leitura anônima', async () => {
+    const AUTHED_SERIAL = 'SERIE-POS-LOGIN';
+    let identityCalls = 0;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/sws/data/sws_data.js')) {
+        identityCalls += 1;
+        return fakeResponse(
+          200,
+          swsDataBody(identityCalls === 2 ? { productSerial: AUTHED_SERIAL, csrfToken: POST_LOGIN_CSRF } : {}),
+        );
+      }
+      if (String(url).endsWith('/admin.json')) return fakeResponse(200, adminSettingsBody());
+      if (String(url).endsWith('/SetAdmin.jsp')) return fakeResponse(200, '{success:true}');
+      if (String(url).endsWith('/login.jsp')) return loginOkResponse();
+      throw new Error(`URL inesperada: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await changeHpAdminPassword(IP, CURRENT_CREDENTIALS, NEW_USERNAME, NEW_PASSWORD);
+
+    const [, setAdminInit] = fetchMock.mock.calls[4] as unknown as [string, RequestInit];
+    const encrypted = new URLSearchParams(String(setAdminInit.body)).get('GSI_ADMIN_WUI_LOGIN_PASS') ?? '';
+    const [sidpw, skey] = encrypted.slice('Ext1 '.length).split(':');
+    const rn = opensslAesDecrypt(skey, IDENTITY.productName + AUTHED_SERIAL);
+    expect(opensslAesDecrypt(sidpw, rn)).toBe(NEW_PASSWORD);
   });
 });
 
