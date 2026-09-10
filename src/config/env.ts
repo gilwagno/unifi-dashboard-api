@@ -54,6 +54,32 @@ const envSchema = z.object({
   // persistido (append-only, uma linha JSON por entrada). Ver
   // src/services/audit-log.service.ts.
   AUDIT_LOG_FILE: z.string().min(1).default('./audit.log'),
+
+  // Onda 3 (módulo de Active Directory + ponte 802.1X, ver
+  // docs/ad-module-plan.md) — todas opcionais, mesmo tratamento de
+  // UNIFI_CONTROLLER_USER/PASSWORD: sem elas, ad.service.ts lança
+  // AdNotConfiguredError e o módulo fica indisponível de forma clara, sem
+  // derrubar o resto do app. AD_URL precisa ser `ldaps://` (LDAPS) — o
+  // client (`unicodePwd`, a forma padrão do AD de setar senha) só é aceito
+  // por LDAP criptografado; o AD recusa a operação em LDAP puro.
+  AD_URL: z.string().min(1).optional(),
+  // DN base do domínio (ex.: "DC=evokaudio,DC=local") — raiz de onde
+  // buscas/gravações partem quando um DN mais específico não é dado.
+  AD_BASE_DN: z.string().min(1).optional(),
+  // DN da conta de serviço usada pro bind (ex.:
+  // "CN=svc-dashboard,CN=Users,DC=evokaudio,DC=local") — precisa de
+  // permissão de escrita nos objetos que este módulo gerencia.
+  AD_BIND_DN: z.string().min(1).optional(),
+  AD_BIND_PASSWORD: z.string().min(1).optional(),
+  // OU (organizational unit) onde usuários novos são criados e onde a
+  // busca de usuários procura por padrão (ex.:
+  // "OU=Funcionarios,DC=evokaudio,DC=local").
+  AD_USERS_OU: z.string().min(1).optional(),
+  // DN do grupo que a ponte 802.1X usa como "tem acesso à rede" — NPS no
+  // Windows Server valida contra membership neste grupo. Só é exigido por
+  // POST/DELETE /ad/users/:username/network-access, não pelo resto do
+  // módulo (CRUD de usuário/grupo/computador funciona sem ele).
+  AD_NETWORK_ACCESS_GROUP_DN: z.string().min(1).optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
