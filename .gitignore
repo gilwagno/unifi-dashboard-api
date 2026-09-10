@@ -15,6 +15,16 @@ test-results/
 playwright-report/
 blob-report/
 .playwright/
+# Screenshots tiradas por rodadas de verificação manual/agente dentro de e2e/
+# (o `.` no início é a convenção já usada por e2e/.printers-e2e.db). São
+# artefato de UMA execução, não parte da suíte — commitá-las só engorda o
+# histórico com binário que ninguém relê.
+e2e/.*.png
+
+# Incremental do `tsc -b`. O do frontend cai em node_modules/.tmp (já
+# ignorado), mas rodar `tsc -b` na raiz cria este aqui e ele apareceu em
+# `git status` como não rastreado.
+*.tsbuildinfo
 
 # Worktrees isolados criados pelo Agent tool (isolation: 'worktree') — cada
 # um é um checkout completo do repo; nunca devem ser versionados, e um que
