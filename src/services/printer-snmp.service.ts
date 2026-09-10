@@ -97,6 +97,11 @@ const OID = {
   prtMarkerSuppliesSupplyUnit: '1.3.6.1.2.1.43.11.1.1.7',
   prtMarkerSuppliesMaxCapacity: '1.3.6.1.2.1.43.11.1.1.8',
   prtMarkerSuppliesLevel: '1.3.6.1.2.1.43.11.1.1.9',
+  // Subtarefa 19: campo padrão RFC 3805 (mesmo índice composto de
+  // prtMarkerLifeCount11, coluna .5 em vez de .4), nunca lido pelo poller
+  // até aqui. Confirmado por sonda real contra as 5 impressoras da rede
+  // (HP `.89`=24, Brother `.222`=226) — nenhuma MIB privada envolvida.
+  prtMarkerPowerOnCount11: '1.3.6.1.2.1.43.10.2.1.5.1.1',
 } as const;
 
 // --- Shape do resultado ---
@@ -126,7 +131,17 @@ export type SnmpMeasurement =
 export interface PrinterSupply {
   // Índice composto da linha na prtMarkerSuppliesTable (ex.: '1.1').
   index: string;
+  // Texto CRU de prtMarkerSuppliesDescription, exatamente como a impressora
+  // devolveu (ex.: "Black Toner S/N:CRUM-210729A5BB3" nas 2 HPs reais) —
+  // nunca modificado, para não perder informação que a impressora reportou.
+  // Use `supplyDisplayName`/`serialNumber` para a versão sem o número de
+  // série embutido.
   description: string | null;
+  // Número de série do cartucho, extraído de `description` quando a
+  // impressora o embute (achado real, subtarefa 19: as 2 HPs seguem o
+  // padrão "<nome> S/N:<serial>"; as 3 Brother da rede real não têm esse
+  // sufixo, então fica `null` para elas). Ver `parseSupplyDescription`.
+  serialNumber: string | null;
   // prtMarkerSuppliesTypeTC (RFC 3805): 3=toner, 4=wasteToner, 9=opc/drum,
   // 15=fuser, 1=other... Mantemos o código cru + um rótulo dos valores que
   // as impressoras reais usam, sem tentar mapear a enumeração inteira.
@@ -157,6 +172,10 @@ export interface PrinterSnmpReading {
   // `null` quando o OID não é suportado/falhou; lista vazia = sem erro ativo.
   detectedErrorStates: string[] | null;
   pageCount: SnmpMeasurement;
+  // prtMarkerPowerOnCount (subtarefa 19) — mesmo tratamento de SnmpMeasurement
+  // que pageCount: sentinela/OID não suportado/erro pontual nunca viram um
+  // número inventado.
+  powerOnCount: SnmpMeasurement;
   supplies: PrinterSupply[];
   // true quando ao menos um campo veio como 'unsupported'/'error' — a
   // leitura é utilizável, mas incompleta.
@@ -282,6 +301,59 @@ export function computeLevelPercent(
   if (level.value > maxCapacity.value) return null;
 
   return Math.round((level.value / maxCapacity.value) * 100);
+}
+
+// Extrai o número de série embutido em prtMarkerSuppliesDescription, quando
+// presente (achado real, subtarefa 19: as 2 HPs da rede usam o padrão
+// "<nome> S/N:<serial>", ex. "Black Toner S/N:CRUM-210729A5BB3"; as 3
+// Brother reais não têm esse sufixo). Âncora no fim da string (`$`) porque é
+// assim que o padrão observado sempre aparece — evita casar um "S/N:" que
+// por acaso apareça no meio de um nome de suprimento diferente.
+//
+// Endurecimento (achado 3 da revisão crítica, não confirmado contra
+// hardware real): o valor capturado exclui explicitamente caracteres de
+// controle (`\x00-\x1f`, inclusive NUL) além de espaço em branco comum —
+// `\S` sozinho não filtra NUL, então um firmware que preenchesse a
+// description com padding NUL depois do serial (nunca observado nas 5
+// impressoras reais, mas nenhuma garantia contra isso) faria o NUL entrar
+// no valor de `serialNumber`. A cauda `[\s\x00-\x1f]*$` continua aceitando
+// esse padding depois do serial, só não deixando ele fazer parte do valor.
+const SUPPLY_SERIAL_PATTERN = /\bS\/N:\s*([^\s\x00-\x1f]+)[\s\x00-\x1f]*$/i;
+
+export function parseSupplyDescription(description: string | null): {
+  name: string | null;
+  serialNumber: string | null;
+} {
+  if (description === null) return { name: null, serialNumber: null };
+
+  const match = SUPPLY_SERIAL_PATTERN.exec(description);
+  if (!match) {
+    // Achado 2 da revisão crítica: o ramo sem "S/N:" não aparava espaço
+    // nem tratava string vazia/só-espaço como ausente — duas descriptions
+    // da MESMA leitura podiam receber tratamento de espaço diferente
+    // (uma com sufixo "S/N:" já era aparada, a outra não), e uma
+    // description vazia virava um rótulo vazio na UI em vez de cair no
+    // fallback (`typeLabel`/"Suprimento <index>") como já acontece quando
+    // description é `null`.
+    const trimmed = description.trim();
+    return { name: trimmed.length > 0 ? trimmed : null, serialNumber: null };
+  }
+
+  const name = description.slice(0, match.index).trim();
+  return { name: name.length > 0 ? name : null, serialNumber: match[1] };
+}
+
+// Nome de exibição de um suprimento — mesmo fallback que /consumables e o
+// histórico SNMP (suppliesForHistory) já usavam antes da subtarefa 19
+// (description ?? typeLabel ?? "Suprimento <index>"), só que agora com o
+// número de série (se houver) removido do nome via parseSupplyDescription,
+// em vez de deixá-lo embutido na string. Centralizado aqui (em vez de
+// duplicado em printers.routes.ts) para que a resposta atual e o histórico
+// nunca divirjam em como nomeiam um suprimento — mesmo motivo de
+// pageCountValue ser compartilhado entre os dois.
+export function supplyDisplayName(supply: Pick<PrinterSupply, 'description' | 'typeLabel' | 'index'>): string {
+  const { name } = parseSupplyDescription(supply.description);
+  return name ?? supply.typeLabel ?? `Suprimento ${supply.index}`;
 }
 
 // --- Camada SNMP ---
@@ -484,6 +556,7 @@ async function readPrinter(record: PrinterRecord, ipAddress: string): Promise<Pr
     const deviceStatus = note(await getScalar(session, OID.hrDeviceStatus1));
     const errorState = note(await getScalar(session, OID.hrPrinterDetectedErrorState1));
     const pageCount = note(await getScalar(session, OID.prtMarkerLifeCount11));
+    const powerOnCount = note(await getScalar(session, OID.prtMarkerPowerOnCount11));
 
     const [types, descriptions, units, maxCapacities, levels] = await Promise.all([
       walkColumn(session, OID.prtMarkerSuppliesType),
@@ -514,9 +587,12 @@ async function readPrinter(record: PrinterRecord, ipAddress: string): Promise<Pr
 
       if (maxCapacity.status === 'unsupported' || level.status === 'unsupported') partial = true;
 
+      const description = asString(descriptions.get(index));
+
       return {
         index,
-        description: asString(descriptions.get(index)),
+        description,
+        serialNumber: parseSupplyDescription(description).serialNumber,
         type,
         typeLabel: type === null ? null : (SUPPLY_TYPE_LABELS[type] ?? null),
         unit,
@@ -543,6 +619,7 @@ async function readPrinter(record: PrinterRecord, ipAddress: string): Promise<Pr
       detectedErrorStates:
         errorVarbind && Buffer.isBuffer(errorVarbind.value) ? decodeErrorStateBitmap(errorVarbind.value) : null,
       pageCount: measurementFromScalar(pageCount),
+      powerOnCount: measurementFromScalar(powerOnCount),
       supplies,
       partial,
     };
@@ -573,7 +650,7 @@ export function pageCountValue(pageCount: SnmpMeasurement): number | null {
 // atual nunca divirjam silenciosamente em como nomeiam um suprimento.
 export function suppliesForHistory(supplies: PrinterSupply[]): Array<{ name: string; levelPercent: number | null }> {
   return supplies.map((supply) => ({
-    name: supply.description ?? supply.typeLabel ?? `Suprimento ${supply.index}`,
+    name: supplyDisplayName(supply),
     levelPercent: supply.levelPercent,
   }));
 }

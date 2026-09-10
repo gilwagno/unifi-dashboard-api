@@ -46,8 +46,13 @@ vi.mock('../../src/services/printer-snmp.service.js', async (importOriginal) => 
   return {
     getLastReading: (printerId: string) => getLastReadingMock(printerId),
     collectAllReadings: vi.fn(async () => undefined),
-    // Pura — vem do módulo real (ver printers-consumables.test.ts).
+    // Puras — vêm do módulo real (ver printers-consumables.test.ts).
+    // `parseSupplyDescription` (subtarefa 19) é a que a rota usa pra
+    // normalizar o `name` de linhas de histórico gravadas ANTES da
+    // subtarefa 19 (com "S/N:..." embutido) — reimplementá-la aqui
+    // esconderia uma regressão real de "linha antiga não normaliza".
     pageCountValue: actual.pageCountValue,
+    parseSupplyDescription: actual.parseSupplyDescription,
   };
 });
 
@@ -160,6 +165,48 @@ describe('GET /printers/:id/history', () => {
         },
       ],
     });
+
+    await app.close();
+  });
+
+  // Achado real da revisão crítica da subtarefa 19: `suppliesForHistory`
+  // passou a gravar o nome do suprimento SEM o "S/N:..." embutido (antes
+  // dessa mudança, gravava cru). Linhas gravadas ANTES da subtarefa 19
+  // continuam no banco (retenção de 90 dias) com o nome antigo — sem
+  // normalizar na leitura, o MESMO cartucho físico apareceria como dois
+  // suprimentos distintos na série temporal (um que "termina" com o nome
+  // antigo, outro que "começa" com o nome novo) na primeira consulta depois
+  // do deploy. `parseSupplyDescription` é idempotente, então a normalização
+  // na leitura corrige as linhas antigas sem precisar de migração.
+  it('normaliza na leitura o nome de linhas gravadas ANTES da subtarefa 19 (com "S/N:" embutido), unificando com o nome novo', async () => {
+    const { app, token } = await authedApp();
+    const auth = { authorization: `Bearer ${token}` };
+    const printer = await createPrinter(app, auth);
+
+    // Linha "antiga" (pré-subtarefa 19): nome cru com serial embutido.
+    printersRepository.recordSnmpHistoryEntry(printer.id, {
+      collectedAt: '2026-08-31T10:00:00.000Z',
+      pageCount: 100,
+      supplies: [{ name: 'Black Toner S/N:CRUM-210729A5BB3', levelPercent: 70 }],
+      partial: false,
+    });
+    // Linha "nova" (pós-subtarefa 19): nome já sem o serial.
+    printersRepository.recordSnmpHistoryEntry(printer.id, {
+      collectedAt: '2026-08-31T12:00:00.000Z',
+      pageCount: 200,
+      supplies: [{ name: 'Black Toner', levelPercent: 55 }],
+      partial: false,
+    });
+
+    const res = await app.inject({ method: 'GET', url: `/printers/${printer.id}/history`, headers: auth });
+
+    expect(res.statusCode).toBe(200);
+    const names = res.json().entries.map((entry: { supplies: Array<{ name: string }> }) =>
+      entry.supplies.map((s) => s.name),
+    );
+    // As duas linhas colapsam pro MESMO nome — o mesmo cartucho físico,
+    // não dois suprimentos diferentes.
+    expect(names).toEqual([['Black Toner'], ['Black Toner']]);
 
     await app.close();
   });
