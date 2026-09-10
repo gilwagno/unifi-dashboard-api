@@ -210,6 +210,56 @@ describe('Printers page', () => {
     expect(api.getPrinterConsumables).toHaveBeenCalledTimes(1);
   });
 
+  // Achado real do usuário testando ao vivo: o poller SNMP do backend
+  // coleta a cada 15min, e a lista de impressoras já recarrega sozinha a
+  // cada 60s (usePolling) — mas o medidor de toner da linha ficava preso no
+  // retrato da PRIMEIRA busca pra sempre (ex.: buscada antes da primeira
+  // coleta do poller, "nunca coletado"), porque nada disparava uma busca
+  // nova depois. Reproduz o cenário exato: busca inicial sem dado, poller
+  // coleta de verdade, ciclo de polling da lista passa, medidor aparece —
+  // sem nenhum clique manual do usuário.
+  it('atualiza o medidor de toner sozinho depois de um ciclo de polling, quando o poller coleta dado novo', async () => {
+    // `mockResolvedValueOnce` (não `mockResolvedValue` com um array fixo)
+    // pra cada ciclo — um array literal reaproveitado pelas DUAS chamadas
+    // seria a MESMA referência em `printers`, e o React ignoraria o
+    // segundo `setPrinters` por `Object.is` achar "nada mudou", mascarando
+    // o próprio bug que este teste existe pra travar (na produção, cada
+    // resposta HTTP real desserializa um array NOVO, então isso nunca
+    // acontece de verdade — é só um detalhe do mock).
+    vi.mocked(api.listPrinters).mockResolvedValueOnce([PRINTER_INTEGRATION]);
+    vi.mocked(api.listPrinters).mockResolvedValueOnce([{ ...PRINTER_INTEGRATION }]);
+    vi.mocked(api.getPrinterConsumables).mockResolvedValueOnce({
+      printerId: 'p1',
+      collectedAt: null,
+      pageCount: null,
+      lowThresholdPct: null,
+      supplies: [],
+    });
+
+    vi.useFakeTimers();
+    renderPrinters();
+    await flushMicrotasks();
+
+    expect(screen.queryByTitle(/Black Toner:/)).not.toBeInTheDocument();
+
+    vi.mocked(api.getPrinterConsumables).mockResolvedValueOnce({
+      printerId: 'p1',
+      collectedAt: '2026-09-10T16:48:24.000Z',
+      pageCount: 500,
+      lowThresholdPct: null,
+      supplies: [{ name: 'Black Toner', serialNumber: null, levelPercent: 55, status: 'ok' }],
+    });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushMicrotasks();
+
+    // `screen.getByTitle` síncrono (não `findByTitle`) — com fake timers
+    // ativos, o `waitFor` interno do `findBy*` não teria como avançar
+    // sozinho; `flushMicrotasks` acima já garantiu que o estado assentou.
+    expect(screen.getByTitle('Black Toner: 55%')).toBeInTheDocument();
+    expect(api.getPrinterConsumables).toHaveBeenCalledTimes(2);
+  });
+
   describe('painel de saúde da frota', () => {
     it('mostra tudo em dia quando todas online e sem toner baixo', async () => {
       vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
