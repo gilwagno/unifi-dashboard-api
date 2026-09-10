@@ -109,6 +109,10 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
           id: 'client-1',
           macAddress: BROTHER_BRW_MAC,
           ipAddress: '172.16.0.80',
+          // Apelido ATUAL no UniFi (subtarefa nova: expor isso no merge —
+          // achado real: o editor "Renomear apelido no UniFi" nunca
+          // mostrava o valor atual em lugar nenhum).
+          name: 'Apelido atual BRW',
           type: 'WIRELESS',
           blocked: false,
         },
@@ -122,6 +126,7 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
       online: true,
       ipAddress: '172.16.0.80',
       connectionType: 'WIRELESS',
+      alias: 'Apelido atual BRW',
     });
 
     await app.close();
@@ -136,7 +141,7 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
     vi.mocked(unifiService.listClients).mockResolvedValueOnce({ data: [] });
     vi.mocked(unifiClassicService.isConfigured).mockReturnValue(true);
     vi.mocked(unifiClassicService.getKnownClientsNetworkInfo).mockResolvedValueOnce(
-      new Map([[HP_MAC, { ipAddress: '172.16.0.89', connectionType: 'WIRELESS' }]]),
+      new Map([[HP_MAC, { ipAddress: '172.16.0.89', connectionType: 'WIRELESS', alias: 'Apelido atual HP' }]]),
     );
     // ACHADO/MELHORIA (sessão de continuação do reboot HP): stat/sta é quem
     // decide online/offline de verdade pra impressoras "classic" — rest/user
@@ -150,6 +155,7 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
       online: true,
       ipAddress: '172.16.0.89',
       connectionType: 'WIRELESS',
+      alias: 'Apelido atual HP',
     });
 
     await app.close();
@@ -163,7 +169,7 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
     vi.mocked(unifiService.listClients).mockResolvedValueOnce({ data: [] });
     vi.mocked(unifiClassicService.isConfigured).mockReturnValue(true);
     vi.mocked(unifiClassicService.getKnownClientsNetworkInfo).mockResolvedValueOnce(
-      new Map([[HP_MAC, { ipAddress: '172.16.0.89', connectionType: 'WIRELESS' }]]),
+      new Map([[HP_MAC, { ipAddress: '172.16.0.89', connectionType: 'WIRELESS', alias: null }]]),
     );
     // stat/sta responde com sucesso, mas SEM o MAC desta impressora — ela
     // está desconectada agora, não é um caso de "não sabemos".
@@ -176,6 +182,9 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
       online: false,
       ipAddress: '172.16.0.89',
       connectionType: 'WIRELESS',
+      // Sem apelido configurado no UniFi pra este cliente (campo `name`
+      // vazio/ausente em /rest/user) — `null`, não string vazia.
+      alias: null,
     });
 
     await app.close();
@@ -189,7 +198,7 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
     vi.mocked(unifiService.listClients).mockResolvedValueOnce({ data: [] });
     vi.mocked(unifiClassicService.isConfigured).mockReturnValue(true);
     vi.mocked(unifiClassicService.getKnownClientsNetworkInfo).mockResolvedValueOnce(
-      new Map([[HP_MAC, { ipAddress: '172.16.0.89', connectionType: 'WIRELESS' }]]),
+      new Map([[HP_MAC, { ipAddress: '172.16.0.89', connectionType: 'WIRELESS', alias: null }]]),
     );
     vi.mocked(unifiClassicService.getConnectedMacs).mockRejectedValueOnce(new Error('sessão expirada'));
 
@@ -200,6 +209,7 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
       online: null,
       ipAddress: '172.16.0.89',
       connectionType: 'WIRELESS',
+      alias: null,
     });
 
     await app.close();
@@ -221,6 +231,7 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
       online: null,
       ipAddress: null,
       connectionType: null,
+      alias: null,
     });
 
     await app.close();
@@ -241,6 +252,7 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
       online: null,
       ipAddress: null,
       connectionType: null,
+      alias: null,
     });
     // Não deveria nem tentar a API clássica quando ela não está configurada.
     expect(unifiClassicService.getKnownClientsNetworkInfo).not.toHaveBeenCalled();
@@ -298,6 +310,7 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
           id: 'client-brw',
           macAddress: BROTHER_BRW_MAC,
           ipAddress: '172.16.0.80',
+          name: 'Apelido atual BRW',
           type: 'WIRELESS',
           blocked: false,
         },
@@ -308,7 +321,7 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
     // mesma listagem).
     vi.mocked(unifiClassicService.isConfigured).mockReturnValue(true);
     vi.mocked(unifiClassicService.getKnownClientsNetworkInfo).mockResolvedValueOnce(
-      new Map([[HP_MAC, { ipAddress: '172.16.0.89', connectionType: 'WIRELESS' }]]),
+      new Map([[HP_MAC, { ipAddress: '172.16.0.89', connectionType: 'WIRELESS', alias: 'Apelido atual HP' }]]),
     );
     // A HP está conectada agora (stat/sta) — deve aparecer online: true,
     // mesmo vindo pela API clássica.
@@ -324,18 +337,21 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
       online: true,
       ipAddress: '172.16.0.80',
       connectionType: 'WIRELESS',
+      alias: 'Apelido atual BRW',
     });
     expect(byId.get(hp.id)).toEqual({
       source: 'classic',
       online: true,
       ipAddress: '172.16.0.89',
       connectionType: 'WIRELESS',
+      alias: 'Apelido atual HP',
     });
     expect(byId.get(brVendas.id)).toEqual({
       source: 'unknown',
       online: null,
       ipAddress: null,
       connectionType: null,
+      alias: null,
     });
 
     // A Integration API e as duas chamadas da API clássica só foram feitas
@@ -357,7 +373,7 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
 
     const res = await app.inject({ method: 'GET', url: `/printers/${created.id}`, headers: auth });
     expect(res.statusCode).toBe(200);
-    expect(res.json().network).toEqual({ source: 'unknown', online: null, ipAddress: null, connectionType: null });
+    expect(res.json().network).toEqual({ source: 'unknown', online: null, ipAddress: null, connectionType: null, alias: null });
 
     await app.close();
   });
@@ -373,7 +389,7 @@ describe('GET /printers e /printers/:id — merge com status do UniFi', () => {
 
     const res = await app.inject({ method: 'GET', url: `/printers/${created.id}`, headers: auth });
     expect(res.statusCode).toBe(200);
-    expect(res.json().network).toEqual({ source: 'unknown', online: null, ipAddress: null, connectionType: null });
+    expect(res.json().network).toEqual({ source: 'unknown', online: null, ipAddress: null, connectionType: null, alias: null });
 
     await app.close();
   });

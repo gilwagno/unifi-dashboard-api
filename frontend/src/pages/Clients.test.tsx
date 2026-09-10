@@ -16,7 +16,7 @@ vi.mock('../lib/api', () => ({
   getAccessToken: () => null,
 }));
 
-import { api } from '../lib/api';
+import { api, type UniFiClient } from '../lib/api';
 
 function renderClients() {
   return render(
@@ -34,7 +34,7 @@ async function flushMicrotasks() {
   }
 }
 
-function client(id: string, name: string) {
+function client(id: string, name: string): UniFiClient {
   return {
     id,
     name,

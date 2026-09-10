@@ -29,6 +29,12 @@ export interface PrinterNetworkStatus {
   online: boolean | null;
   ipAddress: string | null;
   connectionType: 'WIRED' | 'WIRELESS' | null;
+  // Apelido ATUAL do cliente no UniFi (campo `name` do controller) — achado
+  // real: o editor "Renomear apelido no UniFi" do frontend nunca expunha o
+  // valor atual, só o nome do cadastro local (campo diferente), então o
+  // usuário não tinha como saber se o apelido já era aquele valor ou algo
+  // completamente diferente antes de editar.
+  alias: string | null;
 }
 
 export const UNKNOWN_NETWORK_STATUS: PrinterNetworkStatus = {
@@ -36,6 +42,7 @@ export const UNKNOWN_NETWORK_STATUS: PrinterNetworkStatus = {
   online: null,
   ipAddress: null,
   connectionType: null,
+  alias: null,
 };
 
 export type PrinterWithNetworkStatus = PrinterPublic & { network: PrinterNetworkStatus };
@@ -107,6 +114,10 @@ export async function buildNetworkStatusResolver(
         online: true,
         ipAddress: integrationClient.ipAddress ?? null,
         connectionType: integrationClient.type,
+        alias:
+          typeof integrationClient.name === 'string' && integrationClient.name.length > 0
+            ? integrationClient.name
+            : null,
       };
     }
 
@@ -129,6 +140,7 @@ export async function buildNetworkStatusResolver(
         online: connectedMacs ? connectedMacs.has(mac) : null,
         ipAddress: classicInfo.ipAddress,
         connectionType: classicInfo.connectionType,
+        alias: classicInfo.alias,
       };
     }
 

@@ -280,6 +280,14 @@ async function fetchPrinterDiscoveryCandidates(site: string): Promise<PrinterDis
 export interface ClassicClientNetworkInfo {
   ipAddress: string | null;
   connectionType: 'WIRED' | 'WIRELESS' | null;
+  // Apelido ATUAL do cliente no UniFi (campo `name` de /rest/user) — achado
+  // real: o módulo de impressoras tem um editor de "Apelido no UniFi"
+  // (PATCH /clients/:mac/alias) mas, até esta subtarefa, nunca expunha o
+  // valor ATUAL em lugar nenhum da leitura — o editor pré-preenchia com o
+  // nome do CADASTRO LOCAL (printers.name, um campo diferente), levando o
+  // usuário a achar que o apelido no UniFi já era aquele valor quando podia
+  // ser completamente outro.
+  alias: string | null;
 }
 
 function toNetworkInfo(client: ClassicClient): ClassicClientNetworkInfo {
@@ -292,6 +300,7 @@ function toNetworkInfo(client: ClassicClient): ClassicClientNetworkInfo {
   return {
     ipAddress: typeof ip === 'string' && ip.length > 0 ? ip : null,
     connectionType: typeof client.is_wired === 'boolean' ? (client.is_wired ? 'WIRED' : 'WIRELESS') : null,
+    alias: typeof client.name === 'string' && client.name.length > 0 ? client.name : null,
   };
 }
 

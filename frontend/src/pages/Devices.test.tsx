@@ -16,7 +16,7 @@ vi.mock('../lib/api', () => ({
   getAccessToken: () => null,
 }));
 
-import { api } from '../lib/api';
+import { api, type UniFiDevice } from '../lib/api';
 
 function renderDevices() {
   return render(
@@ -38,7 +38,7 @@ async function flushMicrotasks() {
   }
 }
 
-function device(id: string, name: string) {
+function device(id: string, name: string): UniFiDevice {
   return { id, name, model: 'U6-Lite', macAddress: `aa:bb:cc:00:00:0${id}`, ipAddress: '172.16.0.10', state: 'ONLINE' };
 }
 

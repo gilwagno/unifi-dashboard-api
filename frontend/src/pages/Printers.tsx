@@ -627,9 +627,18 @@ export function Printers() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [printers]);
 
+  // Achado real do usuário testando ao vivo: o rascunho pré-preenchia com
+  // `printer.name` (o nome do CADASTRO LOCAL deste módulo — campo
+  // diferente), então o usuário achava que o Apelido no UniFi já era
+  // aquele valor quando podia ser completamente outro (confirmado: uma
+  // impressora com cadastro local "HP Laser MFP 135w (Financeiro)" tinha
+  // Apelido real no UniFi "HP Laser MFP 135w (Comercial)"). Agora parte do
+  // valor REAL (`printer.network.alias`, exposto pelo backend nesta
+  // subtarefa) — string vazia só quando o UniFi realmente não tem apelido
+  // configurado pra esse cliente.
   function startAliasEdit(printer: PrinterWithNetwork) {
     setAliasEditingId(printer.id);
-    setAliasDraft(printer.name);
+    setAliasDraft(printer.network.alias ?? '');
   }
 
   async function submitAlias(printer: PrinterWithNetwork) {
@@ -640,6 +649,13 @@ export function Printers() {
       await api.setClientAlias(printer.mac, aliasDraft.trim());
       setAliasEditingId(null);
       setAliasDraft('');
+      setNotice(`Apelido no UniFi de "${printer.name}" atualizado.`);
+      // Sem isto, a tela continuava mostrando o apelido ANTIGO até o
+      // próximo ciclo de polling (até 60s depois) — o mesmo tipo de achado
+      // já corrigido no medidor de toner (ver fetchConsumablesFor acima):
+      // uma ação de escrita bem-sucedida precisa refletir na tela na hora,
+      // não só esperar o próximo poll.
+      load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Falha ao renomear apelido no UniFi');
     } finally {
@@ -1174,13 +1190,20 @@ export function Printers() {
                     </button>
                   </>
                 ) : (
-                  <button
-                    onClick={() => startAliasEdit(printer)}
-                    title="Renomeia o Apelido exibido no painel do UniFi — diferente do nome deste cadastro local."
-                    className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[11.5px] font-semibold text-slate-600"
-                  >
-                    Renomear apelido no UniFi
-                  </button>
+                  <>
+                    {/* Achado real do usuário: sem isto, não tinha como saber o
+                        apelido atual sem sair pro painel do UniFi conferir. */}
+                    <span className="text-[11.5px] text-slate-600">
+                      {printer.network.alias ?? <span className="italic text-slate-400">sem apelido configurado</span>}
+                    </span>
+                    <button
+                      onClick={() => startAliasEdit(printer)}
+                      title="Renomeia o Apelido exibido no painel do UniFi — diferente do nome deste cadastro local."
+                      className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[11.5px] font-semibold text-slate-600"
+                    >
+                      Renomear apelido no UniFi
+                    </button>
+                  </>
                 )}
               </div>
 
