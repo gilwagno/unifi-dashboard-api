@@ -256,10 +256,9 @@ iPhone, um Watch e um Redmi antes).
     2026-08-31** (fazia parte do "Marco: subtarefas 1-8" no topo deste arquivo — esta linha
     numerada estava sem o status marcado; corrigido em 2026-09-08).
 14. ✅ e2e — **47/50**. PR #13, mergeada em 2026-09-08.
-19. 🔍 **Detalhamento de consumíveis SNMP** (serial de cartucho, fusor/rolos, quebra de contadores,
-    power-on count) — investigação concluída em 2026-09-10, implementação ainda não iniciada. Ver
-    item 19 do "Progresso da Onda 2" abaixo e `docs/printers-snmp-research.md`, seção "Investigação
-    SNMP aprofundada — contadores detalhados, vida de fusor/rolos, serial por cartucho".
+19. ✅ **Detalhamento de consumíveis SNMP — parte (a)/(e) implementada em 2026-09-10** (serial de
+    cartucho + `prtMarkerPowerOnCount`); (b)/(c)/(d) seguem como estavam (ver item 19 do "Progresso
+    da Onda 2" abaixo pro detalhe completo, inclusive o que ficou de fora de propósito).
 
 Regra de alocação de modelo: CRUD/merge simples = Sonnet nos dois papéis (diversidade). Qualquer
 coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel do par em Opus.
@@ -525,8 +524,10 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
     Suíte final: backend 441/441 (36 arquivos), frontend 57/57 (8 arquivos), `tsc` limpo nos dois.
     **Confirmado nas duas rodadas (executor e crítico): nenhuma chamada de rede real foi feita
     contra qualquer impressora real durante todo o desenvolvimento e revisão.**
-19. 🔍 **Detalhamento de consumíveis SNMP** (serial de cartucho, fusor/rolos, quebra de contadores,
-    power-on count) — **investigação concluída em 2026-09-10, implementação PENDENTE.** Motivada por
+19. ✅ **Detalhamento de consumíveis SNMP** (serial de cartucho, fusor/rolos, quebra de contadores,
+    power-on count) — **investigação concluída em 2026-09-10; achados (a) e (e) IMPLEMENTADOS na
+    mesma data, ver bloco "Implementação (a)+(e)" no fim deste item; achados (b)/(c)/(d) seguem só
+    investigação, por decisão já registrada abaixo.** Motivada por
     prints reais do painel SWS da HP mostrados pelo usuário (tela de cartucho com Status/Restante/
     Impressão/Capacidade/Número de série, tela "Contadores de uso" com quebra Imprimir/Copiar/
     Relatório/Envio, tela de Configurações com "Nível de alerta de pouco toner"). Achados (todos via
@@ -581,6 +582,27 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
       SNMP/poller).
     - Threshold de alerta (achado d): não implementar leitura nenhuma sem uma nova sondagem que ache
       um candidato de verdade — não inventar/supor um OID.
+
+    **Implementação (a)+(e) — 47/50, mergeada em 2026-09-10 (PR #24, squash).** Par executor
+    (Sonnet)/crítico (Opus). `serialNumber` extraído de `prtMarkerSuppliesDescription` via
+    `parseSupplyDescription` (regex `S/N:(.+)$`, âncorada no fim) para um campo próprio em
+    `/consumables`, sem deixá-lo embutido no `name`; `prtMarkerPowerOnCount`
+    (`1.3.6.1.2.1.43.10.2.1.5.1.1`) lido pelo poller e exposto como `powerOnCount` em
+    `/diagnostics`. `supplyDisplayName` nova, centraliza o fallback de nome (antes duplicado entre
+    a rota e `suppliesForHistory`) — `/consumables` e `/history` nunca mais divergem em como nomeiam
+    um suprimento. **Achado sério do crítico, corrigido**: a troca de nome quebrava a continuidade
+    do histórico SNMP de 90 dias — linhas gravadas ANTES da mudança continuam no banco com o nome
+    antigo (`"Black Toner S/N:..."`), e sem normalizar na leitura o mesmo cartucho físico apareceria
+    como dois suprimentos distintos em `GET /printers/:id/history` na primeira consulta pós-deploy
+    (achado confirmado rodando `suppliesForHistory` sobre uma linha real de HP — exatamente a classe
+    de "invisibilidade silenciosa" já tratada como grave nas subtarefas 8b/15). Corrigido
+    normalizando via `parseSupplyDescription` no mapeamento da rota (idempotente, não migra o banco),
+    com teste de regressão reproduzindo o cenário exato. **2 achados menores, também corrigidos**:
+    `parseSupplyDescription` não aparava espaço nem tratava description vazia/só-espaço como ausente
+    no ramo sem `"S/N:"`; a regex deixava caractere de controle (NUL) entrar no valor do serial como
+    padding no fim (endurecimento, não confirmado contra hardware real — registrado como tal, não
+    como bug observado). Suíte final: backend 506/506, frontend 59/59, `tsc` limpo nos dois. Nenhuma
+    chamada de rede real; `printers.db` real não tocado.
 
 **Nota sobre rate limit do Opus**: bateu o limite durante a subtarefa 2, voltou a funcionar antes
 da subtarefa 3 terminar. Se acontecer de novo numa subtarefa futura, o padrão que funcionou foi:
