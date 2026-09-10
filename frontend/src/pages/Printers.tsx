@@ -689,15 +689,62 @@ export function Printers() {
     setAliasDraft(printer.network.alias ?? '');
   }
 
-  async function submitAlias(printer: PrinterWithNetwork) {
-    if (!aliasDraft.trim()) return;
+  // Rotular os dois campos ("cadastro local" × "Apelido no UniFi") explicou
+  // a divergência, mas não RESOLVEU: o usuário continuou lendo "Financeiro"
+  // em cima e "Comercial" embaixo como um erro. Rotular um desencontro não é
+  // o mesmo que dar como desfazê-lo — daí este atalho, que só aparece quando
+  // os dois valores realmente diferem.
+  function aliasDiffersFromRegistry(printer: PrinterWithNetwork): boolean {
+    return (
+      printer.network.source !== 'unknown' &&
+      printer.network.alias !== null &&
+      printer.network.alias.trim() !== printer.name.trim()
+    );
+  }
+
+  async function alignAliasWithRegistry(printer: PrinterWithNetwork) {
+    const confirmed = window.confirm(
+      `Renomear o Apelido no UniFi de "${printer.network.alias}" para "${printer.name}"?\n\n` +
+        'Isto altera o nome exibido no painel do UniFi, não o cadastro deste módulo.',
+    );
+    if (!confirmed) return;
+    await submitAlias(printer, printer.name);
+  }
+
+  async function submitAlias(printer: PrinterWithNetwork, overrideValue?: string) {
+    const value = (overrideValue ?? aliasDraft).trim();
+    if (!value) return;
     setAliasSubmitting(true);
     setError(null);
     try {
-      await api.setClientAlias(printer.mac, aliasDraft.trim());
+      await api.setClientAlias(printer.mac, value);
+
+      // Pedido direto do usuário: mudar o apelido embaixo tem que mudar o
+      // nome em cima também. Sem isto, cada renomeação CRIAVA um novo
+      // desencontro entre os dois campos — a mesma confusão
+      // "Financeiro em cima, Comercial embaixo" que ele reportou várias
+      // vezes. São dois sistemas distintos (cadastro local × UniFi), então
+      // são duas escritas: a segunda só roda se a primeira deu certo, e uma
+      // falha SÓ nela é relatada como sucesso PARCIAL, nunca como sucesso —
+      // dizer "atualizado" com metade aplicada é pior que dizer que falhou.
+      if (printer.name.trim() !== value) {
+        try {
+          await api.updatePrinter(printer.id, { name: value });
+        } catch (err) {
+          setAliasEditingId(null);
+          setAliasDraft('');
+          setError(
+            `Apelido no UniFi atualizado para "${value}", mas o nome do cadastro local NÃO foi alterado ` +
+              `(${err instanceof ApiError ? err.message : 'falha desconhecida'}). Use "Editar" para ajustá-lo.`,
+          );
+          load();
+          return;
+        }
+      }
+
       setAliasEditingId(null);
       setAliasDraft('');
-      setNotice(`Apelido no UniFi de "${printer.name}" atualizado.`);
+      setNotice(`Nome atualizado para "${value}" no UniFi e no cadastro local.`);
       // Sem isto, a tela continuava mostrando o apelido ANTIGO até o
       // próximo ciclo de polling (até 60s depois) — o mesmo tipo de achado
       // já corrigido no medidor de toner (ver fetchConsumablesFor acima):
@@ -1304,6 +1351,16 @@ export function Printers() {
                     >
                       Renomear apelido no UniFi
                     </button>
+                    {aliasDiffersFromRegistry(printer) && (
+                      <button
+                        onClick={() => void alignAliasWithRegistry(printer)}
+                        disabled={aliasSubmitting}
+                        title={`O UniFi chama esta impressora de "${printer.network.alias}" e o cadastro local de "${printer.name}". Clique para deixar os dois iguais ao cadastro.`}
+                        className="rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11.5px] font-semibold text-amber-800 disabled:opacity-50"
+                      >
+                        Não confere — igualar a “{printer.name}”
+                      </button>
+                    )}
                   </>
                 )}
               </div>

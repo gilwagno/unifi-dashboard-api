@@ -617,13 +617,106 @@ describe('Printers page', () => {
     await waitFor(() =>
       expect(api.setClientAlias).toHaveBeenCalledWith('50:81:40:d8:6c:7e', 'Impressora Financeiro'),
     );
+    // Pedido direto do usuário: renomear embaixo tem que renomear em cima
+    // também, senão cada renomeação criava um desencontro novo entre os
+    // dois campos.
+    await waitFor(() =>
+      expect(api.updatePrinter).toHaveBeenCalledWith('p1', { name: 'Impressora Financeiro' }),
+    );
     // Confirmação visível de que a ação teve efeito — sem isto, o usuário
     // não tinha como saber se a troca realmente aconteceu sem sair pro
     // painel do UniFi conferir.
-    expect(await screen.findByText(/Apelido no UniFi de "HPLaserMFP135w" atualizado\./)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Nome atualizado para "Impressora Financeiro" no UniFi e no cadastro local\./),
+    ).toBeInTheDocument();
     // E a lista é recarregada pra refletir o novo apelido, sem esperar o
     // próximo ciclo de polling (até 60s depois).
     await waitFor(() => expect(api.listPrinters).toHaveBeenCalledTimes(2));
+  });
+
+  // O usuário voltou a reportar "em cima Financeiro, embaixo Comercial" como
+  // bug DEPOIS de a tela já rotular os dois campos. Rotular o desencontro
+  // explicou, mas não deu como desfazê-lo — daí o atalho de igualar.
+  describe('desencontro entre o nome do cadastro local e o Apelido no UniFi', () => {
+    const printerComApelidoDivergente: PrinterWithNetwork = {
+      ...PRINTER_INTEGRATION,
+      network: { ...PRINTER_INTEGRATION.network, alias: 'HP Laser MFP 135w (Comercial)' },
+    };
+
+    it('oferece igualar o apelido ao cadastro, e só chama a API depois de confirmar', async () => {
+      vi.mocked(api.listPrinters).mockResolvedValue([printerComApelidoDivergente]);
+      vi.mocked(api.setClientAlias).mockResolvedValue({ ok: true });
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+      const user = userEvent.setup();
+      renderPrinters();
+      const card = (await screen.findByText('HPLaserMFP135w')).closest('div.overflow-hidden') as HTMLElement;
+
+      await user.click(within(card).getByRole('button', { name: /Não confere — igualar a/ }));
+
+      expect(confirmSpy).toHaveBeenCalled();
+      await waitFor(() =>
+        expect(api.setClientAlias).toHaveBeenCalledWith('50:81:40:d8:6c:7e', 'HPLaserMFP135w'),
+      );
+      confirmSpy.mockRestore();
+    });
+
+    // Duas escritas em sistemas diferentes: se a segunda falha, dizer
+    // "atualizado" esconderia que metade não foi aplicada.
+    it('relata sucesso PARCIAL (não sucesso) quando o apelido muda mas o cadastro local falha', async () => {
+      vi.mocked(api.listPrinters).mockResolvedValue([printerComApelidoDivergente]);
+      vi.mocked(api.setClientAlias).mockResolvedValue({ ok: true });
+      vi.mocked(api.updatePrinter).mockRejectedValue(new ApiError(500, 'banco indisponível'));
+
+      const user = userEvent.setup();
+      renderPrinters();
+      const card = (await screen.findByText('HPLaserMFP135w')).closest('div.overflow-hidden') as HTMLElement;
+
+      await user.click(within(card).getByRole('button', { name: 'Renomear apelido no UniFi' }));
+      const input = within(card).getByDisplayValue('HP Laser MFP 135w (Comercial)');
+      await user.clear(input);
+      await user.type(input, 'Impressora Financeiro');
+      await user.click(within(card).getByRole('button', { name: 'Salvar' }));
+
+      expect(await screen.findByText(/NÃO foi alterado/)).toBeInTheDocument();
+      expect(screen.queryByText(/no UniFi e no cadastro local/)).not.toBeInTheDocument();
+    });
+
+    it('não altera nada se o usuário cancelar a confirmação', async () => {
+      vi.mocked(api.listPrinters).mockResolvedValue([printerComApelidoDivergente]);
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+      const user = userEvent.setup();
+      renderPrinters();
+      const card = (await screen.findByText('HPLaserMFP135w')).closest('div.overflow-hidden') as HTMLElement;
+
+      await user.click(within(card).getByRole('button', { name: /Não confere — igualar a/ }));
+
+      expect(api.setClientAlias).not.toHaveBeenCalled();
+      confirmSpy.mockRestore();
+    });
+
+    it('não oferece igualar quando os dois nomes já batem (nada a resolver)', async () => {
+      vi.mocked(api.listPrinters).mockResolvedValue([
+        { ...PRINTER_INTEGRATION, network: { ...PRINTER_INTEGRATION.network, alias: 'HPLaserMFP135w' } },
+      ]);
+      renderPrinters();
+      // Com os dois nomes iguais o texto aparece 2x (título do card + linha
+      // do apelido) — pegar o primeiro, que é o título.
+      const titles = await screen.findAllByText('HPLaserMFP135w');
+      const card = titles[0].closest('div.overflow-hidden') as HTMLElement;
+      expect(within(card).queryByRole('button', { name: /Não confere/ })).not.toBeInTheDocument();
+    });
+
+    // Status de rede desconhecido = `alias: null` por NÃO SABERMOS, não por
+    // "não tem apelido" — oferecer "igualar" aqui proporia sobrescrever um
+    // valor que pode existir e ser diferente, sem nunca tê-lo lido.
+    it('não oferece igualar quando o status de rede é desconhecido', async () => {
+      vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_UNKNOWN]);
+      renderPrinters();
+      const card = (await screen.findByText(PRINTER_UNKNOWN.name)).closest('div.overflow-hidden') as HTMLElement;
+      expect(within(card).queryByRole('button', { name: /Não confere/ })).not.toBeInTheDocument();
+    });
   });
 
   it('mostra "sem apelido configurado" quando o UniFi não tem nenhum apelido pra esse cliente', async () => {

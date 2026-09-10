@@ -879,9 +879,25 @@ function startSnmpHistoryCleanupJob(): void {
   snmpHistoryCleanupTimer.unref?.();
 }
 
-// Sem coleta imediata no boot (mesma escolha de bandwidth-history): a
-// primeira leitura aparece depois do primeiro intervalo, para não disparar
-// tráfego de rede antes do app terminar de subir.
+// Dispara UMA coleta imediata, fora do ciclo de 15 min. Chamada só por
+// src/server.ts (o entrypoint real) — nunca no import do módulo, para que
+// importar o serviço num teste ou num script não gere tráfego de rede.
+//
+// Por que existe: `lastReadings` é memória de processo, então TODO restart
+// zera os consumíveis de todas as impressoras, e sem esta chamada a tela
+// ficava até 15 minutos inteiros dizendo "nunca coletado" — com o dado
+// real disponível o tempo todo, a um GET SNMP de distância. Em
+// desenvolvimento (`tsx watch`, que reinicia a cada edição) isso é
+// permanente: era exatamente o "tem hora que aparece e tem hora que some"
+// relatado pelo usuário, e a causa não era o poller nem a impressora.
+//
+// Não é await: subir o servidor não pode ficar esperando resposta de
+// impressora (uma desligada custa timeout). `collectAllReadings` já trata
+// e loga cada falha por impressora sem propagar.
+export function collectOnBoot(): void {
+  void collectAllReadings();
+}
+
 startPolling();
 startSnmpHistoryCleanupJob();
 
