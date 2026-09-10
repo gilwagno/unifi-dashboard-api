@@ -1,6 +1,6 @@
 # Gauntlet Loop — unifi-dashboard-api
 
-## Onda 3 (Módulo de Active Directory + Ponte 802.1X) — pré-requisitos concluídos, escopo funcional não iniciado
+## Onda 3 (Módulo de Active Directory + Ponte 802.1X) — pré-requisitos concluídos; CRUD de usuários em rascunho (PR #25, reprovado 43/50, correção em andamento)
 
 Escopo completo, arquitetura, estratégia de teste e ordem de subtarefas em
 `docs/ad-module-plan.md` — carregar esse documento no contexto de qualquer par que trabalhe
@@ -333,8 +333,14 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
    campo, o que tem semântica diferente (desliga o alerta por páginas silenciosamente). Trocado para
    `.nonnegative()`. Também revelado por mutação e corrigido: `duePages` sem checar
    `pageCountAtMaintenance !== null` no último evento coagia `null + intervalPages` num número
-   inventado. Suíte do backend: 521/521 (fora as 7 suítes da pasta órfã `.claude/worktrees/agent-
+   inventado. Suíte do backend: 281/281 (fora as 7 suítes da pasta órfã `.claude/worktrees/agent-
    a72f01faf9dd4e1f4/`, resíduo de outra tarefa, sem relação com este código), `tsc` limpo.
+   **Correção (auditoria de exatidão, 2026-09-10): esta linha dizia "521/521" — número errado,
+   provavelmente copiado por engano de um trecho bem posterior deste mesmo arquivo (a revisão da
+   senha admin HP, item 11, que também fecha em "521/521" mas é uma subtarefa diferente, 2 dias
+   depois). O diff real da PR #12 contra a PR #11 (diagnostics, que fechou em 262/262) soma só 19
+   testes novos — 281 é o número certo, e já é o que a abertura da seção "Onda 2 — CONCLUÍDA" no
+   topo deste arquivo sempre afirmou.**
 9. 🔍 Investigação HP/SWS real (172.16.0.34, login admin sem senha via Playwright — a SWS usa AES
    client-side, não dá pra scriptar com curl puro). **CORRIGIDO em 2026-09-09 (sessão de reboot
    HP)**: a hipótese original ("é a MESMA HP já cadastrada, só num IP diferente de Wi-Fi Direct")
@@ -603,6 +609,45 @@ coisa que toque segredo SNMP, poller, ou o spike de reboot = pelo menos um papel
     padding no fim (endurecimento, não confirmado contra hardware real — registrado como tal, não
     como bug observado). Suíte final: backend 506/506, frontend 59/59, `tsc` limpo nos dois. Nenhuma
     chamada de rede real; `printers.db` real não tocado.
+20. ✅ **Medidor visual de toner + painel de saúde da frota** (pedido direto do usuário numa sessão
+    de continuação, testando o dashboard ao vivo) — 4 PRs mergeadas em 2026-09-10 (#26, #27, #28,
+    #29), **nenhuma delas registrada aqui até esta auditoria de exatidão** (o arquivo parou de ser
+    atualizado depois da subtarefa 19 — acumulou 4 features/fixes reais sem registro; corrigido
+    agora).
+    - **PR #26**: consumíveis passam a ser buscados ANTECIPADAMENTE (toda impressora da lista, ao
+      carregar) em vez de só sob demanda ao clicar "Ver consumíveis". Medidor vertical colorido por
+      suprimento (`supplyFillColor`, mesma regra do detalhe expandido) direto na linha da lista.
+      Painel "saúde da frota" no topo (`StatCard`, mesmo componente de Overview/Health/Security):
+      total de impressoras, online/offline, "precisa de atenção" (offline OU toner baixo OU nunca
+      coletada, cada impressora contando 1 vez só mesmo com mais de um sinal) e páginas impressas
+      somadas na frota.
+    - **PR #27** (achado do próprio usuário testando ao vivo): "Precisa de atenção" mostrava só um
+      número, sem dizer qual impressora nem por quê — corrigido pra listar nome + motivo(s) de cada
+      impressora (até 2 por extenso, resume com "+N impressoras" se houver mais).
+    - **PR #28** (achado do próprio usuário testando ao vivo, sério): o medidor de toner nunca
+      atualizava depois da primeira busca — o guard por `ref` (pensado só pra evitar chamadas
+      concorrentes) nunca liberava depois de um SUCESSO, só depois de uma falha, então uma
+      impressora buscada antes da primeira coleta bem-sucedida do poller ficava presa em "nunca
+      coletado" pra sempre, mesmo com dado real disponível minutos depois. Corrigido liberando o
+      ref ao final de QUALQUER busca — o próximo ciclo de polling da lista (60s) já refaz a busca
+      sozinho.
+    - **PR #29** (achado do próprio usuário testando ao vivo, sério): o editor "Renomear apelido no
+      UniFi" pré-preenchia com `printer.name` (nome do CADASTRO LOCAL deste módulo, campo
+      diferente) em vez do apelido REAL no UniFi — confirmado contra o controller real, uma
+      impressora com cadastro local "HP Laser MFP 135w (Financeiro)" tinha apelido de verdade "HP
+      Laser MFP 135w (Comercial)". Corrigido expondo o apelido atual no merge de status de rede
+      (`PrinterNetworkStatus.alias`, backend) e exibindo/pré-preenchendo com esse valor real no
+      frontend, com confirmação visível + recarga da lista ao salvar.
+      **Achado de metodologia à parte, sério, corrigido na mesma PR**: `npx tsc --noEmit` sozinho
+      NÃO CHECA NADA no frontend deste projeto — o `frontend/tsconfig.json` é um arquivo "solution"
+      de project references (`files: []`, sem `include`), então esse comando processa zero arquivos
+      e sempre reporta "limpo" por vacuidade. O comando real (o mesmo que `npm run build` usa) é
+      `npx tsc -b`. Rodá-lo revelou 2 arquivos de teste JÁ QUEBRADOS de uma sessão anterior
+      (`Clients.test.tsx`/`Devices.test.tsx`, commit `a6b8918`, sem relação com este trabalho),
+      corrigidos na mesma PR. **Lição permanente pra qualquer sessão futura que mexer no
+      frontend: usar `npx tsc -b` (nunca `tsc --noEmit` sozinho) pra checar tipos, e `npm run
+      build` como confirmação final antes de considerar uma mudança de frontend fechada.**
+    - Suíte final pós-#29: backend 555/555, frontend 67/67 (via `tsc -b`, real), e2e 5/5.
 
 **Nota sobre rate limit do Opus**: bateu o limite durante a subtarefa 2, voltou a funcionar antes
 da subtarefa 3 terminar. Se acontecer de novo numa subtarefa futura, o padrão que funcionou foi:
@@ -650,11 +695,29 @@ Pendências reais conhecidas nesta data:
    inequívoco no `discover-candidates`) — **corrigido em 2026-09-09**, movido pra categoria
    ambígua.
 
-Nenhuma pendência de código conhecida no momento (a lista acima é de 2026-09-09; ver
-"Troca de senha de admin da HP: reaberta e confirmada ao vivo" no fim deste arquivo pro que mudou
-depois — subtarefa 11 reaberta, implementada, testada ao vivo, ainda **sem commit/PR** até a
-próxima sessão decidir isso). Se este arquivo disser o contrário numa sessão futura sem que o
-`git log` confirme, desconfiar do arquivo, não do código.
+**ATUALIZADO em 2026-09-10 — auditoria de exatidão completa** (2 agentes de leitura, cada um
+cruzando metade deste arquivo contra `git log`/`gh pr list`/o código real, pedida explicitamente
+pelo usuário antes de avançar pra Onda 3). Achados: 2 erros pontuais de transcrição corrigidos no
+lugar (item 8b da Onda 2 dizia "521/521", era "281/281"; a seção da senha admin HP dizia "sem
+frontend", a PR #22 sempre teve UI) — nenhum dos dois indicava PR fantasma ou reversão silenciosa,
+só número/frase desatualizados. Lacuna real confirmada e agora fechada: 4 PRs mergeadas em
+2026-09-10 (#26-#29, medidor de toner + painel de saúde da frota + 2 fixes de achados do próprio
+usuário testando ao vivo) não estavam registradas — ver item 20 do "Progresso da Onda 2" acima.
+Estado verificado nesta auditoria: **backend 555/555, frontend 67/67 (via `tsc -b` — comando real,
+`tsc --noEmit` sozinho não checa nada neste projeto, ver item 20), e2e 5/5**, tudo em `master`.
+
+Pendência real conhecida nesta data: a subtarefa 11 (senha admin HP) está com UI e backend
+mergeados (PR #22) — não é mais "sem commit/PR" como a versão anterior deste bloco dizia. A
+pendência de verdade agora é a **Onda 3**: o CRUD de usuários AD + ponte 802.1X existe na branch
+`feat/ad-module-users` (PR #25, **rascunho explícito, não mergeada**) — revisão crítica formal
+(Opus) deu **43/50, reprovado**, com 3 achados bloqueantes (mock de teste do `escapeFilter` não
+escapa de verdade, deixando a defesa contra injeção LDAP sem rede de segurança; DN do usuário novo
+montado por concatenação crua, sem escapar vírgula/caractere especial; troca de senha podia perder
+a senha gerada num estado ambíguo se a segunda escrita falhasse) — correção em andamento numa
+worktree isolada (`../unifi-ad-worktree`) pra não reiniciar o servidor de dev que o usuário está
+usando ao vivo. Grupos, computadores, `fake-ldap-server`, frontend de AD e e2e do módulo:
+**não iniciados, nenhum código em nenhuma branch**. Se este arquivo disser o contrário numa sessão
+futura sem que o `git log`/`gh pr list` confirmem, desconfiar do arquivo, não do código.
 
 ## Decisão do gate humano (respondida em 2026-08-31) — IMPLEMENTADO em 2026-09-08
 
@@ -1024,10 +1087,15 @@ existia só no log); e a cifra da senha agora tem teste provando que usa a ident
 
 **Não verificado de propósito** (registrado pra não virar suposição futura): nenhuma chamada de rede
 real foi feita nesta revisão (só código/teste); `printers.db` real confirmado intocado (mtime
-inalterado). A rota NÃO tem frontend — `POST /printers/:id/admin-password` só existe pela API, ao
-contrário do /reboot (que ganhou botão na Onda 2). O limite 8-18 do campo de senha e os nomes dos
-campos do `admin.json` seguem apoiados na investigação ao vivo já documentada, sem reconfirmação
-nesta revisão.
+inalterado). O limite 8-18 do campo de senha e os nomes dos campos do `admin.json` seguem apoiados
+na investigação ao vivo já documentada, sem reconfirmação nesta revisão.
+
+**Correção (auditoria de exatidão, 2026-09-10): esta seção dizia "a rota NÃO tem frontend" — estava
+desatualizada.** Essa frase foi escrita ANTES da PR #22 mergear (o commit que a escreveu, `7f2d206`,
+é anterior ao merge real); a PR #22 ("... + UI no frontend", squash de `cfa5166`) sempre incluiu um
+editor completo em `Printers.tsx` (`adminPasswordEditingId`/`startAdminPasswordEdit`/
+`submitAdminPassword`, tratamento visual do estado ambíguo via `AdminPasswordAmbiguousError`,
+confirmação de usuário/senha na tela) — só nunca foi atualizado aqui depois do merge.
 
 **Confirmado AO VIVO, ponta a ponta, contra as DUAS HPs reais** (algo que a sessão anterior à queda
 não tinha chegado a fazer — só o login, nunca a troca de senha em si, apesar do docblock do serviço
