@@ -393,7 +393,25 @@ interface ConsumablesResponse {
 // checagem. Para que isso não vire um "nunca alerta" silencioso, a resposta
 // carrega `lowThresholdPct` — o consumidor consegue distinguir "cheio" de
 // "ninguém configurou o limite" sem o backend inventar política nenhuma.
+// Comparação estrita: 'low' é "ABAIXO do threshold". Um nível exatamente
+// igual ao limite configurado (ex.: 20% com threshold 20) ainda é 'ok' — o
+// limite é o piso aceitável, não o primeiro valor a alertar.
+function statusFromPercent(percent: number, thresholdPct: number | null): ConsumableSupplyStatus {
+  if (thresholdPct !== null && percent < thresholdPct) return 'low';
+  return 'ok';
+}
+
 function resolveSupplyStatus(supply: PrinterSupply, thresholdPct: number | null): ConsumableSupplyStatus {
+  // Quando `levelPercent` veio da MIB privada do fabricante (ver
+  // `levelSource`/`samsungSupply*` em printer-snmp.service.ts), o status
+  // deriva DELE e o sentinela da MIB padrão não tem voto: essa substituição
+  // só acontece porque a leitura padrão é lixo comprovado nesse firmware, e
+  // deixar o sentinela decidir aqui faria o mesmo suprimento aparecer como
+  // "100%" no medidor e "Desconhecido" no selo, na mesma tela.
+  if (supply.levelSource === 'vendor-private' && supply.levelPercent !== null) {
+    return statusFromPercent(supply.levelPercent, thresholdPct);
+  }
+
   // Mapeamento de SnmpMeasurement.status (união discriminada da subtarefa 5)
   // para o status de resposta:
   //   'unknown'     -> 'unknown'      (RFC 3805: valor não pôde ser determinado)
@@ -426,11 +444,7 @@ function resolveSupplyStatus(supply: PrinterSupply, thresholdPct: number | null)
   // caso não dá pra afirmar "ok" nem "low" com segurança: 'not-measured'.
   if (supply.levelPercent === null) return 'not-measured';
 
-  // Comparação estrita: 'low' é "ABAIXO do threshold". Um nível exatamente
-  // igual ao limite configurado (ex.: 20% com threshold 20) ainda é 'ok' —
-  // o limite é o piso aceitável, não o primeiro valor a alertar.
-  if (thresholdPct !== null && supply.levelPercent < thresholdPct) return 'low';
-  return 'ok';
+  return statusFromPercent(supply.levelPercent, thresholdPct);
 }
 
 function toConsumablesResponse(

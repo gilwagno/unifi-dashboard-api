@@ -102,6 +102,35 @@ const OID = {
   // até aqui. Confirmado por sonda real contra as 5 impressoras da rede
   // (HP `.89`=24, Brother `.222`=226) — nenhuma MIB privada envolvida.
   prtMarkerPowerOnCount11: '1.3.6.1.2.1.43.10.2.1.5.1.1',
+  // --- MIB privada Samsung (firmware SWS das HPs desta rede) ---
+  //
+  // Achado real, confirmado ao vivo em 2026-09-10 contra as DUAS HPs
+  // físicas: `prtMarkerSuppliesLevel` (o OID PADRÃO acima) está cravado em
+  // `0` para o toner nessas unidades, com `unit=19` (porcentagem) e
+  // `maxCapacity=100` — ou seja, um "0%" que se apresenta como leitura
+  // válida, não como sentinela. Não é cartucho vazio: as duas tinham
+  // cartucho cheio no momento da sonda. É o MESMO tipo de bug de firmware já
+  // documentado para Transfer Roller/Fuser/Pick-up Roller (que reportam
+  // `143065` com máximo 100), só que este mente para BAIXO, o que é bem pior
+  // — um toner cheio aparecia como "0%, precisa trocar" no dashboard.
+  //
+  // A semântica destas duas colunas NÃO foi inferida por posição (a regra do
+  // projeto proíbe expor MIB privada como dado confiável sem confirmação
+  // contra o painel real no mesmo instante — ver item 19, achado (c), do
+  // CLAUDE.md). Foi confirmada contra a fonte que o PRÓPRIO painel consome,
+  // `GET /sws/app/information/home/home.json` (sem autenticação), lida no
+  // mesmo instante das sondas SNMP:
+  //   - `.13` == `toner_black.remaining` do home.json: 100 nas duas HPs,
+  //     enquanto o OID padrão dava 0 nas duas.
+  //   - `.14` == `toner_black.cnt` do home.json (páginas com o cartucho
+  //     atual): 101 na `.34`, batendo exatamente.
+  //   - `.7` é o número de série do cartucho (`CRUM-...`), o mesmo que a
+  //     `prtMarkerSuppliesDescription` padrão embute — é ele que ancora o
+  //     cruzamento por linha abaixo, em vez de casar por posição.
+  // O painel arredonda `remaining` para cima na dezena (`ceil(r/10)*10` em
+  // home.js); guardamos o valor CRU, sem replicar o arredondamento.
+  samsungSupplySerial: '1.3.6.1.4.1.236.11.5.11.53.61.5.2.1.7',
+  samsungSupplyRemaining: '1.3.6.1.4.1.236.11.5.11.53.61.5.2.1.13',
 } as const;
 
 // --- Shape do resultado ---
@@ -157,6 +186,14 @@ export interface PrinterSupply {
   // computeLevelPercent) — `null` para qualquer sentinela, unidade
   // incompatível ou valor incoerente do firmware.
   levelPercent: number | null;
+  // De onde `levelPercent` veio. `'standard'` = calculado do
+  // prtMarkerSuppliesLevel/MaxCapacity da MIB padrão (o caminho de todas as
+  // Brother e o default de qualquer impressora nova). `'vendor-private'` = a
+  // MIB padrão desta linha era inutilizável e o valor veio da MIB privada do
+  // fabricante, cruzada pelo número de série do cartucho (ver o bloco dos
+  // OIDs `samsungSupply*`). Nunca é uma preferência de fonte: só há
+  // substituição quando a leitura padrão é comprovadamente lixo.
+  levelSource: 'standard' | 'vendor-private';
 }
 
 export interface PrinterSnmpReading {
@@ -466,6 +503,45 @@ async function walkColumn(session: SnmpSession, baseOid: string): Promise<Map<st
   return rows;
 }
 
+// Cruza as duas colunas da MIB privada (serial do cartucho × percentual
+// restante) num mapa serial → percentual. O cruzamento é pelo SERIAL, nunca
+// pela posição da linha: é o serial que a `prtMarkerSuppliesDescription`
+// padrão também embute, então casar por ele garante que o percentual privado
+// vai para o cartucho certo mesmo se as duas tabelas indexarem as linhas de
+// formas diferentes (o que num modelo colorido é bem possível).
+//
+// Descarta silenciosamente qualquer linha que não dê pra confiar — serial
+// vazio, percentual não numérico, fora de 0..100 (a MIB privada usa os
+// mesmos sentinelas negativos da padrão: a coluna vizinha `.16` devolve `-3`
+// nas duas HPs), ou serial repetido em duas linhas (ambíguo, não há como
+// escolher). Sem esse filtro, um sentinela viraria um percentual inventado —
+// exatamente o que este projeto trata como o pior tipo de erro.
+export function buildVendorPercentBySerial(
+  serials: Map<string, Varbind> | null,
+  remaining: Map<string, Varbind> | null,
+): Map<string, number> {
+  const bySerial = new Map<string, number>();
+  if (!serials || !remaining) return bySerial;
+
+  const ambiguous = new Set<string>();
+  for (const [index, serialVarbind] of serials) {
+    const serial = asString(serialVarbind)?.trim();
+    if (!serial) continue;
+
+    const percent = asNumber(remaining.get(index));
+    if (percent === null || !Number.isInteger(percent) || percent < 0 || percent > 100) continue;
+
+    if (bySerial.has(serial) || ambiguous.has(serial)) {
+      bySerial.delete(serial);
+      ambiguous.add(serial);
+      continue;
+    }
+    bySerial.set(serial, percent);
+  }
+
+  return bySerial;
+}
+
 function asNumber(varbind: Varbind | undefined): number | null {
   if (!varbind) return null;
   if (typeof varbind.value === 'number') return varbind.value;
@@ -558,17 +634,26 @@ async function readPrinter(record: PrinterRecord, ipAddress: string): Promise<Pr
     const pageCount = note(await getScalar(session, OID.prtMarkerLifeCount11));
     const powerOnCount = note(await getScalar(session, OID.prtMarkerPowerOnCount11));
 
-    const [types, descriptions, units, maxCapacities, levels] = await Promise.all([
+    const [types, descriptions, units, maxCapacities, levels, vendorSerials, vendorRemaining] = await Promise.all([
       walkColumn(session, OID.prtMarkerSuppliesType),
       walkColumn(session, OID.prtMarkerSuppliesDescription),
       walkColumn(session, OID.prtMarkerSuppliesSupplyUnit),
       walkColumn(session, OID.prtMarkerSuppliesMaxCapacity),
       walkColumn(session, OID.prtMarkerSuppliesLevel),
+      // Colunas da MIB privada (ver o bloco `samsungSupply*` em OID) — só as
+      // HPs respondem; nas Brother o walk termina vazio, sem erro. Uma falha
+      // de REDE aqui (`null`) também é tolerada: a MIB padrão continua sendo
+      // a fonte, então perder este enriquecimento não invalida a leitura nem
+      // marca `partial` (ao contrário das 5 colunas padrão acima).
+      walkColumn(session, OID.samsungSupplySerial),
+      walkColumn(session, OID.samsungSupplyRemaining),
     ]);
 
     if (!types || !descriptions || !units || !maxCapacities || !levels) {
       throw new PrinterUnreachableError('falha de rede ao varrer a prtMarkerSuppliesTable');
     }
+
+    const vendorPercentBySerial = buildVendorPercentBySerial(vendorSerials, vendorRemaining);
 
     // A união dos índices de todas as colunas (não só de uma) — se um
     // firmware expuser uma linha só em algumas colunas, ela ainda aparece,
@@ -588,18 +673,28 @@ async function readPrinter(record: PrinterRecord, ipAddress: string): Promise<Pr
       if (maxCapacity.status === 'unsupported' || level.status === 'unsupported') partial = true;
 
       const description = asString(descriptions.get(index));
+      const serialNumber = parseSupplyDescription(description).serialNumber;
+
+      // A MIB privada, quando o serial do cartucho casa, é a fonte que o
+      // painel do próprio fabricante usa — então ela ganha da MIB padrão
+      // (que neste modelo reporta 0% com cartucho cheio). `level`/
+      // `maxCapacity` continuam guardando o valor CRU da MIB padrão, sem
+      // reescrita: perder o que a impressora de fato respondeu tiraria a
+      // única forma de auditar essa divergência depois.
+      const vendorPercent = serialNumber === null ? undefined : vendorPercentBySerial.get(serialNumber);
 
       return {
         index,
         description,
-        serialNumber: parseSupplyDescription(description).serialNumber,
+        serialNumber,
         type,
         typeLabel: type === null ? null : (SUPPLY_TYPE_LABELS[type] ?? null),
         unit,
         unitLabel: unit === null ? null : (SUPPLY_UNIT_LABELS[unit] ?? null),
         maxCapacity,
         level,
-        levelPercent: computeLevelPercent(level, maxCapacity, unit),
+        levelPercent: vendorPercent ?? computeLevelPercent(level, maxCapacity, unit),
+        levelSource: vendorPercent === undefined ? ('standard' as const) : ('vendor-private' as const),
       };
     });
 
