@@ -568,10 +568,16 @@ export function Printers() {
   }
 
   // Compartilhada entre o clique em "Ver consumíveis" (toggleConsumables) e o
-  // carregamento antecipado (useEffect abaixo, pedido do usuário: mostrar o
-  // nível de toner na LINHA da lista, sem precisar expandir) — o guard pelo
-  // ref garante que os dois caminhos nunca disparem a mesma requisição duas
-  // vezes em paralelo.
+  // carregamento antecipado (useEffect abaixo). O ref evita SÓ chamadas
+  // concorrentes pro mesmo id (nunca duas em voo ao mesmo tempo) — é
+  // removido do Set assim que a chamada termina, sucesso ou falha, pra não
+  // travar pra sempre: o poller SNMP do backend roda a cada 15min, e a
+  // lista de impressoras já recarrega sozinha a cada 60s (usePolling) — sem
+  // liberar o ref aqui, o medidor de toner da linha (tonerLevelsGauge)
+  // ficaria PRESO no retrato da primeiríssima busca pra sempre, nunca
+  // refletindo uma coleta nova do poller (achado real do usuário: o medidor
+  // não aparecia porque a única busca tinha acontecido ANTES da primeira
+  // coleta bem-sucedida do poller, e nunca mais era refeita).
   function fetchConsumablesFor(printer: PrinterWithNetwork) {
     if (consumablesFetchedRef.current.has(printer.id)) return;
     consumablesFetchedRef.current.add(printer.id);
@@ -585,13 +591,15 @@ export function Printers() {
       .getPrinterConsumables(printer.id)
       .then((data) => setConsumables((prev) => ({ ...prev, [printer.id]: data })))
       .catch((err) => {
-        consumablesFetchedRef.current.delete(printer.id);
         setConsumablesError((prev) => ({
           ...prev,
           [printer.id]: err instanceof Error ? err.message : 'Falha ao carregar consumíveis',
         }));
       })
-      .finally(() => setConsumablesLoading((prev) => ({ ...prev, [printer.id]: false })));
+      .finally(() => {
+        consumablesFetchedRef.current.delete(printer.id);
+        setConsumablesLoading((prev) => ({ ...prev, [printer.id]: false }));
+      });
   }
 
   function toggleConsumables(printer: PrinterWithNetwork) {
@@ -600,6 +608,12 @@ export function Printers() {
       return;
     }
     setExpandedId(printer.id);
+    // Clique manual só busca se AINDA não tem nenhum dado — o refresh
+    // periódico já é coberto pelo carregamento antecipado abaixo (a cada
+    // ciclo de polling da lista); um clique não deve forçar uma chamada
+    // extra se os dados já estão em memória, mesmo que sejam de um poll
+    // anterior (a próxima atualização automática já está a caminho).
+    if (consumables[printer.id]) return;
     fetchConsumablesFor(printer);
   }
 
