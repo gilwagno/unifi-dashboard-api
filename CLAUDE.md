@@ -1,6 +1,6 @@
 # Gauntlet Loop — unifi-dashboard-api
 
-## Onda 3 (Módulo de Active Directory + Ponte 802.1X) — PLANEJADA, não iniciada
+## Onda 3 (Módulo de Active Directory + Ponte 802.1X) — pré-requisitos concluídos, escopo funcional não iniciado
 
 Escopo completo, arquitetura, estratégia de teste e ordem de subtarefas em
 `docs/ad-module-plan.md` — carregar esse documento no contexto de qualquer par que trabalhe
@@ -12,21 +12,28 @@ Directory. Esta onda fecha isso: CRUD de usuários/grupos/computadores no AD via
 ponte que liga "membro de um grupo no AD" a "tem acesso à rede" (802.1X/RADIUS/NPS, cujo
 lado UniFi já está pronto — falta só o lado AD).
 
-### Achados de uma revisão externa do repositório (2026-09-09) — subtarefas 0.x, bloqueantes
+### Achados de uma revisão externa do repositório (2026-09-09) — subtarefas 0.x, bloqueantes — TODAS RESOLVIDAS em 2026-09-10
 
 Uma revisão feita fora do Gauntlet Loop (leitura completa do repo por outra instância do
 Claude) identificou 3 pontos, viraram as subtarefas 0.1–0.3 do plano da Onda 3 — resolver
 antes do resto por serem pequenos, genuínos, e pré-requisito direto do que vem depois:
 
-1. **Log de auditoria inexistente em `master`** — existe uma tentativa isolada, não
-   commitada no histórico principal, na branch `feat/audit-log` (mencionada na nota "Nota
-   sobre audit-log" no fim deste arquivo). Bloqueante pra Onda 3: toda ação de escrita do
-   módulo de AD precisa de rastro de quem fez o quê.
-2. **Rate limit inconsistente em 3 rotas `DELETE`** — `DELETE /wifi/:id`,
-   `DELETE /networks/:id` e `DELETE /printers/:id` não usam
-   `RATE_LIMIT_CLIENT_ACTION_MAX` como as demais rotas de escrita dos mesmos arquivos, caem
-   no limite global (100/min) em vez do restrito (10/min). Corrigir por consistência antes
-   de replicar o padrão de rotas no módulo de AD.
+1. ✅ **RESOLVIDO em 2026-09-10.** Log de auditoria inexistente em `master` — existia uma
+   tentativa isolada, não commitada no histórico principal, na branch `feat/audit-log`
+   (encontrada numa queda de PC em 2026-08-31, criada a partir de um ponto anterior à Onda 2
+   inteira). Rebasada (cherry-pick sobre o `master` atual, 3 conflitos mecânicos de
+   sobreposição em `.env.example`/`src/config/env.ts`/`tests/setup.ts` — variáveis de
+   ambiente novas nos dois lados do mesmo arquivo, resolvidos mantendo ambas), revalidada
+   (`tsc` limpo, suíte 487/487) e mergeada via PR #23 (squash). Hook global `onResponse` em
+   `src/app.ts` grava toda ação mutável (método/rota/params de path/status, nunca o corpo da
+   requisição) em `src/services/audit-log.service.ts` (JSONL append-only, sobrevive a
+   restart), exposto em `GET /security/audit-log`.
+2. ✅ **RESOLVIDO em 2026-09-10.** Rate limit inconsistente em 3 rotas `DELETE` —
+   `DELETE /wifi/:id`, `DELETE /networks/:id` e `DELETE /printers/:id` não usavam
+   `RATE_LIMIT_CLIENT_ACTION_MAX` como as demais rotas de escrita dos mesmos arquivos, caindo
+   no limite global (100/min) em vez do restrito (10/min). Branch `fix/delete-routes-rate-limit`
+   já existia com a correção + regressão por mutação (par executor/crítico Sonnet/Sonnet,
+   mudança mecânica de baixo risco) — mergeada via PR #20 (squash) nesta sessão.
 3. ✅ **RESOLVIDO em 2026-09-10.** Senha em branco no admin da HP (SWS) — reaberta por pedido
    explícito do usuário (item 11 da Onda 2 tinha sido fechado em 2026-09-08 como "não implementado",
    ver detalhe completo na seção "Troca de senha de admin da HP: reaberta e confirmada ao vivo"
