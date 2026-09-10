@@ -296,12 +296,16 @@ export default async function networksRoutes(app: FastifyInstance) {
     },
   );
 
-  app.delete('/wifi/:id', async (request, reply) => {
-    const { id } = idParam.parse(request.params);
-    const { siteId } = siteQuery.parse(request.query);
-    await unifiService.deleteWifiBroadcast(id, siteId);
-    return reply.send({ ok: true });
-  });
+  app.delete(
+    '/wifi/:id',
+    { config: { rateLimit: { max: env.RATE_LIMIT_CLIENT_ACTION_MAX, timeWindow: env.RATE_LIMIT_WINDOW } } },
+    async (request, reply) => {
+      const { id } = idParam.parse(request.params);
+      const { siteId } = siteQuery.parse(request.query);
+      await unifiService.deleteWifiBroadcast(id, siteId);
+      return reply.send({ ok: true });
+    },
+  );
 
   // --- Networks (VLANs) ---
 
@@ -359,10 +363,14 @@ export default async function networksRoutes(app: FastifyInstance) {
     },
   );
 
-  app.delete('/networks/:id', async (request, reply) => {
-    const { id } = idParam.parse(request.params);
-    const { siteId } = siteQuery.parse(request.query);
-    await unifiService.deleteNetwork(id, siteId);
-    return reply.send({ ok: true });
-  });
+  app.delete(
+    '/networks/:id',
+    { config: { rateLimit: { max: env.RATE_LIMIT_CLIENT_ACTION_MAX, timeWindow: env.RATE_LIMIT_WINDOW } } },
+    async (request, reply) => {
+      const { id } = idParam.parse(request.params);
+      const { siteId } = siteQuery.parse(request.query);
+      await unifiService.deleteNetwork(id, siteId);
+      return reply.send({ ok: true });
+    },
+  );
 }

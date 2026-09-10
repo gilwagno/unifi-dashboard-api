@@ -844,14 +844,18 @@ export default async function printersRoutes(app: FastifyInstance) {
     },
   );
 
-  app.delete('/printers/:id', async (request, reply) => {
-    const { id } = idParam.parse(request.params);
-    const deleted = printersRepository.delete(id);
-    if (!deleted) {
-      return reply.code(404).send({ error: 'Impressora não encontrada' });
-    }
-    return reply.send({ ok: true });
-  });
+  app.delete(
+    '/printers/:id',
+    { config: { rateLimit: { max: env.RATE_LIMIT_CLIENT_ACTION_MAX, timeWindow: env.RATE_LIMIT_WINDOW } } },
+    async (request, reply) => {
+      const { id } = idParam.parse(request.params);
+      const deleted = printersRepository.delete(id);
+      if (!deleted) {
+        return reply.code(404).send({ error: 'Impressora não encontrada' });
+      }
+      return reply.send({ ok: true });
+    },
+  );
 
   // --- Reconectar impressora à rede (Onda 2, subtarefa 3) ---
   //
