@@ -59,7 +59,7 @@ const PRINTER_INTEGRATION: PrinterWithNetwork = {
   maintenance: { intervalDays: null, intervalPages: null, consumableLowThresholdPct: null },
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',
-  network: { source: 'integration', online: true, ipAddress: '172.16.0.89', connectionType: 'WIRED' },
+  network: { source: 'integration', online: true, ipAddress: '172.16.0.89', connectionType: 'WIRED', alias: null },
 };
 
 const PRINTER_CLASSIC: PrinterWithNetwork = {
@@ -71,7 +71,7 @@ const PRINTER_CLASSIC: PrinterWithNetwork = {
   maintenance: { intervalDays: null, intervalPages: null, consumableLowThresholdPct: 20 },
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',
-  network: { source: 'classic', online: null, ipAddress: '172.16.0.222', connectionType: 'WIRED' },
+  network: { source: 'classic', online: null, ipAddress: '172.16.0.222', connectionType: 'WIRED', alias: null },
 };
 
 const PRINTER_UNKNOWN: PrinterWithNetwork = {
@@ -83,7 +83,7 @@ const PRINTER_UNKNOWN: PrinterWithNetwork = {
   maintenance: { intervalDays: null, intervalPages: null, consumableLowThresholdPct: null },
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',
-  network: { source: 'unknown', online: null, ipAddress: null, connectionType: null },
+  network: { source: 'unknown', online: null, ipAddress: null, connectionType: null, alias: null },
 };
 
 function mockSites() {
@@ -280,7 +280,7 @@ describe('Printers page', () => {
       // spans irmãos de níveis diferentes, por isso sobe até o card inteiro
       // (`.rounded-xl`) e busca o valor DENTRO dele, não como texto solto na
       // tela (que colidiria com outros "0"/"1" de outros cards).
-      const attentionCard = screen.getByText('Precisa de atenção').closest('.rounded-xl');
+      const attentionCard = screen.getByText('Precisa de atenção').closest('.rounded-xl') as HTMLElement | null;
       expect(attentionCard).not.toBeNull();
       expect(within(attentionCard!).getByText('0')).toBeInTheDocument();
       expect(screen.getByText('tudo em dia')).toBeInTheDocument();
@@ -317,7 +317,7 @@ describe('Printers page', () => {
       await screen.findByText('HPLaserMFP135w');
       expect(await screen.findByText('1/2')).toBeInTheDocument();
       expect(screen.getByText('1 offline')).toBeInTheDocument();
-      const attentionCard = screen.getByText('Precisa de atenção').closest('.rounded-xl');
+      const attentionCard = screen.getByText('Precisa de atenção').closest('.rounded-xl') as HTMLElement | null;
       expect(attentionCard).not.toBeNull();
       expect(within(attentionCard!).getByText('1')).toBeInTheDocument();
       // Achado do usuário testando ao vivo: um número sozinho não diz QUAL
@@ -547,16 +547,33 @@ describe('Printers page', () => {
     await waitFor(() => expect(api.deletePrinter).toHaveBeenCalledWith('p1'));
   });
 
-  it('renames the UniFi alias with the correct mac and value', async () => {
-    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+  // Achado real do usuário testando ao vivo: o rascunho pré-preenchia com o
+  // nome do CADASTRO LOCAL (`printer.name`) em vez do apelido REAL no
+  // UniFi (`printer.network.alias`) — duas impressoras com o mesmo
+  // cadastro local podiam ter apelidos completamente diferentes no UniFi
+  // (confirmado contra o controller real: "HP Laser MFP 135w (Financeiro)"
+  // no cadastro local vs. "HP Laser MFP 135w (Comercial)" como apelido de
+  // verdade), e o usuário não tinha como saber disso antes de editar.
+  it('mostra e pré-preenche com o apelido REAL do UniFi (não o nome do cadastro local), e atualiza a tela depois de salvar', async () => {
+    const printerWithDifferentAlias: PrinterWithNetwork = {
+      ...PRINTER_INTEGRATION,
+      network: { ...PRINTER_INTEGRATION.network, alias: 'HP Laser MFP 135w (Comercial)' },
+    };
+    vi.mocked(api.listPrinters).mockResolvedValue([printerWithDifferentAlias]);
     vi.mocked(api.setClientAlias).mockResolvedValue({ ok: true });
 
     const user = userEvent.setup();
     renderPrinters();
     const card = (await screen.findByText('HPLaserMFP135w')).closest('div.overflow-hidden') as HTMLElement;
 
+    // Antes de editar: o apelido REAL já aparece na tela (não some, não
+    // fica em branco, não mostra o nome do cadastro local).
+    expect(within(card).getByText('HP Laser MFP 135w (Comercial)')).toBeInTheDocument();
+
     await user.click(within(card).getByRole('button', { name: 'Renomear apelido no UniFi' }));
-    const input = within(card).getByDisplayValue('HPLaserMFP135w');
+    // O campo abre com o apelido REAL, não com "HPLaserMFP135w" (nome do
+    // cadastro local) — esse era o bug.
+    const input = within(card).getByDisplayValue('HP Laser MFP 135w (Comercial)');
     await user.clear(input);
     await user.type(input, 'Impressora Financeiro');
     await user.click(within(card).getByRole('button', { name: 'Salvar' }));
@@ -564,6 +581,21 @@ describe('Printers page', () => {
     await waitFor(() =>
       expect(api.setClientAlias).toHaveBeenCalledWith('50:81:40:d8:6c:7e', 'Impressora Financeiro'),
     );
+    // Confirmação visível de que a ação teve efeito — sem isto, o usuário
+    // não tinha como saber se a troca realmente aconteceu sem sair pro
+    // painel do UniFi conferir.
+    expect(await screen.findByText(/Apelido no UniFi de "HPLaserMFP135w" atualizado\./)).toBeInTheDocument();
+    // E a lista é recarregada pra refletir o novo apelido, sem esperar o
+    // próximo ciclo de polling (até 60s depois).
+    await waitFor(() => expect(api.listPrinters).toHaveBeenCalledTimes(2));
+  });
+
+  it('mostra "sem apelido configurado" quando o UniFi não tem nenhum apelido pra esse cliente', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]); // alias: null
+    renderPrinters();
+
+    const card = (await screen.findByText('HPLaserMFP135w')).closest('div.overflow-hidden') as HTMLElement;
+    expect(within(card).getByText('sem apelido configurado')).toBeInTheDocument();
   });
 
   it('shows an error message instead of crashing when listPrinters rejects', async () => {

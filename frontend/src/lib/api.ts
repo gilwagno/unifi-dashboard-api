@@ -215,6 +215,11 @@ export interface PrinterNetworkStatus {
   online: boolean | null;
   ipAddress: string | null;
   connectionType: 'WIRED' | 'WIRELESS' | null;
+  // Apelido ATUAL do cliente no UniFi (campo `name` do controller) — achado
+  // real: o editor "Renomear apelido no UniFi" nunca mostrava o valor atual
+  // em lugar nenhum, só pré-preenchia com o nome do cadastro LOCAL (campo
+  // diferente), levando o usuário a achar que o apelido já era aquele valor.
+  alias: string | null;
 }
 
 export type PrinterWithNetwork = Printer & { network: PrinterNetworkStatus };

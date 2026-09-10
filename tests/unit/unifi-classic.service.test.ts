@@ -181,16 +181,20 @@ describe('unifiClassicService', () => {
               // Cliente cabeado com IP dinâmico (last_ip).
               { mac: 'AA:AA:AA:AA:AA:AA', is_wired: true, last_ip: '172.16.0.10' },
               // Cliente sem fio com IP fixo ligado — deve priorizar fixed_ip
-              // sobre last_ip (que pode estar desatualizado).
+              // sobre last_ip (que pode estar desatualizado). Também tem
+              // `name` (Apelido no UniFi) — achado real: esse campo nunca
+              // era exposto no merge de status do módulo de impressoras.
               {
                 mac: 'bb:bb:bb:bb:bb:bb',
                 is_wired: false,
                 use_fixedip: true,
                 fixed_ip: '172.16.0.89',
                 last_ip: '172.16.0.99',
+                name: 'Apelido atual',
               },
-              // Cliente sem nenhum dado de IP conhecido.
-              { mac: 'cc:cc:cc:cc:cc:cc' },
+              // Cliente sem nenhum dado de IP conhecido, e sem `name` —
+              // string vazia também deve virar `null` (mesma regra do IP).
+              { mac: 'cc:cc:cc:cc:cc:cc', name: '' },
             ],
           });
         }
@@ -205,9 +209,13 @@ describe('unifiClassicService', () => {
       // devolve em outra caixa (não deveria acontecer na prática, mas o
       // merge do módulo de impressoras não deve depender de coincidência
       // de caixa em nenhum dos dois lados).
-      expect(info.get('aa:aa:aa:aa:aa:aa')).toEqual({ ipAddress: '172.16.0.10', connectionType: 'WIRED' });
-      expect(info.get('bb:bb:bb:bb:bb:bb')).toEqual({ ipAddress: '172.16.0.89', connectionType: 'WIRELESS' });
-      expect(info.get('cc:cc:cc:cc:cc:cc')).toEqual({ ipAddress: null, connectionType: null });
+      expect(info.get('aa:aa:aa:aa:aa:aa')).toEqual({ ipAddress: '172.16.0.10', connectionType: 'WIRED', alias: null });
+      expect(info.get('bb:bb:bb:bb:bb:bb')).toEqual({
+        ipAddress: '172.16.0.89',
+        connectionType: 'WIRELESS',
+        alias: 'Apelido atual',
+      });
+      expect(info.get('cc:cc:cc:cc:cc:cc')).toEqual({ ipAddress: null, connectionType: null, alias: null });
     });
 
     it('não duplica a lógica de fetch/login — usa a mesma sessão já autenticada de outra chamada', async () => {
