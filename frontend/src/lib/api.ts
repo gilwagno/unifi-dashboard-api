@@ -268,6 +268,10 @@ export type ConsumableSupplyStatus = 'ok' | 'low' | 'unknown' | 'not-measured' |
 
 export interface PrinterConsumableSupply {
   name: string;
+  // Número de série do cartucho (subtarefa 19), quando a impressora o
+  // embute na descrição SNMP — confirmado nas 2 HPs da rede; as Brother não
+  // reportam isso, então fica `null` para elas (não é falha de coleta).
+  serialNumber: string | null;
   levelPercent: number | null;
   status: ConsumableSupplyStatus;
 }

@@ -115,6 +115,7 @@ function buildReading(overrides: Partial<PrinterSnmpReading> = {}): PrinterSnmpR
     deviceStatusLabel: 'running',
     detectedErrorStates: [],
     pageCount: { status: 'ok', value: 1000 },
+    powerOnCount: { status: 'ok', value: 24 },
     supplies: [],
     partial: false,
     ...overrides,

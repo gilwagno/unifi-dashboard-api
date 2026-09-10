@@ -198,8 +198,15 @@ vi.mock('../../src/services/printer-network-status.service.js', () => ({
   }),
 }));
 
-const { collectAllReadings, getLastReading, computeLevelPercent, toMeasurement, runSnmpHistoryCleanup } =
-  await import('../../src/services/printer-snmp.service.js');
+const {
+  collectAllReadings,
+  getLastReading,
+  computeLevelPercent,
+  toMeasurement,
+  runSnmpHistoryCleanup,
+  parseSupplyDescription,
+  supplyDisplayName,
+} = await import('../../src/services/printer-snmp.service.js');
 
 // --- Dados de referência (colhidos das impressoras reais) ----------------
 
@@ -209,6 +216,7 @@ const OID = {
   deviceStatus: '1.3.6.1.2.1.25.3.2.1.5.1',
   errorState: '1.3.6.1.2.1.25.3.5.1.2.1',
   lifeCount: '1.3.6.1.2.1.43.10.2.1.4.1.1',
+  powerOnCount: '1.3.6.1.2.1.43.10.2.1.5.1.1',
   type: '1.3.6.1.2.1.43.11.1.1.5',
   description: '1.3.6.1.2.1.43.11.1.1.6',
   unit: '1.3.6.1.2.1.43.11.1.1.7',
@@ -225,6 +233,9 @@ function brotherHlEntries(): FakeDevice['entries'] {
     [OID.deviceStatus]: 2,
     [OID.errorState]: Buffer.from([0x00]),
     [OID.lifeCount]: { type: COUNTER, value: 52994 },
+    // Valor real observado na Brother HL-L2360D (172.16.0.222) — subtarefa
+    // 19, achado (e): OID padrão RFC 3805, nunca lido pelo poller até aqui.
+    [OID.powerOnCount]: { type: COUNTER, value: 226 },
     [`${OID.type}.1.1`]: 3,
     [`${OID.type}.1.2`]: 9,
     [`${OID.description}.1.1`]: Buffer.from('Black Toner Cartridge'),
@@ -318,6 +329,57 @@ describe('computeLevelPercent', () => {
   });
 });
 
+// Subtarefa 19, achado (a): as 2 HPs reais da rede embutem o número de série
+// do cartucho na própria prtMarkerSuppliesDescription, no padrão
+// "<nome> S/N:<serial>" — confirmado por SNMP GET real contra elas
+// (community "public", só leitura). As 3 Brother reais não têm esse sufixo.
+describe('parseSupplyDescription', () => {
+  it('extrai nome e serial do padrão real das 2 HPs ("<nome> S/N:<serial>")', () => {
+    expect(parseSupplyDescription('Black Toner S/N:CRUM-210729A5BB3')).toEqual({
+      name: 'Black Toner',
+      serialNumber: 'CRUM-210729A5BB3',
+    });
+  });
+
+  it('sem "S/N:" (padrão real das 3 Brother): serialNumber null, nome intacto', () => {
+    expect(parseSupplyDescription('Black Toner Cartridge')).toEqual({
+      name: 'Black Toner Cartridge',
+      serialNumber: null,
+    });
+  });
+
+  it('description null (OID não suportado/nunca coletado): tudo null, sem lançar', () => {
+    expect(parseSupplyDescription(null)).toEqual({ name: null, serialNumber: null });
+  });
+
+  it('description que é SÓ o "S/N:<serial>", sem nome antes: name vira null (nunca string vazia)', () => {
+    expect(parseSupplyDescription('S/N:ABC123')).toEqual({ name: null, serialNumber: 'ABC123' });
+  });
+
+  it('"S/N:" no meio do texto (não no fim) não é reconhecido como o padrão observado — não inventa um corte que nunca foi confirmado nas impressoras reais', () => {
+    expect(parseSupplyDescription('S/N:ABC123 Black Toner')).toEqual({
+      name: 'S/N:ABC123 Black Toner',
+      serialNumber: null,
+    });
+  });
+});
+
+describe('supplyDisplayName', () => {
+  it('usa o nome sem o serial quando description tem "S/N:"', () => {
+    expect(
+      supplyDisplayName({ description: 'Black Toner S/N:CRUM-210729A5BB3', typeLabel: 'toner', index: '1.1' }),
+    ).toBe('Black Toner');
+  });
+
+  it('cai no typeLabel quando description é null (mesmo fallback de antes da subtarefa 19)', () => {
+    expect(supplyDisplayName({ description: null, typeLabel: 'fuser', index: '1.5' })).toBe('fuser');
+  });
+
+  it('cai no índice quando description E typeLabel são null (mesmo fallback de antes da subtarefa 19)', () => {
+    expect(supplyDisplayName({ description: null, typeLabel: null, index: '1.1' })).toBe('Suprimento 1.1');
+  });
+});
+
 describe('poller SNMP — coleta', () => {
   it('coleta uma leitura completa e trata -3/-2 (partial/unknown) da Brother real', async () => {
     registeredPrinters = [printer()];
@@ -333,12 +395,14 @@ describe('poller SNMP — coleta', () => {
     expect(reading!.deviceStatus).toEqual({ status: 'ok', value: 2 });
     expect(reading!.deviceStatusLabel).toBe('running');
     expect(reading!.pageCount).toEqual({ status: 'ok', value: 52994 });
+    expect(reading!.powerOnCount).toEqual({ status: 'ok', value: 226 });
     expect(reading!.detectedErrorStates).toEqual([]);
 
     expect(reading!.supplies).toHaveLength(2);
     const [toner, drum] = reading!.supplies;
 
     expect(toner.description).toBe('Black Toner Cartridge');
+    expect(toner.serialNumber).toBeNull();
     expect(toner.typeLabel).toBe('toner');
     // Sentinelas reais: nível partial(-3), capacidade unknown(-2).
     expect(toner.level).toEqual({ status: 'partial' });
@@ -396,6 +460,41 @@ describe('poller SNMP — coleta', () => {
     // Suprimentos e identificação continuam coletados normalmente.
     expect(reading.supplies).toHaveLength(2);
     expect(reading.sysDescr).toContain('Brother');
+  });
+
+  it('prtMarkerPowerOnCount não suportado neste modelo vira "unsupported", sem contaminar os demais campos', async () => {
+    const entries = brotherHlEntries();
+    delete entries[OID.powerOnCount];
+    registeredPrinters = [printer({ id: 'p-sem-poweroncount' })];
+    devices.set('10.0.0.10', { entries, noSuchOidStyle: 'v2c' });
+
+    await collectAllReadings();
+
+    const reading = getLastReading('p-sem-poweroncount')!;
+    expect(reading.powerOnCount).toEqual({ status: 'unsupported' });
+    expect(reading.partial).toBe(true);
+    // O resto da leitura segue válido — um campo novo/opcional não pode
+    // contaminar os demais.
+    expect(reading.pageCount).toEqual({ status: 'ok', value: 52994 });
+    expect(reading.supplies).toHaveLength(2);
+  });
+
+  // Achado real, subtarefa 19: as 2 HPs da rede embutem o serial do
+  // cartucho na própria description ("Black Toner S/N:CRUM-...") — o poller
+  // precisa extrair isso na leitura, não só a rota.
+  it('extrai serialNumber de prtMarkerSuppliesDescription no formato real das 2 HPs, na própria leitura', async () => {
+    const entries = brotherHlEntries();
+    entries[`${OID.description}.1.1`] = Buffer.from('Black Toner S/N:CRUM-210729A5BB3');
+    registeredPrinters = [printer({ id: 'p-com-serial' })];
+    devices.set('10.0.0.10', { entries, noSuchOidStyle: 'v2c' });
+
+    await collectAllReadings();
+
+    const reading = getLastReading('p-com-serial')!;
+    expect(reading.supplies[0].description).toBe('Black Toner S/N:CRUM-210729A5BB3');
+    expect(reading.supplies[0].serialNumber).toBe('CRUM-210729A5BB3');
+    // O outro suprimento (sem "S/N:" na description) continua sem serial.
+    expect(reading.supplies[1].serialNumber).toBeNull();
   });
 
   it('trata OID não suportado em v1 (NoSuchName derruba o PDU inteiro) sem perder os demais campos', async () => {

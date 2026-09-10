@@ -26,6 +26,7 @@ import { buildNetworkStatusResolver, withNetworkStatus } from '../services/print
 import {
   getLastReading,
   pageCountValue,
+  supplyDisplayName,
   type PrinterSnmpReading,
   type PrinterSupply,
 } from '../services/printer-snmp.service.js';
@@ -334,6 +335,13 @@ type ConsumableSupplyStatus = 'ok' | 'low' | 'unknown' | 'not-measured' | 'parti
 
 interface ConsumableSupply {
   name: string;
+  // Número de série do cartucho (subtarefa 19), extraído de
+  // prtMarkerSuppliesDescription quando a impressora o embute (achado real:
+  // as 2 HPs da rede seguem o padrão "<nome> S/N:<serial>"; as 3 Brother
+  // reais não têm esse sufixo, então fica `null` para elas — não é ausência
+  // de coleta, é a impressora simplesmente não reportar serial por
+  // suprimento). Ver `parseSupplyDescription` em printer-snmp.service.ts.
+  serialNumber: string | null;
   levelPercent: number | null;
   status: ConsumableSupplyStatus;
 }
@@ -430,7 +438,14 @@ function toConsumablesResponse(
     pageCount: pageCountValue(reading.pageCount),
     lowThresholdPct: thresholdPct,
     supplies: reading.supplies.map((supply) => ({
-      name: supply.description ?? supply.typeLabel ?? `Suprimento ${supply.index}`,
+      // Reaproveita a MESMA função que o histórico SNMP usa (subtarefa 19)
+      // — antes desta subtarefa, cada lugar tinha sua própria cópia do
+      // fallback description ?? typeLabel ?? "Suprimento <index>"; agora
+      // compartilhada, para que /consumables e /history nunca divirjam em
+      // como nomeiam um suprimento (mesmo motivo de pageCountValue já ser
+      // compartilhada entre os dois).
+      name: supplyDisplayName(supply),
+      serialNumber: supply.serialNumber,
       levelPercent: supply.levelPercent,
       status: resolveSupplyStatus(supply, thresholdPct),
     })),
@@ -473,6 +488,11 @@ interface DiagnosticsResponse {
   model: string | null;
   systemInfo: string | null;
   deviceStatus: DiagnosticsDeviceStatus;
+  // prtMarkerPowerOnCount (subtarefa 19, OID padrão RFC 3805, nunca lido
+  // pelo poller antes desta subtarefa) — mesma regra de pageCountValue:
+  // sentinela/OID não suportado/erro pontual viram `null`, nunca um número
+  // inventado.
+  powerOnCount: number | null;
   // Nomes já decodificados do bitmap hrPrinterDetectedErrorState (RFC 2790,
   // ver decodeErrorStateBitmap em printer-snmp.service.ts) — já são rótulos
   // amigáveis o bastante ('jammed', 'lowToner', 'doorOpen', ...); reaplicar
@@ -534,6 +554,7 @@ function toDiagnosticsResponse(printerId: string, reading: PrinterSnmpReading | 
       deviceStatus: 'not-measured',
       activeErrors: null,
       partial: false,
+      powerOnCount: null,
     };
   }
 
@@ -545,6 +566,10 @@ function toDiagnosticsResponse(printerId: string, reading: PrinterSnmpReading | 
     deviceStatus: toDiagnosticsDeviceStatus(reading),
     activeErrors: reading.detectedErrorStates,
     partial: reading.partial,
+    // Mesma função usada por pageCount em /consumables — reaproveitada aqui
+    // (subtarefa 19) porque powerOnCount é o mesmo tipo de dado (um
+    // SnmpMeasurement escalar que pode vir com sentinela/erro).
+    powerOnCount: pageCountValue(reading.powerOnCount),
   };
 }
 

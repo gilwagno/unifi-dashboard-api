@@ -151,9 +151,9 @@ describe('Printers page', () => {
       pageCount: 1234,
       lowThresholdPct: null,
       supplies: [
-        { name: 'Black Toner', levelPercent: 42, status: 'ok' },
-        { name: 'Waste Toner Box', levelPercent: null, status: 'unknown' },
-        { name: 'Fuser', levelPercent: null, status: 'not-measured' },
+        { name: 'Black Toner', serialNumber: null, levelPercent: 42, status: 'ok' },
+        { name: 'Waste Toner Box', serialNumber: null, levelPercent: null, status: 'unknown' },
+        { name: 'Fuser', serialNumber: null, levelPercent: null, status: 'not-measured' },
       ],
     };
     vi.mocked(api.getPrinterConsumables).mockResolvedValue(consumablesResponse);
@@ -182,6 +182,31 @@ describe('Printers page', () => {
     await user.click(screen.getByRole('button', { name: /Ver consumíveis/ }));
     await user.click(screen.getByRole('button', { name: /Ver consumíveis/ }));
     expect(api.getPrinterConsumables).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the serial number under a supply when the backend reports one, and hides the line when it does not', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    const consumablesResponse: PrinterConsumablesResponse = {
+      printerId: 'p1',
+      collectedAt: '2026-08-31T12:00:00.000Z',
+      pageCount: 1234,
+      lowThresholdPct: null,
+      supplies: [
+        { name: 'Black Toner', serialNumber: 'CRUM-210729A5BB3', levelPercent: 55, status: 'ok' },
+        { name: 'Drum Unit', serialNumber: null, levelPercent: 80, status: 'ok' },
+      ],
+    };
+    vi.mocked(api.getPrinterConsumables).mockResolvedValue(consumablesResponse);
+
+    const user = userEvent.setup();
+    renderPrinters();
+
+    await screen.findByText('HPLaserMFP135w');
+    await user.click(screen.getByRole('button', { name: /Ver consumíveis/ }));
+
+    expect(await screen.findByText('S/N: CRUM-210729A5BB3')).toBeInTheDocument();
+    expect(screen.getByText('Drum Unit')).toBeInTheDocument();
+    expect(screen.queryByText(/^S\/N: $/)).not.toBeInTheDocument();
   });
 
   it('creates a new printer with the correct snmp shape', async () => {

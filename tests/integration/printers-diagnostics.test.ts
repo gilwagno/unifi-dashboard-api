@@ -38,10 +38,20 @@ vi.mock('../../src/services/unifi-classic.service.js', () => ({
 // do projeto.
 const getLastReadingMock = vi.fn<(printerId: string) => PrinterSnmpReading | undefined>(() => undefined);
 
-vi.mock('../../src/services/printer-snmp.service.js', () => ({
-  getLastReading: (printerId: string) => getLastReadingMock(printerId),
-  collectAllReadings: vi.fn(async () => undefined),
-}));
+// `pageCountValue` (subtarefa 12) é a MESMA função que a rota usa para
+// `pageCount` E, desde a subtarefa 19, também para `powerOnCount` — pura
+// (não toca rede/banco/timer), então vem do módulo REAL via
+// `importOriginal`, nunca reimplementada aqui. Mesmo motivo documentado em
+// printers-consumables.test.ts: uma cópia no mock deixaria passar batido um
+// sentinela de powerOnCount virando `0` em vez de `null`.
+vi.mock('../../src/services/printer-snmp.service.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/services/printer-snmp.service.js')>();
+  return {
+    getLastReading: (printerId: string) => getLastReadingMock(printerId),
+    collectAllReadings: vi.fn(async () => undefined),
+    pageCountValue: actual.pageCountValue,
+  };
+});
 
 const tmpDir = mkdtempSync(join(tmpdir(), 'printers-diagnostics-test-'));
 process.env.PRINTERS_DB_FILE = join(tmpDir, 'printers.db');
@@ -102,6 +112,7 @@ function buildReading(overrides: Partial<PrinterSnmpReading> = {}): PrinterSnmpR
     deviceStatusLabel: 'running',
     detectedErrorStates: [],
     pageCount: { status: 'ok', value: 59700 },
+    powerOnCount: { status: 'ok', value: 24 },
     supplies: [],
     partial: false,
     ...overrides,
@@ -145,6 +156,7 @@ describe('GET /printers/:id/diagnostics', () => {
       deviceStatus: 'not-measured',
       activeErrors: null,
       partial: false,
+      powerOnCount: null,
     });
 
     await app.close();
@@ -174,6 +186,7 @@ describe('GET /printers/:id/diagnostics', () => {
       deviceStatus: 'running',
       activeErrors: ['lowToner', 'doorOpen'],
       partial: false,
+      powerOnCount: 24,
     });
 
     await app.close();
@@ -385,6 +398,51 @@ describe('GET /printers/:id/diagnostics', () => {
     expect(body.model).toBeNull();
     expect(body.systemInfo).toBeNull();
     expect(body.collectedAt).toBe('2026-08-31T12:00:00.000Z');
+
+    await app.close();
+  });
+
+  // Subtarefa 19: prtMarkerPowerOnCount é um SnmpMeasurement como pageCount
+  // (subtarefa 5) — sentinela/OID não suportado/erro pontual não podem virar
+  // um número inventado.
+  it('powerOnCount com sentinela/erro/não suportado vira null, nunca um número inventado', async () => {
+    const { app, token } = await authedApp();
+    const auth = { authorization: `Bearer ${token}` };
+    const printer = await createPrinter(app, auth);
+
+    for (const powerOnCount of [
+      { status: 'unknown' },
+      { status: 'other' },
+      { status: 'partial' },
+      { status: 'unsupported' },
+      { status: 'error' },
+    ] as const) {
+      getLastReadingMock.mockReturnValueOnce(buildReading({ printerId: printer.id, powerOnCount }));
+
+      const res = await app.inject({ method: 'GET', url: `/printers/${printer.id}/diagnostics`, headers: auth });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(Object.hasOwn(body, 'powerOnCount')).toBe(true);
+      expect(body.powerOnCount).toBeNull();
+    }
+
+    await app.close();
+  });
+
+  it('powerOnCount com leitura ok expõe o número real de ligamentos', async () => {
+    const { app, token } = await authedApp();
+    const auth = { authorization: `Bearer ${token}` };
+    const printer = await createPrinter(app, auth);
+
+    getLastReadingMock.mockReturnValueOnce(
+      buildReading({ printerId: printer.id, powerOnCount: { status: 'ok', value: 226 } }),
+    );
+
+    const res = await app.inject({ method: 'GET', url: `/printers/${printer.id}/diagnostics`, headers: auth });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().powerOnCount).toBe(226);
 
     await app.close();
   });

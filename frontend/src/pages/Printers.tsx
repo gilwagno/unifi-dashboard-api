@@ -875,7 +875,12 @@ export function Printers() {
                           const info = SUPPLY_STATUS_INFO[supply.status];
                           return (
                             <div key={i} className="flex items-center justify-between gap-3 rounded-lg bg-white px-3.5 py-2.5">
-                              <span className="text-[13px] font-semibold text-slate-800">{supply.name}</span>
+                              <div className="flex flex-col">
+                                <span className="text-[13px] font-semibold text-slate-800">{supply.name}</span>
+                                {supply.serialNumber !== null && (
+                                  <span className="truncate text-[10.5px] text-slate-400">S/N: {supply.serialNumber}</span>
+                                )}
+                              </div>
                               <div className="flex flex-1 items-center gap-2">
                                 <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100">
                                   {supply.levelPercent !== null && (

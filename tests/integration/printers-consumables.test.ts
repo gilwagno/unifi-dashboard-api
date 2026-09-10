@@ -51,12 +51,19 @@ const getLastReadingMock = vi.fn<(printerId: string) => PrinterSnmpReading | und
 // mudança real do serviço para (por exemplo) `0` em vez de `null` — que
 // afirmaria "esta impressora imprimiu 0 páginas" quando na verdade o
 // contador não é legível — sairia daqui verde.
+// `supplyDisplayName` (subtarefa 19) é a MESMA função que o histórico SNMP
+// passou a usar — pura como pageCountValue, então também vem do módulo REAL
+// via importOriginal, pelo mesmo motivo já documentado acima para
+// pageCountValue: reimplementá-la aqui deixaria de travar uma divergência
+// real entre o que a rota faz e o que esta função realmente calcula (ex.:
+// o strip do "S/N:..." do nome de exibição).
 vi.mock('../../src/services/printer-snmp.service.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/services/printer-snmp.service.js')>();
   return {
     getLastReading: (printerId: string) => getLastReadingMock(printerId),
     collectAllReadings: vi.fn(async () => undefined),
     pageCountValue: actual.pageCountValue,
+    supplyDisplayName: actual.supplyDisplayName,
   };
 });
 
@@ -119,6 +126,7 @@ function buildReading(overrides: Partial<PrinterSnmpReading> = {}): PrinterSnmpR
     deviceStatusLabel: 'running',
     detectedErrorStates: [],
     pageCount: { status: 'ok', value: 59700 },
+    powerOnCount: { status: 'ok', value: 24 },
     supplies: [],
     partial: false,
     ...overrides,
@@ -181,6 +189,7 @@ describe('GET /printers/:id/consumables', () => {
           {
             index: '1.1',
             description: 'Tambor',
+            serialNumber: null,
             type: 9,
             typeLabel: 'opc',
             unit: 8,
@@ -193,6 +202,7 @@ describe('GET /printers/:id/consumables', () => {
           {
             index: '1.2',
             description: 'Toner Preto',
+            serialNumber: null,
             type: 3,
             typeLabel: 'toner',
             unit: 19,
@@ -205,6 +215,7 @@ describe('GET /printers/:id/consumables', () => {
           {
             index: '1.3',
             description: 'Toner Ciano',
+            serialNumber: null,
             type: 3,
             typeLabel: 'toner',
             unit: 19,
@@ -217,6 +228,7 @@ describe('GET /printers/:id/consumables', () => {
           {
             index: '1.4',
             description: 'Toner Magenta',
+            serialNumber: null,
             type: 3,
             typeLabel: 'toner',
             unit: 19,
@@ -229,6 +241,7 @@ describe('GET /printers/:id/consumables', () => {
           {
             index: '1.5',
             description: null,
+            serialNumber: null,
             type: 15,
             typeLabel: 'fuser',
             unit: null,
@@ -249,11 +262,89 @@ describe('GET /printers/:id/consumables', () => {
     expect(body.collectedAt).toBe('2026-08-31T12:00:00.000Z');
     expect(body.pageCount).toBe(52994);
     expect(body.supplies).toEqual([
-      { name: 'Tambor', levelPercent: 69, status: 'ok' },
-      { name: 'Toner Preto', levelPercent: 10, status: 'low' },
-      { name: 'Toner Ciano', levelPercent: null, status: 'partial' },
-      { name: 'Toner Magenta', levelPercent: null, status: 'unknown' },
-      { name: 'fuser', levelPercent: null, status: 'unsupported' },
+      { name: 'Tambor', serialNumber: null, levelPercent: 69, status: 'ok' },
+      { name: 'Toner Preto', serialNumber: null, levelPercent: 10, status: 'low' },
+      { name: 'Toner Ciano', serialNumber: null, levelPercent: null, status: 'partial' },
+      { name: 'Toner Magenta', serialNumber: null, levelPercent: null, status: 'unknown' },
+      { name: 'fuser', serialNumber: null, levelPercent: null, status: 'unsupported' },
+    ]);
+
+    await app.close();
+  });
+
+  // Subtarefa 19: as 2 HPs reais embutem o número de série do cartucho na
+  // própria description ("Black Toner S/N:CRUM-210729A5BB3"), achado
+  // confirmado por SNMP GET real contra elas. Antes desta subtarefa, esse
+  // texto ia inteiro para `name`; agora sai como campo próprio, e `name`
+  // fica só com o texto antes do "S/N:".
+  it('extrai o número de série embutido em description (padrão real das 2 HPs) para um campo próprio, sem deixá-lo no name', async () => {
+    const { app, token } = await authedApp();
+    const auth = { authorization: `Bearer ${token}` };
+    const printer = await createPrinter(app, auth);
+
+    getLastReadingMock.mockReturnValueOnce(
+      buildReading({
+        printerId: printer.id,
+        supplies: [
+          {
+            index: '1.1',
+            description: 'Black Toner S/N:CRUM-210729A5BB3',
+            serialNumber: 'CRUM-210729A5BB3',
+            type: 3,
+            typeLabel: 'toner',
+            unit: 19,
+            unitLabel: 'percent',
+            maxCapacity: { status: 'ok', value: 100 },
+            level: { status: 'ok', value: 55 },
+            levelPercent: 55,
+          },
+        ],
+      }),
+    );
+
+    const res = await app.inject({ method: 'GET', url: `/printers/${printer.id}/consumables`, headers: auth });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().supplies).toEqual([
+      { name: 'Black Toner', serialNumber: 'CRUM-210729A5BB3', levelPercent: 55, status: 'ok' },
+    ]);
+
+    await app.close();
+  });
+
+  // As 3 Brother reais não embutem serial na description — precisa
+  // continuar funcionando exatamente como antes desta subtarefa (name
+  // intacto, serialNumber null), não é ausência de coleta.
+  it('description sem "S/N:" (padrão real das 3 Brother): serialNumber null, name inalterado', async () => {
+    const { app, token } = await authedApp();
+    const auth = { authorization: `Bearer ${token}` };
+    const printer = await createPrinter(app, auth);
+
+    getLastReadingMock.mockReturnValueOnce(
+      buildReading({
+        printerId: printer.id,
+        supplies: [
+          {
+            index: '1.1',
+            description: 'Black Toner Cartridge',
+            serialNumber: null,
+            type: 3,
+            typeLabel: 'toner',
+            unit: 13,
+            unitLabel: 'tenthsOfGrams',
+            maxCapacity: { status: 'unknown' },
+            level: { status: 'partial' },
+            levelPercent: null,
+          },
+        ],
+      }),
+    );
+
+    const res = await app.inject({ method: 'GET', url: `/printers/${printer.id}/consumables`, headers: auth });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().supplies).toEqual([
+      { name: 'Black Toner Cartridge', serialNumber: null, levelPercent: null, status: 'partial' },
     ]);
 
     await app.close();
@@ -272,6 +363,7 @@ describe('GET /printers/:id/consumables', () => {
           {
             index: '1.1',
             description: 'Toner Preto',
+            serialNumber: null,
             type: 3,
             typeLabel: 'toner',
             unit: 19,
@@ -287,7 +379,9 @@ describe('GET /printers/:id/consumables', () => {
     const res = await app.inject({ method: 'GET', url: `/printers/${printer.id}/consumables`, headers: auth });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json().supplies).toEqual([{ name: 'Toner Preto', levelPercent: 1, status: 'ok' }]);
+    expect(res.json().supplies).toEqual([
+      { name: 'Toner Preto', serialNumber: null, levelPercent: 1, status: 'ok' },
+    ]);
     // …mas a resposta NÃO esconde que a checagem está desligada: sem este
     // campo, esse 'ok' em 1% seria indistinguível de um toner cheio.
     expect(res.json().lowThresholdPct).toBeNull();
@@ -322,6 +416,7 @@ describe('GET /printers/:id/consumables', () => {
           {
             index: '1.1',
             description: 'Toner Preto',
+            serialNumber: null,
             type: 3,
             typeLabel: 'toner',
             unit: 19,
@@ -337,7 +432,9 @@ describe('GET /printers/:id/consumables', () => {
     const res = await app.inject({ method: 'GET', url: `/printers/${printer.id}/consumables`, headers: auth });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json().supplies).toEqual([{ name: 'Toner Preto', levelPercent: 20, status: 'ok' }]);
+    expect(res.json().supplies).toEqual([
+      { name: 'Toner Preto', serialNumber: null, levelPercent: 20, status: 'ok' },
+    ]);
 
     await app.close();
   });
@@ -359,6 +456,7 @@ describe('GET /printers/:id/consumables', () => {
           {
             index: '1.1',
             description: null,
+            serialNumber: null,
             type: null,
             typeLabel: null,
             unit: null,
@@ -370,6 +468,7 @@ describe('GET /printers/:id/consumables', () => {
           {
             index: '1.2',
             description: 'Toner Amarelo',
+            serialNumber: null,
             type: 3,
             typeLabel: 'toner',
             unit: 19,
@@ -386,8 +485,8 @@ describe('GET /printers/:id/consumables', () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.json().supplies).toEqual([
-      { name: 'Suprimento 1.1', levelPercent: null, status: 'error' },
-      { name: 'Toner Amarelo', levelPercent: null, status: 'unknown' },
+      { name: 'Suprimento 1.1', serialNumber: null, levelPercent: null, status: 'error' },
+      { name: 'Toner Amarelo', serialNumber: null, levelPercent: null, status: 'unknown' },
     ]);
 
     await app.close();
@@ -438,6 +537,7 @@ describe('GET /printers/:id/consumables', () => {
           {
             index: '1.1',
             description: 'Transfer Roller',
+            serialNumber: null,
             type: 1,
             typeLabel: 'other',
             unit: 19,
@@ -454,7 +554,9 @@ describe('GET /printers/:id/consumables', () => {
     const res = await app.inject({ method: 'GET', url: `/printers/${printer.id}/consumables`, headers: auth });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json().supplies).toEqual([{ name: 'Transfer Roller', levelPercent: null, status: 'not-measured' }]);
+    expect(res.json().supplies).toEqual([
+      { name: 'Transfer Roller', serialNumber: null, levelPercent: null, status: 'not-measured' },
+    ]);
 
     await app.close();
   });
