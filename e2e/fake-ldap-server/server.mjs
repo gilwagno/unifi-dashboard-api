@@ -704,12 +704,30 @@ function handleModify(socket, state, messageId, reader) {
   for (const change of changes) {
     const current = getAttrStrings(entry, change.type);
     const values = change.values.map((v) => v.toString('utf8'));
+    // `member` é tratado à parte a partir daqui: um teste de fumaça
+    // supervisionado contra um AD REAL (Windows Server 2016, 2026-09-11)
+    // mediu que o comportamento desse atributo especificamente NÃO segue
+    // a RFC ao pé da letra como o resto deste fake (modelado por RFC,
+    // nunca confrontado com um AD real antes desta sessão) — ver
+    // `applyGroupMembership` em `src/services/ad.service.ts` para o
+    // detalhe completo e a correção do lado do serviço (releitura de
+    // estado final, não confiar no resultCode). Medido:
+    //   - add de valor JÁ existente em `member` -> 68 entryAlreadyExists
+    //     (não 20 attributeOrValueExists, que é o genérico RFC)
+    //   - delete de valor AUSENTE em `member` -> 53 unwillingToPerform
+    //     (não 16 noSuchAttribute, que é o genérico RFC)
+    const isMemberAttr = change.type.toLowerCase() === 'member';
     if (change.operation === 0) {
       // add — RFC 4511: erro se algum valor já existir no atributo.
       for (const v of values) {
         if (current.some((c) => c.toLowerCase() === v.toLowerCase())) {
           socket.write(
-            encodeResult(messageId, OP.ModifyResponse, RESULT.attributeOrValueExists, `${change.type}=${v} já existe em ${dn}`),
+            encodeResult(
+              messageId,
+              OP.ModifyResponse,
+              isMemberAttr ? RESULT.entryAlreadyExists : RESULT.attributeOrValueExists,
+              `${change.type}=${v} já existe em ${dn}`,
+            ),
           );
           return;
         }
@@ -719,13 +737,25 @@ function handleModify(socket, state, messageId, reader) {
       // valor pedido para remover não está presente (delete de todos os
       // valores, corpo vazio, é tratado como "apagar o atributo inteiro").
       if (current.length === 0) {
-        socket.write(encodeResult(messageId, OP.ModifyResponse, RESULT.noSuchAttribute, `${change.type} não existe em ${dn}`));
+        socket.write(
+          encodeResult(
+            messageId,
+            OP.ModifyResponse,
+            isMemberAttr ? RESULT.unwillingToPerform : RESULT.noSuchAttribute,
+            `${change.type} não existe em ${dn}`,
+          ),
+        );
         return;
       }
       for (const v of values) {
         if (!current.some((c) => c.toLowerCase() === v.toLowerCase())) {
           socket.write(
-            encodeResult(messageId, OP.ModifyResponse, RESULT.noSuchAttribute, `${change.type}=${v} não existe em ${dn}`),
+            encodeResult(
+              messageId,
+              OP.ModifyResponse,
+              isMemberAttr ? RESULT.unwillingToPerform : RESULT.noSuchAttribute,
+              `${change.type}=${v} não existe em ${dn}`,
+            ),
           );
           return;
         }

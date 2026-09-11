@@ -646,12 +646,57 @@ export async function setUserWorkstations(username: string, workstations: string
 // privilégio qualquer (achado desta subtarefa): um operador adicionando
 // alguém a um grupo administrativo que a pessoa já integra, ou removendo de
 // um que ela já não integra, não deveria ver um erro genérico.
+// Releitura do `member` do grupo, usada como ÚLTIMA PALAVRA sobre o estado
+// desejado ter sido alcançado (ver comentário de `applyGroupMembership`
+// abaixo) — nunca engolida: se a busca em si falhar, quem chama decide (e
+// hoje decide propagar o erro ORIGINAL da operação de modify, não este).
+async function isGroupMember(client: Client, groupDn: string, memberDn: string): Promise<boolean> {
+  const { searchEntries } = await client.search(groupDn, { scope: 'base', attributes: ['member'] });
+  const entry = searchEntries[0] as unknown as Record<string, string | string[] | Buffer | Buffer[]> | undefined;
+  if (!entry) return false;
+  const memberValue = entry.member;
+  const members = memberValue === undefined ? [] : Array.isArray(memberValue) ? memberValue : [memberValue];
+  const targetLower = memberDn.toLowerCase();
+  return members.some((m) => (asString(m) ?? '').toLowerCase() === targetLower);
+}
+
+// ACHADO de um teste de fumaça supervisionado contra um AD REAL (Windows
+// Server 2016, 2026-09-11): o catch por classe de erro abaixo, escrito só
+// contra o `fake-ldap-server` (que segue a RFC ao pé da letra), não cobre
+// o que o AD real de fato devolve. Medido:
+//   - add de quem JÁ é membro -> 68 AlreadyExistsError (cobria)
+//   - delete de quem JÁ NÃO é membro -> 53 UnwillingToPerformError, NÃO 16
+//     NoSuchAttributeError (não cobria — QUEBRAVA a idempotência que este
+//     comentário histórico abaixo promete)
+// O código 53 é genérico demais para capturar: o AD também o usa para
+// recusas LEGÍTIMAS (restrição de schema, membro obrigatório, grupo
+// protegido) — tratar todo 53 como "já estava assim" trocaria um falso
+// negativo (erro onde não devia) por um falso positivo (sucesso onde
+// devia ter falhado de verdade), pior numa função de segurança.
+// A garantia de verdade não pode depender de prever todo resultCode de
+// todo AD: em caso de falha, RELEIA o grupo e confira o estado final.
+// Atingiu o estado desejado -> sucesso (mesmo princípio da verificação por
+// relogin da troca de senha da HP). Não atingiu -> propaga o erro
+// ORIGINAL da operação de modify (não um erro genérico da releitura, que
+// perderia a causa raiz). Os catches por classe de erro abaixo continuam
+// como caminho rápido (evitam a busca extra no caso comum), a releitura é
+// quem garante a idempotência de verdade.
 async function applyGroupMembership(client: Client, groupDn: string, memberDn: string, operation: 'add' | 'delete'): Promise<void> {
   try {
     await client.modify(groupDn, new Change({ operation, modification: new Attribute({ type: 'member', values: [memberDn] }) }));
   } catch (err) {
     if (operation === 'add' && (err instanceof TypeOrValueExistsError || err instanceof AlreadyExistsError)) return;
     if (operation === 'delete' && err instanceof NoSuchAttributeError) return;
+
+    let memberNow: boolean;
+    try {
+      memberNow = await isGroupMember(client, groupDn, memberDn);
+    } catch {
+      throw err;
+    }
+
+    if (operation === 'add' && memberNow) return;
+    if (operation === 'delete' && !memberNow) return;
     throw err;
   }
 }

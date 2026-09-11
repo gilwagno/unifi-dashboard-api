@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Attribute, Change, Client, InvalidCredentialsError, NoSuchAttributeError, OperationsError, TypeOrValueExistsError } from 'ldapts';
+import { Attribute, AlreadyExistsError, Change, Client, InvalidCredentialsError, NoSuchAttributeError, OperationsError, TypeOrValueExistsError, UnwillingToPerformError } from 'ldapts';
 import selfsigned from 'selfsigned';
 import { startFakeLdapServer } from '../../e2e/fake-ldap-server/server.mjs';
 import type { AdUser } from '../../src/services/ad.service.js';
@@ -655,15 +655,47 @@ describe('fake-ldap-server — semântica de erro do ModifyRequest (RFC 4511 §4
     await client.unbind().catch(() => undefined);
   });
 
-  it('add de um valor que JÁ existe -> TypeOrValueExistsError (resultCode 20) de verdade', async () => {
+  // Os DOIS testes abaixo foram REESCRITOS em 2026-09-11 a partir de uma
+  // medição contra um AD REAL (Windows Server 2016) num teste de fumaça
+  // supervisionado. Antes afirmavam o que a RFC 4511 §4.6 permite no
+  // genérico (20 attributeOrValueExists / 16 noSuchAttribute) — e era
+  // exatamente essa fidelidade à RFC, em vez de ao comportamento real,
+  // que mascarava um bug de produção: a idempotência da REVOGAÇÃO em
+  // `applyGroupMembership` nunca funcionou contra um AD de verdade, com
+  // os 746 testes verdes. No atributo `member` o AD real usa outros dois
+  // códigos, e é esse comportamento que o fake reproduz agora.
+  //
+  // SE ALGUÉM "CORRIGIR" ESTES TESTES DE VOLTA PARA 20/16 pensando estar
+  // seguindo a RFC, o bug volta sem nenhuma linha vermelha. A RFC descreve
+  // o que é PERMITIDO; a implementação escolhe dentro disso.
+  it('add de um valor que JÁ existe -> AlreadyExistsError (resultCode 68), como o AD real', async () => {
     const change = new Change({ operation: 'add', modification: new Attribute({ type: 'member', values: [memberDn] }) });
     await client.modify(groupDn(), change);
-    await expect(client.modify(groupDn(), change)).rejects.toBeInstanceOf(TypeOrValueExistsError);
+    await expect(client.modify(groupDn(), change)).rejects.toBeInstanceOf(AlreadyExistsError);
   });
 
-  it('delete de um valor que NÃO existe -> NoSuchAttributeError (resultCode 16) de verdade', async () => {
+  it('delete de um valor que NÃO existe -> UnwillingToPerformError (resultCode 53), como o AD real', async () => {
     const del = new Change({ operation: 'delete', modification: new Attribute({ type: 'member', values: [memberDn] }) });
-    await expect(client.modify(groupDn(), del)).rejects.toBeInstanceOf(NoSuchAttributeError);
+    await expect(client.modify(groupDn(), del)).rejects.toBeInstanceOf(UnwillingToPerformError);
+  });
+
+  // A GARANTIA DE VERDADE não é o código de erro acima — é a releitura do
+  // estado final em `applyGroupMembership`. Estes dois provam que revogar
+  // quem já não é membro e conceder a quem já é continuam sendo SUCESSO
+  // pelo caminho de PRODUÇÃO, contra o protocolo real, agora que o fake
+  // devolve os códigos que o catch por classe NÃO cobre. Sem a releitura,
+  // os dois falham.
+  it('revogar quem JÁ NÃO é membro continua SUCESSO (releitura, não o resultCode 53)', async () => {
+    const { removeGroupMember } = await importAdService();
+    await expect(removeGroupMember('Rede-Permitida', 'jsilva')).resolves.toBeUndefined();
+  });
+
+  it('conceder a quem JÁ é membro continua SUCESSO (releitura, não o resultCode 68)', async () => {
+    const { addGroupMember, getGroup } = await importAdService();
+    await addGroupMember('Rede-Permitida', 'jsilva');
+    await expect(addGroupMember('Rede-Permitida', 'jsilva')).resolves.toBeUndefined();
+    const g = await getGroup('Rede-Permitida');
+    expect(g.members.filter((m: string) => m.toLowerCase().includes('jsilva'))).toHaveLength(1);
   });
 
   it('atomicidade: um ModifyRequest com 2 changes, o 2º inválido, não aplica NENHUM dos dois', async () => {
