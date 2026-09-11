@@ -80,6 +80,16 @@ const envSchema = z.object({
   // POST/DELETE /ad/users/:username/network-access, não pelo resto do
   // módulo (CRUD de usuário/grupo/computador funciona sem ele).
   AD_NETWORK_ACCESS_GROUP_DN: z.string().min(1).optional(),
+  // OU onde grupos NOVOS são criados (subtarefa 3 — grupos/privilégios, ver
+  // docs/ad-module-plan.md). Diferente de AD_USERS_OU: só é exigida por
+  // `createGroup` — buscar/listar grupos e adicionar/remover membro
+  // continuam funcionando (procurando em AD_BASE_DN, a raiz do domínio,
+  // como o próprio AD_NETWORK_ACCESS_GROUP_DN já faz) mesmo sem esta
+  // variável configurada, porque grupos de segurança no AD real
+  // frequentemente já existem fora de uma OU dedicada (ex.: o container
+  // padrão "CN=Users"), e este módulo não deveria exigir uma organização
+  // que o domínio real não tem só para PODER LER o que já existe.
+  AD_GROUPS_OU: z.string().min(1).optional(),
   // Caminho para um arquivo PEM com uma CA adicional a confiar na conexão
   // LDAPS deste módulo (além das CAs do sistema operacional) — cenário real
   // de AD corporativo com PKI interna própria, cujo certificado do DC não é
