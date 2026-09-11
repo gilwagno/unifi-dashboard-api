@@ -65,26 +65,52 @@ erros do módulo.
 
 Suíte após o merge: **backend 690/690** (44 arquivos), `tsc --noEmit` limpo.
 
-### ⛔ PRÉ-REQUISITO BLOQUEANTE da subtarefa de GRUPOS (registrado 2026-09-11)
+### Pré-requisito de bind por conexão (era ⛔ bloqueante de GRUPOS) — RESOLVIDO e MERGEADO em 2026-09-11 (PR #33, squash `0c640c5`)
 
-**Antes de qualquer código de grupos ou computadores, o `e2e/fake-ldap-server` precisa passar a
-rastrear estado de bind POR CONEXÃO.** Hoje ele não rastreia: um `search`/`add`/`modify` enviado
-sem bind prévio é aceito, coisa que um Active Directory real recusa (resultCode 1 / 53). Enquanto
-grupos e computadores não existem isso não afeta nada — `ad.service.ts` sempre faz bind antes de
-qualquer operação — mas no instante em que o fake ganhar mais superfície ele vira um buraco da
-classe que este projeto já tratou como grave três vezes: **um fake generoso demais aceita o que o
-serviço real recusaria, e o teste passa sem exercitar a proteção que ele afirma travar.**
+**O gate de grupos está liberado.** O `e2e/fake-ldap-server` agora rastreia estado de bind POR
+CONEXÃO e recusa `search`/`add`/`modify`/`delete` enviados antes de um bind bem-sucedido, como um
+Active Directory real faz. `connState` nasce por socket em `handleConnection`, nunca global — uma
+conexão autenticada não vaza autorização para outra; bind falho **sempre** limpa a autenticação,
+inclusive num rebind de conexão já autenticada.
 
-Isto está aqui, e não só como recomendação solta no fim do arquivo, por pedido explícito do
-usuário: *"é fácil ficar pra trás quando a sessão seguinte só lê o topo do arquivo"*. Se você está
-começando grupos e este parágrafo ainda existe, ele ainda não foi feito — confira no código antes
-de assumir que sim.
+**resultCode 1 (`operationsError`), não 53.** RFC 4511 §4.2.1 define operationsError como
+"requisição não permitida dado o estado atual" — exatamente o caso. O 53 (`unwillingToPerform`)
+fica reservado no fake para "operação reconhecida mas fora do subconjunto implementado" (o ramo
+`default` do `handleMessage`), pra que as duas classes de falha sigam distinguíveis.
 
-Precedente que justifica o rigor: na verificação da própria subtarefa 6, remover a validação do
-`handleModify` do fake fez ele aceitar calado um `add` de valor já existente e um `delete` de valor
-ausente — e a suíte seguiu **18/18 verde**. O teste de idempotência da ponte 802.1X afirmava em
-comentário estar travando os `catch (TypeOrValueExistsError)`/`catch (NoSuchAttributeError)` do
-`ad.service.ts`, mas com o fake permissivo esses caminhos **nunca eram executados**.
+**Primeira nota 4/4 do harness de 4 pontos.** Par executor (Sonnet) / verificador (Opus, às cegas).
+
+**O achado — de novo PROTEÇÃO SEM TRAVA, e no pior lugar possível.** O `handleBind` já recusava
+DN vazio e senha vazia, e o comentário documentava a decisão com cuidado — mas **nada defendia
+isso**: os mutantes "aceitar bind anônimo" e "aceitar senha vazia" passavam com a suíte **33/33
+verde**. Um fake que autentica sem credencial faz TODO teste futuro de grupos/computadores passar
+sem nunca exercitar o gate, com o comentário afirmando o contrário pra quem for ler. Corrigido com
+2 testes que verificam o **efeito no estado da conexão** (o `search` seguinte ainda é recusado com
+`OperationsError`), não só o erro do bind — **essa distinção é o que faz o teste valer**: um teste
+que checasse apenas o erro do bind passaria com a conexão autenticada por trás, que é o buraco.
+
+**Disciplina de mutação aplicada, inclusive sobre o próprio achado** (a pergunta do usuário antes
+do merge: *"confirma que existe pelo menos um teste que teria pego esse achado específico se ele
+reaparecesse"*). Os dois mutantes do achado foram **reexecutados de forma independente pelo
+orquestrador**, sem confiar no relatório do verificador: cada um mata exatamente 1 teste, com
+`server.mjs` restaurado byte-idêntico depois. Mutantes mortos: gate do `SearchRequest` removido
+(5 testes), rebind falho não derruba autenticação (1), `connState` global vazando entre sockets (1),
+aceitar bind anônimo (1), aceitar senha vazia (1).
+
+**Sobrevivente registrado, NÃO coberto**: remover `connState.authenticated = false` do
+`UnbindRequest` é equivalente na prática — `socket.end()` vem na mesma linha e nenhuma observação
+via `ldapts` distingue as duas versões. Mesmo precedente do `ADF` (PR #30): teste artificial só
+pra matar mutante equivalente é dívida técnica disfarçada de cobertura.
+
+**Rigidez a mais, registrada**: um AD real costuma permitir leitura anônima do root DSE antes do
+bind; este fake recusa. Irrelevante hoje (`ad.service.ts` nunca lê root DSE), anotado pra não virar
+surpresa numa subtarefa futura.
+
+Suíte após o merge: **backend 700/700** (44 arquivos), `tsc --noEmit` limpo.
+
+**Gate que resta antes do MERGE de grupos** (não antes de começar): teste de fumaça supervisionado
+contra um AD real, numa OU de teste que o usuário confirme explicitamente — como gate de merge,
+nunca como método de desenvolvimento.
 
 Escopo completo, arquitetura, estratégia de teste e ordem de subtarefas em
 `docs/ad-module-plan.md` — carregar esse documento no contexto de qualquer par que trabalhe
