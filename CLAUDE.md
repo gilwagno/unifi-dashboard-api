@@ -1,6 +1,6 @@
 # Gauntlet Loop — unifi-dashboard-api
 
-## Onda 3 (Módulo de Active Directory + Ponte 802.1X) — pré-requisitos concluídos; CRUD de usuários em rascunho (PR #25, reprovado 43/50, correção em andamento)
+## Onda 3 (Módulo de Active Directory + Ponte 802.1X) — pré-requisitos concluídos; CRUD de usuários + ponte 802.1X APROVADOS (47/50) e MERGEADOS em 2026-09-11 (PR #25)
 
 Escopo completo, arquitetura, estratégia de teste e ordem de subtarefas em
 `docs/ad-module-plan.md` — carregar esse documento no contexto de qualquer par que trabalhe
@@ -707,17 +707,21 @@ Estado verificado nesta auditoria: **backend 555/555, frontend 67/67 (via `tsc -
 `tsc --noEmit` sozinho não checa nada neste projeto, ver item 20), e2e 5/5**, tudo em `master`.
 
 Pendência real conhecida nesta data: a subtarefa 11 (senha admin HP) está com UI e backend
-mergeados (PR #22) — não é mais "sem commit/PR" como a versão anterior deste bloco dizia. A
-pendência de verdade agora é a **Onda 3**: o CRUD de usuários AD + ponte 802.1X existe na branch
-`feat/ad-module-users` (PR #25, **rascunho explícito, não mergeada**) — revisão crítica formal
-(Opus) deu **43/50, reprovado**, com 3 achados bloqueantes (mock de teste do `escapeFilter` não
-escapa de verdade, deixando a defesa contra injeção LDAP sem rede de segurança; DN do usuário novo
-montado por concatenação crua, sem escapar vírgula/caractere especial; troca de senha podia perder
-a senha gerada num estado ambíguo se a segunda escrita falhasse) — correção em andamento numa
-worktree isolada (`../unifi-ad-worktree`) pra não reiniciar o servidor de dev que o usuário está
-usando ao vivo. Grupos, computadores, `fake-ldap-server`, frontend de AD e e2e do módulo:
-**não iniciados, nenhum código em nenhuma branch**. Se este arquivo disser o contrário numa sessão
-futura sem que o `git log`/`gh pr list` confirmem, desconfiar do arquivo, não do código.
+mergeados (PR #22) — não é mais "sem commit/PR" como a versão anterior deste bloco dizia.
+
+**ATUALIZADO em 2026-09-11**: a **PR #25 (CRUD de usuários AD + ponte 802.1X) foi APROVADA em
+47/50 e MERGEADA em `master`** (squash, commit `22e7298`) — a versão anterior deste bloco dizia
+"rascunho explícito, não mergeada / reprovada 43/50 / correção em andamento", o que era verdade só
+até a 2ª revisão crítica desta data. Ver a seção "Onda 3 — subtarefa 2" no fim deste arquivo pro
+detalhe das duas rodadas de revisão. Grupos, computadores, `fake-ldap-server`, frontend de AD e e2e
+do módulo: **seguem não iniciados, nenhum código em nenhuma branch**. Se este arquivo disser o
+contrário numa sessão futura sem que o `git log`/`gh pr list` confirmem, desconfiar do arquivo, não
+do código.
+
+Também aberta nesta data: **PR #30** (`fix/printers-toner-level-vendor-mib`) — toner das HPs em 0%
+com cartucho cheio (MIB padrão quebrada, corrigida pela MIB privada cruzada por serial de
+cartucho), coleta SNMP no boot, layout do card, e 2 specs de e2e verificando tudo pela UI real.
+**Não mergeada** até esta data.
 
 ## Decisão do gate humano (respondida em 2026-08-31) — IMPLEMENTADO em 2026-09-08
 
@@ -1137,3 +1141,72 @@ Havia um `audit-log.service.ts` (log interno de ações do dashboard) não commi
 queda de PC no início da sessão de 2026-08-31. Isolado na branch `feat/audit-log` (commit próprio)
 por decisão do usuário — não é parte deste loop, não confundir com "log de login de
 administrador" (decisão fechada, não implementado por falta de endpoint confiável no controller).
+
+## Onda 3 — subtarefa 2 (CRUD de usuários AD + ponte 802.1X): aprovada 47/50 e mergeada (2026-09-11)
+
+PR #25, squash em `master` (commit `22e7298`). Primeira subtarefa de CÓDIGO da Onda 3 — os
+pré-requisitos 0.1/0.2/0.3 já estavam fechados desde 2026-09-10. Cobre "Usuários" + a ponte 802.1X;
+grupos, computadores, `fake-ldap-server`, frontend de AD e e2e do módulo seguem **não iniciados**.
+
+`src/services/ad.service.ts` (client LDAPS via `ldapts`, `withClient` central fazendo bind/unbind,
+erros tipados) + `src/routes/ad.routes.ts` (buscar/criar/editar/excluir, habilitar/desabilitar,
+desbloquear, resetar senha, `userWorkstations`, e POST/DELETE `/ad/users/:username/network-access`
+sobre o grupo de `AD_NETWORK_ACCESS_GROUP_DN`). Env vars `AD_*` todas OPCIONAIS — sem elas o módulo
+responde 503 e o resto do app funciona igual, mesmo tratamento de `UNIFI_CONTROLLER_USER/PASSWORD`.
+
+**Duas rodadas de revisão crítica (Opus), todos os achados verificados por MUTAÇÃO EXECUTADA de
+verdade** (mutante aplicado, suíte rodada, mutante revertido):
+
+**1ª rodada — 43/50, REPROVADO.** 3 achados bloqueantes, corrigidos em `681b8ca`: (a) o `vi.mock`
+do `ldapts` reimplementava `escapeFilter` como concatenação crua — remover o escape do código de
+PRODUÇÃO deixava a suíte 100% verde, a mesma classe de "mock desarmando o teste que deveria travar
+a regressão" já tratada como grave na subtarefa 15 da Onda 2; (b) o DN era montado por concatenação
+crua (`CN=${displayName},...`) — quebrava com nome brasileiro comum ("Silva, João") e, com um valor
+como `"hacker,OU=Servidores"`, produzia um DN VÁLIDO apontando pra outro container; (c) a troca de
+senha podia perder a senha gerada num estado ambíguo.
+
+**2ª rodada — 47/50, APROVADO.** 4 achados NOVOS, corrigidos em `0c03809`:
+1. **O escape de DN não tinha teste nenhum.** O mutante que removia SÓ o escape (mantendo o
+   `sAMAccountName` como fonte do CN) **sobrevivia** com a suíte verde. Pior: `createUserBody`
+   validava só `min(1).max(20)`, então `"x,OU=Servidores"` (15 caracteres) passava e criaria o
+   objeto FORA da OU pretendida. Corrigido nos dois lados — teste cravando o RDN emitido
+   (`CN=x\,OU\=Servidores`) e validação de charset na rota, pra não depender só de a lib escapar
+   certo.
+2. **O bloqueante (c) da 1ª rodada sobrevivia no `createUser`.** A releitura final
+   (`findUserEntry`) roda DEPOIS do `modify` ter confirmado — conta já habilitada, senha gerada já
+   em vigor. Uma falha ali virava 404/`AdRequestError` genérico e DESCARTAVA a única cópia da
+   senha: literalmente o achado bloqueante, num caminho que ninguém tinha olhado.
+3. **A rota afirmava `accountEnabled: false` fixo no 502 ambíguo** — afirmação possivelmente FALSA
+   sobre uma conta de produção já com acesso à rede. Agora o erro carrega o estado afirmável:
+   `true` (só a releitura falhou) ou `null` (desconhecido).
+4. **Senha em claro no log.** O serializador de erro do pino inclui as props próprias ENUMERÁVEIS
+   do `Error` — um `app.log.error(error)` no catch-all de `src/app.ts` gravaria `attemptedPassword`
+   em claro, violando a regra dura do projeto. Hoje só não vazava porque as 2 rotas interceptam
+   antes; uma rota nova do módulo (grupos/computadores, ainda por vir) reabriria isso. Campo virou
+   **não-enumerável** (leitura programática intacta, fora de `JSON.stringify`/pino/`util.inspect`)
+   + ramo próprio no error handler central. Reconfirmado ao vivo numa sonda independente depois da
+   revisão.
+
+Decisões de projeto registradas: senha + UAC + `pwdLastSet` vão num ÚNICO `client.modify` (o LDAP
+garante atomicidade entre changes da mesma requisição — com dois modifys separados havia janela
+real onde a senha já tinha mudado sem o `pwdLastSet`); `enabled` é `boolean | null`, nunca
+assumindo "habilitada" quando `userAccountControl` não vem legível (falharia ABERTO num módulo
+cujo objetivo é controlar acesso à rede); a ponte 802.1X é idempotente nos dois sentidos (conceder
+a quem já tem / revogar de quem já não tem vira sucesso, não 502 — num incidente, um 502 ao
+revogar faria o operador concluir, errado, que a pessoa ainda tem acesso).
+
+**Suíte final: backend 634/634 (43 arquivos), `tsc --noEmit` limpo. NENHUMA chamada a um Active
+Directory real em nenhum momento** — o `ldapts` é inteiramente mockado na suíte. O `fake-ldap-server`
+da subtarefa 7 do plano continua sendo o que vai cobrir o caminho de integração de verdade.
+
+### Lição metodológica desta rodada (vale pra qualquer par futuro)
+
+A mensagem do commit `681b8ca` afirmava "MUTANTE: voltar a concatenação crua -> 6 testes morrem".
+Quando o crítico executou o mutante ISOLADO (remover só o escape, mantendo o campo de origem), ele
+**sobreviveu** — os 6 testes que o executor viu morrer morriam pela troca de campo
+(`displayName`→`sAMAccountName`), não pelo escape. Ou seja: o mutante do executor mexia em DUAS
+coisas ao mesmo tempo e mascarava a lacuna real.
+
+**Regra a seguir daqui pra frente**: um mutante precisa isolar UMA proteção por vez, e alegação de
+mutação escrita em mensagem de commit não substitui rodar o mutante — se o crítico não reexecutou,
+trate como não verificado.
