@@ -81,6 +81,18 @@ function supplyFillColor(name: string): string {
   return match?.fill ?? NEUTRAL_SUPPLY_FILL;
 }
 
+// Achado real do usuário testando ao vivo: nesta impressora, os rolos do
+// ADF (alimentador automático de documentos — só usado pra ESCANEAR, não
+// afeta impressão nenhuma) tinham percentual conhecido (100%) enquanto o
+// toner de verdade estava em 0% — e os dois apareciam juntos no medidor
+// compacto, sem rótulo visível, dando a impressão de "a maioria está bem"
+// quando na verdade o único suprimento que importa pra IMPRIMIR já tinha
+// acabado. O número não estava errado (é o que o SNMP reporta mesmo), mas
+// misturar peça de scanner com toner no mesmo relance é enganoso.
+function isPrintPathSupply(name: string): boolean {
+  return !/\bADF\b/i.test(name);
+}
+
 // Medidor visual de toner na LINHA DA LISTA (fora do "Ver consumíveis") —
 // pedido do usuário: ver de cara, com cor, se cada cartucho "está cheio ou
 // precisa trocar", sem expandir o card (mesma ideia de um app de fabricante
@@ -90,10 +102,15 @@ function supplyFillColor(name: string): string {
 // no nome; sem cor identificada, cinza neutro, ex.: fusor/rolo/correia).
 // Nunca inventa um número quando não há leitura confiável (sentinela/não
 // suportado/nunca coletado) — esses suprimentos simplesmente não entram no
-// medidor; o "Ver consumíveis" continua sendo a fonte da explicação.
+// medidor; o "Ver consumíveis" continua sendo a fonte da explicação. Peças
+// do ADF (`isPrintPathSupply`) também ficam de fora do relance compacto,
+// mesmo quando medidas — só aparecem no detalhe expandido, junto do rótulo
+// que deixa claro o que são.
 function tonerLevelsGauge(c: PrinterConsumablesResponse | undefined) {
   if (!c) return null;
-  const measured = c.supplies.filter((s): s is typeof s & { levelPercent: number } => s.levelPercent !== null);
+  const measured = c.supplies.filter(
+    (s): s is typeof s & { levelPercent: number } => s.levelPercent !== null && isPrintPathSupply(s.name),
+  );
   if (measured.length === 0) return null;
 
   return (
@@ -307,7 +324,9 @@ export function Printers() {
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const [pendingId, setPendingId] = useState<string | null>(null);
+  // Record por id, não um único valor global: uma ação em OUTRA impressora não
+  // pode reabilitar os botões de uma ação ainda em voo nesta.
+  const [pendingIds, setPendingIds] = useState<Record<string, boolean>>({});
 
   const [aliasEditingId, setAliasEditingId] = useState<string | null>(null);
   const [aliasDraft, setAliasDraft] = useState('');
@@ -388,6 +407,15 @@ export function Printers() {
   }
 
   function startEdit(printer: PrinterWithNetwork) {
+    // Mesmo achado das duas edições acima: o formulário de cadastro/edição também é
+    // um único estado global — "Editar" em outra linha, com um cadastro/edição já
+    // aberto (inclusive "Nova impressora"), sobrescrevia tudo sem aviso.
+    if (showForm && editingId !== printer.id) {
+      const confirmed = window.confirm(
+        'Já há um formulário de impressora aberto (cadastro ou edição de outra impressora). Trocar agora descarta o que não foi salvo. Continuar?',
+      );
+      if (!confirmed) return;
+    }
     setForm({
       name: printer.name,
       mac: printer.mac,
@@ -507,7 +535,7 @@ export function Printers() {
 
   async function handleDelete(printer: PrinterWithNetwork) {
     if (!window.confirm(`Remover a impressora "${printer.name}" do cadastro? Isso não afeta o equipamento físico.`)) return;
-    setPendingId(printer.id);
+    setPendingIds((prev) => ({ ...prev, [printer.id]: true }));
     setError(null);
     try {
       await api.deletePrinter(printer.id);
@@ -515,7 +543,11 @@ export function Printers() {
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Falha ao remover impressora');
     } finally {
-      setPendingId(null);
+      setPendingIds((prev) => {
+        const next = { ...prev };
+        delete next[printer.id];
+        return next;
+      });
     }
   }
 
@@ -525,7 +557,7 @@ export function Printers() {
         'uma nova associação. NÃO reinicia nem desliga o equipamento — é só uma reconexão de rede.',
     );
     if (!confirmed) return;
-    setPendingId(printer.id);
+    setPendingIds((prev) => ({ ...prev, [printer.id]: true }));
     setError(null);
     try {
       await api.reconnectPrinter(printer.id);
@@ -533,7 +565,11 @@ export function Printers() {
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Falha ao reconectar impressora');
     } finally {
-      setPendingId(null);
+      setPendingIds((prev) => {
+        const next = { ...prev };
+        delete next[printer.id];
+        return next;
+      });
     }
   }
 
@@ -549,7 +585,7 @@ export function Printers() {
         'Não é a mesma coisa que "Reconectar", que só refaz a conexão de rede sem desligar nada.',
     );
     if (!confirmed) return;
-    setPendingId(printer.id);
+    setPendingIds((prev) => ({ ...prev, [printer.id]: true }));
     setError(null);
     setNotice(null);
     try {
@@ -563,7 +599,11 @@ export function Printers() {
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Falha ao reiniciar impressora');
     } finally {
-      setPendingId(null);
+      setPendingIds((prev) => {
+        const next = { ...prev };
+        delete next[printer.id];
+        return next;
+      });
     }
   }
 
@@ -637,19 +677,74 @@ export function Printers() {
   // subtarefa) — string vazia só quando o UniFi realmente não tem apelido
   // configurado pra esse cliente.
   function startAliasEdit(printer: PrinterWithNetwork) {
+    // Achado real: o rascunho é um único estado global — trocar de impressora com um
+    // editor já aberto em OUTRA sobrescrevia o rascunho em andamento sem aviso nenhum.
+    if (aliasEditingId !== null && aliasEditingId !== printer.id) {
+      const confirmed = window.confirm(
+        'Já há uma edição de apelido em andamento em outra impressora. Trocar agora descarta o que não foi salvo. Continuar?',
+      );
+      if (!confirmed) return;
+    }
     setAliasEditingId(printer.id);
     setAliasDraft(printer.network.alias ?? '');
   }
 
-  async function submitAlias(printer: PrinterWithNetwork) {
-    if (!aliasDraft.trim()) return;
+  // Rotular os dois campos ("cadastro local" × "Apelido no UniFi") explicou
+  // a divergência, mas não RESOLVEU: o usuário continuou lendo "Financeiro"
+  // em cima e "Comercial" embaixo como um erro. Rotular um desencontro não é
+  // o mesmo que dar como desfazê-lo — daí este atalho, que só aparece quando
+  // os dois valores realmente diferem.
+  function aliasDiffersFromRegistry(printer: PrinterWithNetwork): boolean {
+    return (
+      printer.network.source !== 'unknown' &&
+      printer.network.alias !== null &&
+      printer.network.alias.trim() !== printer.name.trim()
+    );
+  }
+
+  async function alignAliasWithRegistry(printer: PrinterWithNetwork) {
+    const confirmed = window.confirm(
+      `Renomear o Apelido no UniFi de "${printer.network.alias}" para "${printer.name}"?\n\n` +
+        'Isto altera o nome exibido no painel do UniFi, não o cadastro deste módulo.',
+    );
+    if (!confirmed) return;
+    await submitAlias(printer, printer.name);
+  }
+
+  async function submitAlias(printer: PrinterWithNetwork, overrideValue?: string) {
+    const value = (overrideValue ?? aliasDraft).trim();
+    if (!value) return;
     setAliasSubmitting(true);
     setError(null);
     try {
-      await api.setClientAlias(printer.mac, aliasDraft.trim());
+      await api.setClientAlias(printer.mac, value);
+
+      // Pedido direto do usuário: mudar o apelido embaixo tem que mudar o
+      // nome em cima também. Sem isto, cada renomeação CRIAVA um novo
+      // desencontro entre os dois campos — a mesma confusão
+      // "Financeiro em cima, Comercial embaixo" que ele reportou várias
+      // vezes. São dois sistemas distintos (cadastro local × UniFi), então
+      // são duas escritas: a segunda só roda se a primeira deu certo, e uma
+      // falha SÓ nela é relatada como sucesso PARCIAL, nunca como sucesso —
+      // dizer "atualizado" com metade aplicada é pior que dizer que falhou.
+      if (printer.name.trim() !== value) {
+        try {
+          await api.updatePrinter(printer.id, { name: value });
+        } catch (err) {
+          setAliasEditingId(null);
+          setAliasDraft('');
+          setError(
+            `Apelido no UniFi atualizado para "${value}", mas o nome do cadastro local NÃO foi alterado ` +
+              `(${err instanceof ApiError ? err.message : 'falha desconhecida'}). Use "Editar" para ajustá-lo.`,
+          );
+          load();
+          return;
+        }
+      }
+
       setAliasEditingId(null);
       setAliasDraft('');
-      setNotice(`Apelido no UniFi de "${printer.name}" atualizado.`);
+      setNotice(`Nome atualizado para "${value}" no UniFi e no cadastro local.`);
       // Sem isto, a tela continuava mostrando o apelido ANTIGO até o
       // próximo ciclo de polling (até 60s depois) — o mesmo tipo de achado
       // já corrigido no medidor de toner (ver fetchConsumablesFor acima):
@@ -664,6 +759,19 @@ export function Printers() {
   }
 
   function startAdminPasswordEdit(printer: PrinterWithNetwork) {
+    // Mesmo achado do apelido acima, agravado aqui: o rascunho é uma credencial de
+    // admin do painel web — perdê-la em silêncio ao trocar de impressora é pior do
+    // que perder um nome.
+    if (
+      adminPasswordEditingId !== null &&
+      adminPasswordEditingId !== printer.id &&
+      (adminPasswordUsernameDraft.trim() || adminPasswordDraft)
+    ) {
+      const confirmed = window.confirm(
+        'Já há um usuário/senha de admin digitados para outra impressora. Trocar agora descarta essa credencial. Continuar?',
+      );
+      if (!confirmed) return;
+    }
     setAdminPasswordEditingId(printer.id);
     setAdminPasswordUsernameDraft('');
     setAdminPasswordDraft('');
@@ -675,6 +783,17 @@ export function Printers() {
   }
 
   function cancelAdminPasswordEdit() {
+    // Achado real: cancelar fechava o painel de edição mas deixava a mensagem de
+    // erro de uma tentativa já abandonada visível indefinidamente, sem nenhum
+    // botão para descartá-la — só desaparecia ao reabrir o mesmo editor.
+    if (adminPasswordEditingId !== null) {
+      const closingId = adminPasswordEditingId;
+      setAdminPasswordError((prev) => {
+        const next = { ...prev };
+        delete next[closingId];
+        return next;
+      });
+    }
     setAdminPasswordEditingId(null);
     setAdminPasswordUsernameDraft('');
     setAdminPasswordDraft('');
@@ -687,6 +806,17 @@ export function Printers() {
   // porque aqui não dá pra simplesmente tentar de novo sem risco (ver o
   // estado AMBÍGUO tratado abaixo).
   async function submitAdminPassword(printer: PrinterWithNetwork) {
+    // Achado real: validar o tamanho DEPOIS do confirm fazia o usuário passar pelo
+    // aviso grave de uma ação destrutiva/irreversível para uma senha que nem chegaria
+    // a ser enviada (o backend exige 8-18 caracteres) — a checagem precisa vir antes.
+    if (adminPasswordDraft && adminPasswordDraft.length < 8) {
+      setAdminPasswordError((prev) => ({
+        ...prev,
+        [printer.id]: 'A nova senha precisa ter entre 8 e 18 caracteres (ou deixe em branco para gerar uma automaticamente).',
+      }));
+      return;
+    }
+
     const confirmed = window.confirm(
       `Trocar a senha de admin do painel web de "${printer.name}"?\n\n` +
         'Isso reescreve a credencial MESTRA do painel administrativo da própria impressora (não é a senha ' +
@@ -791,14 +921,24 @@ export function Printers() {
 
   return (
     <Layout title="Manutenção">
+      {/* `role` aqui não é enfeite de acessibilidade: é o que torna a
+          distinção ERRO × aviso verificável. A dupla escrita do apelido
+          (`submitAlias`) promete relatar uma falha na segunda metade como
+          sucesso PARCIAL e NUNCA como sucesso — sem um papel distinto, a
+          mesma mensagem no balão neutro de sucesso passava no teste, porque
+          só o TEXTO era verificado (mutante `setError` -> `setNotice`
+          executado na revisão crítica: suíte 50/50 verde). */}
       {error && (
-        <div className="mb-4 rounded-lg border border-[oklch(88%_0.06_25)] bg-[oklch(97%_0.03_25)] px-4 py-3 text-sm text-[oklch(40%_0.15_25)]">
+        <div
+          role="alert"
+          className="mb-4 rounded-lg border border-[oklch(88%_0.06_25)] bg-[oklch(97%_0.03_25)] px-4 py-3 text-sm text-[oklch(40%_0.15_25)]"
+        >
           {error}
         </div>
       )}
 
       {notice && (
-        <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+        <div role="status" className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
           {notice}
         </div>
       )}
@@ -1089,21 +1229,39 @@ export function Printers() {
 
           return (
             <div key={printer.id} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-              <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
-                <div className="flex items-center gap-3">
-                  <PrinterIcon className="h-4.5 w-4.5 text-slate-500" strokeWidth={2} />
-                  <div className="flex flex-col">
-                    <span className="text-[13.5px] font-bold text-slate-900">{printer.name}</span>
+              {/* Duas colunas (identidade+estado | ações), não três blocos
+                  disputando uma linha só: com 6 botões, o layout antigo
+                  quebrava em pontos diferentes por impressora e o estado
+                  (badge de rede, medidor de toner) sobrava espremido no meio
+                  — o "muito desorganizado" relatado pelo usuário. */}
+              <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3 px-5 py-4">
+                <div className="flex min-w-0 flex-1 items-start gap-3">
+                  <PrinterIcon className="mt-0.5 h-4.5 w-4.5 shrink-0 text-slate-500" strokeWidth={2} />
+                  <div className="flex min-w-0 flex-col gap-1.5">
+                    {/* Achado real do usuário: sem um rótulo sempre visível, um nome de
+                        cadastro local diferente do Apelido no UniFi (linha abaixo) parecia
+                        dado inconsistente — o único aviso existente era um tooltip, que
+                        exige hover pra ser notado. */}
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-[13.5px] font-bold text-slate-900">{printer.name}</span>
+                      <span className="text-[9.5px] font-semibold uppercase tracking-wide text-slate-400">
+                        cadastro local
+                      </span>
+                    </div>
                     <span className="font-mono text-[11.5px] text-slate-500">{printer.mac}</span>
+                    <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                      {networkBadge(printer)}
+                      {tonerLevelsGauge(consumables[printer.id])}
+                    </div>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  {networkBadge(printer)}
-                  {tonerLevelsGauge(consumables[printer.id])}
-                </div>
-
-                <div className="flex items-center gap-1.5">
+                {/* Dois grupos: o de cima age na IMPRESSORA (consultar,
+                    reconectar rede, reiniciar equipamento); o de baixo
+                    administra o CADASTRO/credencial. Separá-los evita que
+                    "Remover" fique colado em "Reconectar" numa fileira só. */}
+                <div className="flex shrink-0 flex-col items-end gap-1.5">
+                  <div className="flex flex-wrap items-center justify-end gap-1.5">
                   <button
                     type="button"
                     onClick={() => toggleConsumables(printer)}
@@ -1115,7 +1273,7 @@ export function Printers() {
                   <button
                     type="button"
                     onClick={() => handleReconnect(printer)}
-                    disabled={pendingId === printer.id}
+                    disabled={pendingIds[printer.id]}
                     title="Reconexão de REDE (bloqueia e desbloqueia o cliente no controller) — não reinicia o equipamento."
                     className="flex items-center gap-1 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-[11.5px] font-semibold text-slate-700 disabled:opacity-50"
                   >
@@ -1125,19 +1283,22 @@ export function Printers() {
                   <button
                     type="button"
                     onClick={() => handleReboot(printer)}
-                    disabled={pendingId === printer.id}
+                    disabled={pendingIds[printer.id]}
                     title="REINICIA o equipamento físico pelo painel web da impressora — diferente de Reconectar."
                     className="flex items-center gap-1 rounded-md border border-[oklch(87%_0.06_25)] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[oklch(48%_0.16_25)] disabled:opacity-50"
                   >
                     <Power className="h-3.5 w-3.5" />
                     Reiniciar remotamente
                   </button>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-end gap-1.5">
                   <button
                     type="button"
                     onClick={() =>
                       adminPasswordEditingId === printer.id ? cancelAdminPasswordEdit() : startAdminPasswordEdit(printer)
                     }
-                    disabled={pendingId === printer.id}
+                    disabled={pendingIds[printer.id]}
                     title="Troca a senha de admin do PAINEL WEB da impressora (HP/SWS) — a credencial mestra do painel, não a do Wi-Fi/UniFi."
                     className="flex items-center gap-1 rounded-md border border-[oklch(85%_0.08_300)] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[oklch(45%_0.15_300)] disabled:opacity-50"
                   >
@@ -1155,16 +1316,17 @@ export function Printers() {
                   <button
                     type="button"
                     onClick={() => handleDelete(printer)}
-                    disabled={pendingId === printer.id}
+                    disabled={pendingIds[printer.id]}
                     className="flex items-center gap-1 rounded-md border border-[oklch(87%_0.06_25)] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[oklch(48%_0.16_25)] disabled:opacity-50"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                     Remover
                   </button>
+                  </div>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 border-t border-slate-50 px-5 py-2.5">
+              <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 bg-slate-50/60 px-5 py-2.5">
                 <span className="text-[11.5px] font-semibold text-slate-500">Apelido no UniFi:</span>
                 {aliasEditingId === printer.id ? (
                   <>
@@ -1194,7 +1356,16 @@ export function Printers() {
                     {/* Achado real do usuário: sem isto, não tinha como saber o
                         apelido atual sem sair pro painel do UniFi conferir. */}
                     <span className="text-[11.5px] text-slate-600">
-                      {printer.network.alias ?? <span className="italic text-slate-400">sem apelido configurado</span>}
+                      {printer.network.source === 'unknown' ? (
+                        // `alias: null` aqui não significa "sem apelido configurado" — significa
+                        // que nem sabemos, porque a API clássica/Integration falhou ou o MAC não
+                        // bateu com nenhum cliente conhecido (mesmo motivo do badge "Status de
+                        // rede desconhecido" acima). Afirmar "sem apelido" seria uma alegação
+                        // factual que pode ser falsa.
+                        <span className="italic text-slate-400">apelido desconhecido (status de rede indisponível)</span>
+                      ) : (
+                        printer.network.alias ?? <span className="italic text-slate-400">sem apelido configurado</span>
+                      )}
                     </span>
                     <button
                       onClick={() => startAliasEdit(printer)}
@@ -1203,6 +1374,16 @@ export function Printers() {
                     >
                       Renomear apelido no UniFi
                     </button>
+                    {aliasDiffersFromRegistry(printer) && (
+                      <button
+                        onClick={() => void alignAliasWithRegistry(printer)}
+                        disabled={aliasSubmitting}
+                        title={`O UniFi chama esta impressora de "${printer.network.alias}" e o cadastro local de "${printer.name}". Clique para deixar os dois iguais ao cadastro.`}
+                        className="rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11.5px] font-semibold text-amber-800 disabled:opacity-50"
+                      >
+                        Não confere — igualar a “{printer.name}”
+                      </button>
+                    )}
                   </>
                 )}
               </div>
@@ -1253,8 +1434,20 @@ export function Printers() {
               )}
 
               {adminPasswordError[printer.id] && (
-                <div className="border-t border-slate-50 bg-[oklch(97%_0.03_25)] px-5 py-2.5 text-[12.5px] text-[oklch(40%_0.15_25)]">
-                  {adminPasswordError[printer.id]}
+                <div className="flex items-center justify-between gap-3 border-t border-slate-50 bg-[oklch(97%_0.03_25)] px-5 py-2.5 text-[12.5px] text-[oklch(40%_0.15_25)]">
+                  <span>{adminPasswordError[printer.id]}</span>
+                  <button
+                    onClick={() =>
+                      setAdminPasswordError((prev) => {
+                        const next = { ...prev };
+                        delete next[printer.id];
+                        return next;
+                      })
+                    }
+                    className="shrink-0 rounded-md border border-[oklch(87%_0.06_25)] bg-white px-2.5 py-1 text-[11px] font-semibold text-[oklch(45%_0.15_25)]"
+                  >
+                    Fechar
+                  </button>
                 </div>
               )}
 

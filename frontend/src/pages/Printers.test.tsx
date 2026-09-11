@@ -210,6 +210,81 @@ describe('Printers page', () => {
     expect(api.getPrinterConsumables).toHaveBeenCalledTimes(1);
   });
 
+  // Achado real do usuário testando ao vivo, contra a impressora real: o
+  // toner preto estava em 0% mas o medidor compacto da linha mostrava 3
+  // barras — a 0% e DUAS a 100% — sem nenhum rótulo visível, dando a
+  // impressão de "a maioria está bem". As duas de 100% eram rolos do ADF
+  // (alimentador de documentos do scanner, não afeta impressão nenhuma). O
+  // medidor compacto não deve misturar peça de scanner com toner de verdade.
+  it('não mostra peças do ADF no medidor compacto da linha, mesmo com percentual conhecido — só no detalhe expandido', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    vi.mocked(api.getPrinterConsumables).mockResolvedValue({
+      printerId: 'p1',
+      collectedAt: '2026-09-10T16:44:02.000Z',
+      pageCount: 59934,
+      lowThresholdPct: 15,
+      supplies: [
+        { name: 'Black Toner', serialNumber: 'CRUM-210729A5BB3', levelPercent: 0, status: 'low' },
+        { name: 'Transfer Roller', serialNumber: null, levelPercent: null, status: 'not-measured' },
+        { name: 'Fuser Life', serialNumber: null, levelPercent: null, status: 'not-measured' },
+        { name: 'Pick-up Roller', serialNumber: null, levelPercent: null, status: 'not-measured' },
+        { name: 'ADF Roller', serialNumber: null, levelPercent: 100, status: 'ok' },
+        { name: 'ADF Rubber Pad', serialNumber: null, levelPercent: 100, status: 'ok' },
+      ],
+    });
+
+    const user = userEvent.setup();
+    renderPrinters();
+
+    await screen.findByText('HPLaserMFP135w');
+    expect(await screen.findByTitle('Black Toner: 0%')).toBeInTheDocument();
+    expect(screen.queryByTitle(/ADF Roller:/)).not.toBeInTheDocument();
+    expect(screen.queryByTitle(/ADF Rubber Pad:/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Ver consumíveis/ }));
+    expect(await screen.findByText('ADF Roller')).toBeInTheDocument();
+    expect(screen.getByText('ADF Rubber Pad')).toBeInTheDocument();
+  });
+
+  // Achado da revisão crítica: o medidor compacto existe pra mostrar "de
+  // relance, com cor, se precisa trocar" — mas o realce de toner BAIXO não
+  // tinha teste nenhum. Mutante executado (`const isLow = false`): suíte
+  // 50/50 verde, ou seja, dava pra apagar o único sinal visual de alerta da
+  // tela de lista sem nenhuma linha vermelha. Como a diferença é só de
+  // classe CSS (anel e texto avermelhados), o teste compara o suprimento
+  // 'low' com um 'ok' na MESMA leitura: exige que sejam distinguíveis, sem
+  // cravar o valor exato da cor.
+  it('destaca visualmente no medidor compacto o suprimento em nível baixo, e só ele', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    vi.mocked(api.getPrinterConsumables).mockResolvedValue({
+      printerId: 'p1',
+      collectedAt: '2026-09-10T16:44:02.000Z',
+      pageCount: 59934,
+      lowThresholdPct: 15,
+      supplies: [
+        // Os dois nomes caem no MESMO preenchimento neutro
+        // (`NEUTRAL_SUPPLY_FILL`) de propósito: se um fosse "Black Toner", a
+        // cor do tubo já os diferenciaria e o teste passaria mesmo com o
+        // realce de "baixo" apagado — foi assim que a primeira versão deste
+        // teste deixou o mutante `isLow = false` sobreviver.
+        { name: 'Fuser Life', serialNumber: null, levelPercent: 4, status: 'low' },
+        { name: 'Transfer Roller', serialNumber: null, levelPercent: 80, status: 'ok' },
+      ],
+    });
+
+    renderPrinters();
+    await screen.findByText('HPLaserMFP135w');
+
+    const baixo = await screen.findByTitle('Fuser Life: 4%');
+    const normal = await screen.findByTitle('Transfer Roller: 80%');
+
+    // Normaliza tudo que é PERCENTUAL (altura do preenchimento e rótulo) para
+    // que a única diferença que possa sobrar seja o realce de "baixo".
+    const semPercentual = (el: HTMLElement) => el.innerHTML.replace(/\d+(\.\d+)?%/g, 'N%');
+
+    expect(semPercentual(baixo)).not.toEqual(semPercentual(normal));
+  });
+
   // Achado real do usuário testando ao vivo: o poller SNMP do backend
   // coleta a cada 15min, e a lista de impressoras já recarrega sozinha a
   // cada 60s (usePolling) — mas o medidor de toner da linha ficava preso no
@@ -581,13 +656,157 @@ describe('Printers page', () => {
     await waitFor(() =>
       expect(api.setClientAlias).toHaveBeenCalledWith('50:81:40:d8:6c:7e', 'Impressora Financeiro'),
     );
+    // Pedido direto do usuário: renomear embaixo tem que renomear em cima
+    // também, senão cada renomeação criava um desencontro novo entre os
+    // dois campos.
+    await waitFor(() =>
+      expect(api.updatePrinter).toHaveBeenCalledWith('p1', { name: 'Impressora Financeiro' }),
+    );
     // Confirmação visível de que a ação teve efeito — sem isto, o usuário
     // não tinha como saber se a troca realmente aconteceu sem sair pro
     // painel do UniFi conferir.
-    expect(await screen.findByText(/Apelido no UniFi de "HPLaserMFP135w" atualizado\./)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Nome atualizado para "Impressora Financeiro" no UniFi e no cadastro local\./),
+    ).toBeInTheDocument();
     // E a lista é recarregada pra refletir o novo apelido, sem esperar o
     // próximo ciclo de polling (até 60s depois).
     await waitFor(() => expect(api.listPrinters).toHaveBeenCalledTimes(2));
+  });
+
+  // O usuário voltou a reportar "em cima Financeiro, embaixo Comercial" como
+  // bug DEPOIS de a tela já rotular os dois campos. Rotular o desencontro
+  // explicou, mas não deu como desfazê-lo — daí o atalho de igualar.
+  describe('desencontro entre o nome do cadastro local e o Apelido no UniFi', () => {
+    const printerComApelidoDivergente: PrinterWithNetwork = {
+      ...PRINTER_INTEGRATION,
+      network: { ...PRINTER_INTEGRATION.network, alias: 'HP Laser MFP 135w (Comercial)' },
+    };
+
+    it('oferece igualar o apelido ao cadastro, e só chama a API depois de confirmar', async () => {
+      vi.mocked(api.listPrinters).mockResolvedValue([printerComApelidoDivergente]);
+      vi.mocked(api.setClientAlias).mockResolvedValue({ ok: true });
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+      const user = userEvent.setup();
+      renderPrinters();
+      const card = (await screen.findByText('HPLaserMFP135w')).closest('div.overflow-hidden') as HTMLElement;
+
+      await user.click(within(card).getByRole('button', { name: /Não confere — igualar a/ }));
+
+      expect(confirmSpy).toHaveBeenCalled();
+      await waitFor(() =>
+        expect(api.setClientAlias).toHaveBeenCalledWith('50:81:40:d8:6c:7e', 'HPLaserMFP135w'),
+      );
+      confirmSpy.mockRestore();
+    });
+
+    // Duas escritas em sistemas diferentes: se a segunda falha, dizer
+    // "atualizado" esconderia que metade não foi aplicada.
+    it('relata sucesso PARCIAL (não sucesso) quando o apelido muda mas o cadastro local falha', async () => {
+      vi.mocked(api.listPrinters).mockResolvedValue([printerComApelidoDivergente]);
+      vi.mocked(api.setClientAlias).mockResolvedValue({ ok: true });
+      vi.mocked(api.updatePrinter).mockRejectedValue(new ApiError(500, 'banco indisponível'));
+
+      const user = userEvent.setup();
+      renderPrinters();
+      const card = (await screen.findByText('HPLaserMFP135w')).closest('div.overflow-hidden') as HTMLElement;
+
+      await user.click(within(card).getByRole('button', { name: 'Renomear apelido no UniFi' }));
+      const input = within(card).getByDisplayValue('HP Laser MFP 135w (Comercial)');
+      await user.clear(input);
+      await user.type(input, 'Impressora Financeiro');
+      await user.click(within(card).getByRole('button', { name: 'Salvar' }));
+
+      expect(await screen.findByText(/NÃO foi alterado/)).toBeInTheDocument();
+      expect(screen.queryByText(/no UniFi e no cadastro local/)).not.toBeInTheDocument();
+      // Achado da revisão crítica: sem esta linha o teste verificava só o
+      // TEXTO, e trocar `setError` por `setNotice` (mutante executado) deixava
+      // a suíte 50/50 verde — a falha parcial apareceria no balão NEUTRO de
+      // sucesso, que é exatamente o "dizer atualizado com metade aplicada"
+      // que este teste existe pra impedir.
+      expect(within(screen.getByRole('alert')).getByText(/NÃO foi alterado/)).toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    // Contrapeso do caso acima: o sucesso REAL tem que continuar caindo no
+    // balão neutro, não no de erro. Sem ele, trocar `setNotice` por
+    // `setError` no caminho feliz também passaria.
+    it('sucesso completo nas duas escritas aparece como aviso neutro, nunca como erro', async () => {
+      vi.mocked(api.listPrinters).mockResolvedValue([printerComApelidoDivergente]);
+      vi.mocked(api.setClientAlias).mockResolvedValue({ ok: true });
+      vi.mocked(api.updatePrinter).mockResolvedValue({ ...printerComApelidoDivergente });
+
+      const user = userEvent.setup();
+      renderPrinters();
+      const card = (await screen.findByText('HPLaserMFP135w')).closest('div.overflow-hidden') as HTMLElement;
+
+      await user.click(within(card).getByRole('button', { name: 'Renomear apelido no UniFi' }));
+      const input = within(card).getByDisplayValue('HP Laser MFP 135w (Comercial)');
+      await user.clear(input);
+      await user.type(input, 'Impressora Financeiro');
+      await user.click(within(card).getByRole('button', { name: 'Salvar' }));
+
+      expect(await screen.findByRole('status')).toHaveTextContent(/no UniFi e no cadastro local/);
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+
+    it('não altera nada se o usuário cancelar a confirmação', async () => {
+      vi.mocked(api.listPrinters).mockResolvedValue([printerComApelidoDivergente]);
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+      const user = userEvent.setup();
+      renderPrinters();
+      const card = (await screen.findByText('HPLaserMFP135w')).closest('div.overflow-hidden') as HTMLElement;
+
+      await user.click(within(card).getByRole('button', { name: /Não confere — igualar a/ }));
+
+      expect(api.setClientAlias).not.toHaveBeenCalled();
+      confirmSpy.mockRestore();
+    });
+
+    it('não oferece igualar quando os dois nomes já batem (nada a resolver)', async () => {
+      vi.mocked(api.listPrinters).mockResolvedValue([
+        { ...PRINTER_INTEGRATION, network: { ...PRINTER_INTEGRATION.network, alias: 'HPLaserMFP135w' } },
+      ]);
+      renderPrinters();
+      // Com os dois nomes iguais o texto aparece 2x (título do card + linha
+      // do apelido) — pegar o primeiro, que é o título.
+      const titles = await screen.findAllByText('HPLaserMFP135w');
+      const card = titles[0].closest('div.overflow-hidden') as HTMLElement;
+      expect(within(card).queryByRole('button', { name: /Não confere/ })).not.toBeInTheDocument();
+    });
+
+    // Status de rede desconhecido = `alias: null` por NÃO SABERMOS, não por
+    // "não tem apelido" — oferecer "igualar" aqui proporia sobrescrever um
+    // valor que pode existir e ser diferente, sem nunca tê-lo lido.
+    it('não oferece igualar quando o status de rede é desconhecido', async () => {
+      vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_UNKNOWN]);
+      renderPrinters();
+      const card = (await screen.findByText(PRINTER_UNKNOWN.name)).closest('div.overflow-hidden') as HTMLElement;
+      expect(within(card).queryByRole('button', { name: /Não confere/ })).not.toBeInTheDocument();
+    });
+
+    // Achado da revisão crítica: o teste acima NÃO trava a guarda
+    // `source !== 'unknown'` — o fixture PRINTER_UNKNOWN também tem
+    // `alias: null`, então a cláusula seguinte já o satisfaz sozinha.
+    // Mutante executado (`source !== 'unknown'` -> `true`): suíte 50/50
+    // verde. Hoje o backend sempre emite `alias: null` junto de
+    // `source: 'unknown'` (constante UNKNOWN_NETWORK_STATUS), então a guarda
+    // é defesa em profundidade — e é justamente por isso que precisa de um
+    // caso que a exercite sozinha: no dia em que um apelido sobreviver a uma
+    // leitura degradada, o atalho proporia SOBRESCREVER um valor que nunca
+    // chegou a ser lido.
+    it('não oferece igualar com status desconhecido mesmo que venha um apelido junto', async () => {
+      vi.mocked(api.listPrinters).mockResolvedValue([
+        {
+          ...PRINTER_UNKNOWN,
+          network: { ...PRINTER_UNKNOWN.network, source: 'unknown', alias: 'Um apelido qualquer' },
+        },
+      ]);
+      renderPrinters();
+      const card = (await screen.findByText(PRINTER_UNKNOWN.name)).closest('div.overflow-hidden') as HTMLElement;
+      expect(within(card).queryByRole('button', { name: /Não confere/ })).not.toBeInTheDocument();
+    });
   });
 
   it('mostra "sem apelido configurado" quando o UniFi não tem nenhum apelido pra esse cliente', async () => {
@@ -1013,5 +1232,190 @@ describe('Printers page', () => {
     await user.click(screen.getByRole('button', { name: 'Cadastrar impressora' }));
     await waitFor(() => expect(api.createPrinter).toHaveBeenCalled());
     expectNoSecretInStorage('senha-do-painel-secreta');
+  });
+
+  // --- Bugs reais encontrados na página, rodada 1 ---
+
+  it('mostra um rótulo sempre visível diferenciando o nome do cadastro local do Apelido no UniFi', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    renderPrinters();
+
+    const card = (await screen.findByText('HPLaserMFP135w')).closest('div.overflow-hidden') as HTMLElement;
+    // Antes da correção, a única explicação de que "HPLaserMFP135w" (nome do
+    // cadastro local) e o Apelido no UniFi são campos diferentes era um tooltip
+    // (title, só em hover) — este rótulo fixo precisa estar sempre visível.
+    expect(within(card).getByText('cadastro local')).toBeInTheDocument();
+  });
+
+  it('mostra "apelido desconhecido" (não afirma "sem apelido configurado") quando o status de rede é desconhecido', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_UNKNOWN]);
+    renderPrinters();
+
+    const card = (await screen.findByText('BRW849E567E0445')).closest('div.overflow-hidden') as HTMLElement;
+    // `alias: null` com `source: 'unknown'` significa "não sabemos", não "não
+    // existe" — afirmar "sem apelido configurado" seria uma alegação factual que
+    // pode ser falsa (a impressora pode ter um apelido real no UniFi).
+    expect(within(card).getByText(/apelido desconhecido/)).toBeInTheDocument();
+    expect(within(card).queryByText('sem apelido configurado')).not.toBeInTheDocument();
+  });
+
+  it('mantém o "sem apelido configurado" (agora sim uma afirmação verdadeira) quando a fonte de rede respondeu e realmente não há apelido', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]); // source: 'integration', alias: null
+    renderPrinters();
+
+    const card = (await screen.findByText('HPLaserMFP135w')).closest('div.overflow-hidden') as HTMLElement;
+    expect(within(card).getByText('sem apelido configurado')).toBeInTheDocument();
+  });
+
+  it('uma ação em andamento numa impressora não é afetada por uma ação concorrente em OUTRA impressora (pendingId compartilhado)', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION, PRINTER_CLASSIC]);
+    let resolveReboot: (value: { ok: true; ipAddress: string; ipOrigin: 'override' }) => void = () => {};
+    vi.mocked(api.rebootPrinter).mockImplementation(
+      () => new Promise((resolve) => { resolveReboot = resolve; }),
+    );
+    vi.mocked(api.deletePrinter).mockResolvedValue({ ok: true });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    const user = userEvent.setup();
+    renderPrinters();
+    await screen.findByText('HPLaserMFP135w');
+
+    const cardA = screen.getByText('HPLaserMFP135w').closest('div.overflow-hidden') as HTMLElement;
+    const cardB = screen.getByText('HLL2360DWVENDAS').closest('div.overflow-hidden') as HTMLElement;
+
+    // Impressora A: dispara o reboot, cuja resposta fica pendente de propósito.
+    await user.click(within(cardA).getByRole('button', { name: /Reiniciar remotamente/ }));
+    expect(within(cardA).getByRole('button', { name: /Reiniciar remotamente/ })).toBeDisabled();
+    expect(within(cardA).getByRole('button', { name: /Remover/ })).toBeDisabled();
+
+    // Impressora B: remove enquanto o reboot de A ainda está em voo. Antes da
+    // correção, isso sobrescrevia o `pendingId` global e reabilitava os botões de A.
+    await user.click(within(cardB).getByRole('button', { name: /Remover/ }));
+    await waitFor(() => expect(api.deletePrinter).toHaveBeenCalledWith('p2'));
+
+    expect(within(cardA).getByRole('button', { name: /Reiniciar remotamente/ })).toBeDisabled();
+    expect(within(cardA).getByRole('button', { name: /Remover/ })).toBeDisabled();
+
+    resolveReboot({ ok: true, ipAddress: '172.16.0.89', ipOrigin: 'override' });
+    await waitFor(() =>
+      expect(within(cardA).getByRole('button', { name: /Reiniciar remotamente/ })).not.toBeDisabled(),
+    );
+  });
+
+  it('pede confirmação ao trocar a edição de Apelido para outra impressora sem salvar (rascunho compartilhado)', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION, PRINTER_CLASSIC]);
+
+    const user = userEvent.setup();
+    renderPrinters();
+    await screen.findByText('HPLaserMFP135w');
+
+    const cardA = screen.getByText('HPLaserMFP135w').closest('div.overflow-hidden') as HTMLElement;
+    const cardB = screen.getByText('HLL2360DWVENDAS').closest('div.overflow-hidden') as HTMLElement;
+
+    await user.click(within(cardA).getByRole('button', { name: 'Renomear apelido no UniFi' }));
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    await user.click(within(cardB).getByRole('button', { name: 'Renomear apelido no UniFi' }));
+    expect(confirmSpy).toHaveBeenCalled();
+    // Cancelado: o editor de A continua aberto, não foi sobrescrito pelo de B.
+    expect(within(cardA).getByRole('button', { name: 'Salvar' })).toBeInTheDocument();
+    expect(within(cardB).queryByRole('button', { name: 'Salvar' })).not.toBeInTheDocument();
+
+    confirmSpy.mockReturnValue(true);
+    await user.click(within(cardB).getByRole('button', { name: 'Renomear apelido no UniFi' }));
+    expect(within(cardB).getByRole('button', { name: 'Salvar' })).toBeInTheDocument();
+  });
+
+  it('pede confirmação ao trocar a edição de senha de admin para outra impressora com credencial já digitada', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION, PRINTER_CLASSIC]);
+
+    const user = userEvent.setup();
+    renderPrinters();
+    await screen.findByText('HPLaserMFP135w');
+
+    const cardA = screen.getByText('HPLaserMFP135w').closest('div.overflow-hidden') as HTMLElement;
+    const cardB = screen.getByText('HLL2360DWVENDAS').closest('div.overflow-hidden') as HTMLElement;
+
+    await user.click(within(cardA).getByRole('button', { name: /Trocar senha de admin/ }));
+    await user.type(
+      within(cardA).getByPlaceholderText('deixe em branco para gerar uma forte automaticamente'),
+      'senha-de-A-123',
+    );
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    await user.click(within(cardB).getByRole('button', { name: /Trocar senha de admin/ }));
+    expect(confirmSpy).toHaveBeenCalled();
+    // Cancelado: o painel de A continua aberto com a senha digitada intacta.
+    expect(
+      within(cardA).getByPlaceholderText('deixe em branco para gerar uma forte automaticamente'),
+    ).toHaveValue('senha-de-A-123');
+    expect(within(cardB).queryByPlaceholderText('deixe em branco para gerar uma forte automaticamente')).not.toBeInTheDocument();
+  });
+
+  it('pede confirmação ao clicar em Editar de outra impressora com o formulário já aberto', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION, PRINTER_CLASSIC]);
+
+    const user = userEvent.setup();
+    renderPrinters();
+    await screen.findByText('HPLaserMFP135w');
+
+    const cardA = screen.getByText('HPLaserMFP135w').closest('div.overflow-hidden') as HTMLElement;
+    const cardB = screen.getByText('HLL2360DWVENDAS').closest('div.overflow-hidden') as HTMLElement;
+
+    await user.click(within(cardA).getByRole('button', { name: /Editar/ }));
+    expect(screen.getByDisplayValue('HPLaserMFP135w')).toBeInTheDocument();
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    await user.click(within(cardB).getByRole('button', { name: /Editar/ }));
+    expect(confirmSpy).toHaveBeenCalled();
+    // Cancelado: o formulário continua mostrando os dados de A.
+    expect(screen.getByDisplayValue('HPLaserMFP135w')).toBeInTheDocument();
+
+    confirmSpy.mockReturnValue(true);
+    await user.click(within(cardB).getByRole('button', { name: /Editar/ }));
+    expect(screen.getByDisplayValue('HLL2360DWVENDAS')).toBeInTheDocument();
+  });
+
+  it('Cancelar na troca de senha de admin limpa a mensagem de erro (não fica presa na tela) e o botão Fechar também limpa', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    vi.mocked(api.changeAdminPassword).mockRejectedValue(new ApiError(400, 'Senha inválida'));
+
+    const user = userEvent.setup();
+    renderPrinters();
+    await screen.findByText('HPLaserMFP135w');
+
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await user.click(screen.getByRole('button', { name: /Trocar senha de admin/ }));
+    await user.type(screen.getByPlaceholderText('deixe em branco para gerar uma forte automaticamente'), 'senha12345');
+    await user.click(screen.getByRole('button', { name: 'Confirmar troca' }));
+    expect(await screen.findByText('Senha inválida')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Cancelar' }));
+    expect(screen.queryByText('Senha inválida')).not.toBeInTheDocument();
+
+    // E também dá pra fechar direto pelo botão dedicado, sem precisar reabrir o editor.
+    await user.click(screen.getByRole('button', { name: /Trocar senha de admin/ }));
+    await user.type(screen.getByPlaceholderText('deixe em branco para gerar uma forte automaticamente'), 'outrasenha12');
+    await user.click(screen.getByRole('button', { name: 'Confirmar troca' }));
+    expect(await screen.findByText('Senha inválida')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Fechar' }));
+    expect(screen.queryByText('Senha inválida')).not.toBeInTheDocument();
+  });
+
+  it('valida o tamanho da nova senha de admin ANTES do confirm destrutivo (não assusta o usuário com um aviso irreversível para uma senha que nem seria enviada)', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+
+    const user = userEvent.setup();
+    renderPrinters();
+    await screen.findByText('HPLaserMFP135w');
+
+    const confirmSpy = vi.spyOn(window, 'confirm');
+    await user.click(screen.getByRole('button', { name: /Trocar senha de admin/ }));
+    await user.type(screen.getByPlaceholderText('deixe em branco para gerar uma forte automaticamente'), 'curta');
+    await user.click(screen.getByRole('button', { name: 'Confirmar troca' }));
+
+    expect(await screen.findByText(/entre 8 e 18 caracteres/)).toBeInTheDocument();
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(api.changeAdminPassword).not.toHaveBeenCalled();
   });
 });

@@ -393,7 +393,37 @@ interface ConsumablesResponse {
 // checagem. Para que isso não vire um "nunca alerta" silencioso, a resposta
 // carrega `lowThresholdPct` — o consumidor consegue distinguir "cheio" de
 // "ninguém configurou o limite" sem o backend inventar política nenhuma.
+// Comparação estrita: 'low' é "ABAIXO do threshold". Um nível exatamente
+// igual ao limite configurado (ex.: 20% com threshold 20) ainda é 'ok' — o
+// limite é o piso aceitável, não o primeiro valor a alertar.
+function statusFromPercent(percent: number, thresholdPct: number | null): ConsumableSupplyStatus {
+  if (thresholdPct !== null && percent < thresholdPct) return 'low';
+  return 'ok';
+}
+
 function resolveSupplyStatus(supply: PrinterSupply, thresholdPct: number | null): ConsumableSupplyStatus {
+  // Quando `levelPercent` veio da MIB privada do fabricante (ver
+  // `levelSource`/`samsungSupply*` em printer-snmp.service.ts), o status
+  // deriva DELE e o sentinela da MIB padrão não tem voto — senão o mesmo
+  // suprimento apareceria como "100%" no medidor e "Desconhecido" no selo,
+  // na mesma tela.
+  //
+  // CORREÇÃO DE COMENTÁRIO (revisão crítica): a versão anterior deste bloco
+  // afirmava que a substituição "só acontece porque a leitura padrão é lixo
+  // comprovado nesse firmware". Isso descreve a MOTIVAÇÃO da mudança, não o
+  // que o código faz: o poller nunca avalia se a leitura padrão é confiável —
+  // basta o serial do cartucho casar entre as duas tabelas para a MIB privada
+  // ganhar, inclusive numa impressora cuja MIB padrão esteja perfeita. A
+  // regra em vigor é "quando o fabricante responde pelo serial, ele manda",
+  // e é ela que este ramo implementa. Comportamento mantido de propósito:
+  // não existe critério objetivo de "leitura padrão é lixo" (o 0% falso das
+  // HPs se apresenta como leitura VÁLIDA, com unit=19/maxCapacity=100 — foi
+  // exatamente isso que originou o bug), e a coluna privada é a mesma fonte
+  // que o painel do próprio fabricante consome.
+  if (supply.levelSource === 'vendor-private' && supply.levelPercent !== null) {
+    return statusFromPercent(supply.levelPercent, thresholdPct);
+  }
+
   // Mapeamento de SnmpMeasurement.status (união discriminada da subtarefa 5)
   // para o status de resposta:
   //   'unknown'     -> 'unknown'      (RFC 3805: valor não pôde ser determinado)
@@ -426,11 +456,7 @@ function resolveSupplyStatus(supply: PrinterSupply, thresholdPct: number | null)
   // caso não dá pra afirmar "ok" nem "low" com segurança: 'not-measured'.
   if (supply.levelPercent === null) return 'not-measured';
 
-  // Comparação estrita: 'low' é "ABAIXO do threshold". Um nível exatamente
-  // igual ao limite configurado (ex.: 20% com threshold 20) ainda é 'ok' —
-  // o limite é o piso aceitável, não o primeiro valor a alertar.
-  if (thresholdPct !== null && supply.levelPercent < thresholdPct) return 'low';
-  return 'ok';
+  return statusFromPercent(supply.levelPercent, thresholdPct);
 }
 
 function toConsumablesResponse(

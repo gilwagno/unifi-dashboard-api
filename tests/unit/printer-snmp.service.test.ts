@@ -206,6 +206,7 @@ const {
   runSnmpHistoryCleanup,
   parseSupplyDescription,
   supplyDisplayName,
+  buildVendorPercentBySerial,
 } = await import('../../src/services/printer-snmp.service.js');
 
 // --- Dados de referência (colhidos das impressoras reais) ----------------
@@ -222,6 +223,11 @@ const OID = {
   unit: '1.3.6.1.2.1.43.11.1.1.7',
   maxCapacity: '1.3.6.1.2.1.43.11.1.1.8',
   level: '1.3.6.1.2.1.43.11.1.1.9',
+  // MIB privada Samsung (firmware SWS das HPs) — ver o bloco `samsungSupply*`
+  // em printer-snmp.service.ts para como a semântica destas duas colunas foi
+  // confirmada (contra o home.json que o próprio painel consome, não inferida).
+  vendorSerial: '1.3.6.1.4.1.236.11.5.11.53.61.5.2.1.7',
+  vendorRemaining: '1.3.6.1.4.1.236.11.5.11.53.61.5.2.1.13',
 };
 
 // Réplica fiel da resposta real da Brother HL-L2360D (172.16.0.222): toner
@@ -528,6 +534,201 @@ describe('poller SNMP — coleta', () => {
     expect(reading.supplies[0].serialNumber).toBe('CRUM-210729A5BB3');
     // O outro suprimento (sem "S/N:" na description) continua sem serial.
     expect(reading.supplies[1].serialNumber).toBeNull();
+  });
+
+  // Achado real, medido ao vivo em 2026-09-10 contra as DUAS HPs físicas
+  // depois que o usuário trocou o toner de uma delas e o dashboard seguiu
+  // mostrando "0%": `prtMarkerSuppliesLevel` está cravado em 0 (com
+  // unit=19/percent e maxCapacity=100 — um "0%" que se apresenta como
+  // leitura VÁLIDA, não como sentinela), enquanto a MIB privada e o
+  // home.json do próprio painel reportavam 100. Os números aqui são os
+  // valores reais colhidos da `.89`.
+  describe('MIB privada do fabricante quando a prtMarkerSuppliesLevel padrão é lixo (2 HPs reais)', () => {
+    // Padding NUL real, escrito sem byte cru no fonte (o arquivo segue ASCII-safe).
+    const NUL = String.fromCharCode(0);
+
+    // Teste DIRETO da função exportada: a guarda de serial vazio não é
+    // alcançável pelo caminho de coleta (uma description vazia do lado padrão
+    // já vira `serialNumber: null` e nunca consulta o mapa), então testá-la só
+    // pelo `collectAllReadings` deixaria a guarda viva sob mutação — provado
+    // rodando o mutante `return cleaned;` (sem a guarda) com a suíte inteira
+    // verde. Ela é defesa em profundidade: o dia em que o lado padrão passar a
+    // devolver string vazia em vez de `null`, uma chave `''` no mapa casaria
+    // com QUALQUER suprimento sem serial e espalharia o percentual de um
+    // cartucho para outro.
+    it.each([
+      ['vazio', ''],
+      ['só espaço', '   '],
+      ['só caractere de controle', NUL + NUL],
+    ])('buildVendorPercentBySerial não indexa linha com serial %s', (_label, bruto) => {
+      const serials = new Map([['1.1', { oid: 'x', type: 4, value: Buffer.from(bruto) } as never]]);
+      const remaining = new Map([['1.1', { oid: 'y', type: 2, value: 100 } as never]]);
+
+      expect(buildVendorPercentBySerial(serials, remaining).size).toBe(0);
+    });
+
+    function hpComTonerCheio(): FakeDevice['entries'] {
+      return {
+        [OID.sysDescr]: Buffer.from('HP Laser MFP 135w'),
+        [OID.deviceDescr]: Buffer.from('HP Laser MFP 131 133 135-138'),
+        [OID.deviceStatus]: 3,
+        [OID.errorState]: Buffer.from([0x00]),
+        [OID.lifeCount]: { type: COUNTER, value: 59934 },
+        [OID.powerOnCount]: { type: COUNTER, value: 24 },
+        [`${OID.type}.1.1`]: 3,
+        [`${OID.type}.1.2`]: 1,
+        [`${OID.description}.1.1`]: Buffer.from('Black Toner S/N:CRUM-210729A5BB3'),
+        [`${OID.description}.1.2`]: Buffer.from('Transfer Roller'),
+        [`${OID.unit}.1.1`]: 19,
+        [`${OID.unit}.1.2`]: 19,
+        [`${OID.maxCapacity}.1.1`]: 100,
+        [`${OID.maxCapacity}.1.2`]: 100,
+        [`${OID.level}.1.1`]: 0,
+        [`${OID.level}.1.2`]: 143065,
+        [`${OID.vendorSerial}.1.1`]: Buffer.from('CRUM-210729A5BB3'),
+        [`${OID.vendorRemaining}.1.1`]: 100,
+      };
+    }
+
+    it('usa o percentual da MIB privada no lugar do 0% falso da MIB padrão, cruzando pelo serial do cartucho', async () => {
+      registeredPrinters = [printer({ id: 'p-hp-toner-cheio' })];
+      devices.set('10.0.0.10', { entries: hpComTonerCheio(), noSuchOidStyle: 'v2c' });
+
+      await collectAllReadings();
+
+      const toner = getLastReading('p-hp-toner-cheio')!.supplies[0];
+      expect(toner.levelPercent).toBe(100);
+      expect(toner.levelSource).toBe('vendor-private');
+      // O valor CRU da MIB padrão continua preservado — é a única forma de
+      // auditar depois que o firmware estava mentindo.
+      expect(toner.level).toEqual({ status: 'ok', value: 0 });
+    });
+
+    it('não toca em suprimento sem serial correspondente na MIB privada (o rolo segue sem medição)', async () => {
+      registeredPrinters = [printer({ id: 'p-hp-rolo' })];
+      devices.set('10.0.0.10', { entries: hpComTonerCheio(), noSuchOidStyle: 'v2c' });
+
+      await collectAllReadings();
+
+      const rolo = getLastReading('p-hp-rolo')!.supplies[1];
+      expect(rolo.levelPercent).toBeNull();
+      expect(rolo.levelSource).toBe('standard');
+    });
+
+    it('impressora sem a MIB privada (as 3 Brother reais) segue 100% pelo caminho padrão, sem nenhuma mudança', async () => {
+      registeredPrinters = [printer({ id: 'p-brother-sem-privada' })];
+      devices.set('10.0.0.10', { entries: brotherHlEntries(), noSuchOidStyle: 'v2c' });
+
+      await collectAllReadings();
+
+      for (const supply of getLastReading('p-brother-sem-privada')!.supplies) {
+        expect(supply.levelSource).toBe('standard');
+      }
+    });
+
+    // A MIB privada usa os MESMOS sentinelas negativos da padrão (a coluna
+    // vizinha `.16` devolve -3 nas duas HPs reais). Tratar isso como
+    // percentual transformaria um "não sei" num número inventado — o pior
+    // tipo de erro segundo a régua deste projeto.
+    it.each([
+      ['sentinela negativo', -3],
+      ['acima de 100', 143065],
+      ['não inteiro', 42.5],
+    ])('ignora valor privado inválido (%s) e mantém a leitura padrão', async (_label, invalido) => {
+      const entries = hpComTonerCheio();
+      entries[`${OID.vendorRemaining}.1.1`] = invalido;
+      registeredPrinters = [printer({ id: `p-hp-invalido-${invalido}` })];
+      devices.set('10.0.0.10', { entries, noSuchOidStyle: 'v2c' });
+
+      await collectAllReadings();
+
+      const toner = getLastReading(`p-hp-invalido-${invalido}`)!.supplies[0];
+      expect(toner.levelSource).toBe('standard');
+      expect(toner.levelPercent).toBe(0);
+    });
+
+    // 0% REAL (cartucho de fato vazio) precisa continuar chegando como 0 —
+    // a correção não pode virar um "sempre mostra cheio".
+    it('propaga 0% quando a MIB privada também diz 0 (cartucho realmente vazio)', async () => {
+      const entries = hpComTonerCheio();
+      entries[`${OID.vendorRemaining}.1.1`] = 0;
+      registeredPrinters = [printer({ id: 'p-hp-vazio-de-verdade' })];
+      devices.set('10.0.0.10', { entries, noSuchOidStyle: 'v2c' });
+
+      await collectAllReadings();
+
+      const toner = getLastReading('p-hp-vazio-de-verdade')!.supplies[0];
+      expect(toner.levelPercent).toBe(0);
+      expect(toner.levelSource).toBe('vendor-private');
+    });
+
+    // Serial repetido em duas linhas é ambíguo — não há como escolher qual
+    // percentual vale, então nenhuma das duas substitui nada.
+    it('descarta serial duplicado na MIB privada em vez de escolher uma linha arbitrária', async () => {
+      const entries = hpComTonerCheio();
+      entries[`${OID.vendorSerial}.1.2`] = Buffer.from('CRUM-210729A5BB3');
+      entries[`${OID.vendorRemaining}.1.2`] = 7;
+      registeredPrinters = [printer({ id: 'p-hp-serial-duplicado' })];
+      devices.set('10.0.0.10', { entries, noSuchOidStyle: 'v2c' });
+
+      await collectAllReadings();
+
+      const toner = getLastReading('p-hp-serial-duplicado')!.supplies[0];
+      expect(toner.levelSource).toBe('standard');
+      expect(toner.levelPercent).toBe(0);
+    });
+
+    // Achado da revisão crítica desta PR: o lado PADRÃO já descarta padding de
+    // caractere de controle depois do serial (cauda `[\s\x00-\x1f]*$` da
+    // SUPPLY_SERIAL_PATTERN, endurecida na subtarefa 19), mas o lado privado
+    // só fazia `.trim()` — que não remove `\x00`. Com padding NUL só de um dos
+    // lados, os dois seriais nunca casavam, o cruzamento falhava EM SILÊNCIO e
+    // o toner cheio voltava a aparecer como o 0% falso da MIB padrão. Sem erro
+    // em lugar nenhum: a correção inteira desta PR desligada sem aviso.
+    it.each([
+      ['NUL no lado privado', 'CRUM-210729A5BB3' + NUL + NUL, 'Black Toner S/N:CRUM-210729A5BB3'],
+      ['NUL no lado padrao', 'CRUM-210729A5BB3', 'Black Toner S/N:CRUM-210729A5BB3' + NUL],
+      ['espaço nos dois', '  CRUM-210729A5BB3 ', 'Black Toner S/N:CRUM-210729A5BB3  '],
+    ])(
+      'cruza pelo serial mesmo com padding (%s) — os dois lados normalizam igual',
+      async (label, vendorSerial, standardDescription) => {
+        const entries = hpComTonerCheio();
+        entries[`${OID.vendorSerial}.1.1`] = Buffer.from(vendorSerial);
+        entries[`${OID.description}.1.1`] = Buffer.from(standardDescription);
+        const id = `p-hp-padding-${label.replace(/\s/g, '-')}`;
+        registeredPrinters = [printer({ id })];
+        devices.set('10.0.0.10', { entries, noSuchOidStyle: 'v2c' });
+
+        await collectAllReadings();
+
+        const toner = getLastReading(id)!.supplies[0];
+        expect(toner.levelSource).toBe('vendor-private');
+        expect(toner.levelPercent).toBe(100);
+      },
+    );
+
+    // Serial privado vazio/só-padding não identifica cartucho nenhum. Sem esta
+    // guarda ele entra no mapa como chave `''` — inofensivo hoje só porque o
+    // lado padrão também devolve `null` para description vazia, mas é uma
+    // coincidência entre dois arquivos, não uma invariante travada.
+    it.each([
+      ['vazio', ''],
+      ['só espaço', '   '],
+      ['so caractere de controle', NUL + NUL],
+    ])('ignora linha privada com serial %s em vez de indexá-la por chave vazia', async (_l, bruto) => {
+      const entries = hpComTonerCheio();
+      entries[`${OID.vendorSerial}.1.1`] = Buffer.from(bruto);
+      entries[`${OID.description}.1.1`] = Buffer.from('   ');
+      const id = `p-hp-serial-vazio-${_l.replace(/\s/g, '-')}`;
+      registeredPrinters = [printer({ id })];
+      devices.set('10.0.0.10', { entries, noSuchOidStyle: 'v2c' });
+
+      await collectAllReadings();
+
+      const toner = getLastReading(id)!.supplies[0];
+      expect(toner.levelSource).toBe('standard');
+      expect(toner.levelPercent).toBe(0);
+    });
   });
 
   it('trata OID não suportado em v1 (NoSuchName derruba o PDU inteiro) sem perder os demais campos', async () => {

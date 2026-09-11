@@ -6,9 +6,20 @@ import { buildNetworkStatusResolver } from './printer-network-status.service.js'
 // Poller SNMP de consumíveis + contador de páginas (Onda 2, subtarefa 5).
 //
 // Modelado em bandwidth-history.service.ts: estado em memória a nível de
-// módulo, `setInterval` unref()'d iniciado no import do módulo, sem coleta
-// imediata no boot, e falha pontual logada e ignorada sem derrubar o
-// processo nem o poller. Diferença: aqui não guardamos série temporal, só a
+// módulo, `setInterval` unref()'d iniciado no import do módulo, e falha
+// pontual logada e ignorada sem derrubar o processo nem o poller.
+//
+// ATENÇÃO (revisão crítica): este bloco dizia também "sem coleta imediata no
+// boot", copiado de bandwidth-history.service.ts. Deixou de ser verdade —
+// ver `collectOnBoot` no fim do arquivo, que src/server.ts chama DEPOIS do
+// listen. A restrição original (não gerar tráfego de rede antes de o app
+// subir, e não gerar tráfego nenhum só por importar o módulo) continua
+// valendo e é o que a forma dessa função preserva; o que mudou é que a
+// primeira leitura não espera mais o ciclo de 15 min. O poller de banda
+// segue sem coleta no boot, de propósito (assimetria explicada em
+// `collectOnBoot`).
+//
+// Diferença para o de banda: aqui não guardamos série temporal, só a
 // ÚLTIMA leitura bem-sucedida por impressora (`getLastReading`), que é o que
 // `GET /printers/:id/consumables` (subtarefa 6) vai expor.
 //
@@ -102,6 +113,35 @@ const OID = {
   // até aqui. Confirmado por sonda real contra as 5 impressoras da rede
   // (HP `.89`=24, Brother `.222`=226) — nenhuma MIB privada envolvida.
   prtMarkerPowerOnCount11: '1.3.6.1.2.1.43.10.2.1.5.1.1',
+  // --- MIB privada Samsung (firmware SWS das HPs desta rede) ---
+  //
+  // Achado real, confirmado ao vivo em 2026-09-10 contra as DUAS HPs
+  // físicas: `prtMarkerSuppliesLevel` (o OID PADRÃO acima) está cravado em
+  // `0` para o toner nessas unidades, com `unit=19` (porcentagem) e
+  // `maxCapacity=100` — ou seja, um "0%" que se apresenta como leitura
+  // válida, não como sentinela. Não é cartucho vazio: as duas tinham
+  // cartucho cheio no momento da sonda. É o MESMO tipo de bug de firmware já
+  // documentado para Transfer Roller/Fuser/Pick-up Roller (que reportam
+  // `143065` com máximo 100), só que este mente para BAIXO, o que é bem pior
+  // — um toner cheio aparecia como "0%, precisa trocar" no dashboard.
+  //
+  // A semântica destas duas colunas NÃO foi inferida por posição (a regra do
+  // projeto proíbe expor MIB privada como dado confiável sem confirmação
+  // contra o painel real no mesmo instante — ver item 19, achado (c), do
+  // CLAUDE.md). Foi confirmada contra a fonte que o PRÓPRIO painel consome,
+  // `GET /sws/app/information/home/home.json` (sem autenticação), lida no
+  // mesmo instante das sondas SNMP:
+  //   - `.13` == `toner_black.remaining` do home.json: 100 nas duas HPs,
+  //     enquanto o OID padrão dava 0 nas duas.
+  //   - `.14` == `toner_black.cnt` do home.json (páginas com o cartucho
+  //     atual): 101 na `.34`, batendo exatamente.
+  //   - `.7` é o número de série do cartucho (`CRUM-...`), o mesmo que a
+  //     `prtMarkerSuppliesDescription` padrão embute — é ele que ancora o
+  //     cruzamento por linha abaixo, em vez de casar por posição.
+  // O painel arredonda `remaining` para cima na dezena (`ceil(r/10)*10` em
+  // home.js); guardamos o valor CRU, sem replicar o arredondamento.
+  samsungSupplySerial: '1.3.6.1.4.1.236.11.5.11.53.61.5.2.1.7',
+  samsungSupplyRemaining: '1.3.6.1.4.1.236.11.5.11.53.61.5.2.1.13',
 } as const;
 
 // --- Shape do resultado ---
@@ -157,6 +197,21 @@ export interface PrinterSupply {
   // computeLevelPercent) — `null` para qualquer sentinela, unidade
   // incompatível ou valor incoerente do firmware.
   levelPercent: number | null;
+  // De onde `levelPercent` veio. `'standard'` = calculado do
+  // prtMarkerSuppliesLevel/MaxCapacity da MIB padrão (o caminho de todas as
+  // Brother e o default de qualquer impressora nova). `'vendor-private'` = o
+  // valor veio da MIB privada do fabricante, cruzada pelo número de série do
+  // cartucho (ver o bloco dos OIDs `samsungSupply*`).
+  //
+  // CORREÇÃO DE COMENTÁRIO (revisão crítica): a versão anterior dizia "a MIB
+  // padrão desta linha era inutilizável" e "só há substituição quando a
+  // leitura padrão é comprovadamente lixo". É falso como descrição do código:
+  // nada aqui avalia a qualidade da leitura padrão. A regra real é
+  // POSICIONAL-INDEPENDENTE e incondicional — se o serial do cartucho casa
+  // entre a tabela padrão e a privada, o valor privado ganha, mesmo que o
+  // padrão estivesse coerente. É por isso que este campo existe: sem ele não
+  // dá pra saber, olhando a leitura, qual das duas fontes produziu o número.
+  levelSource: 'standard' | 'vendor-private';
 }
 
 export interface PrinterSnmpReading {
@@ -466,6 +521,64 @@ async function walkColumn(session: SnmpSession, baseOid: string): Promise<Map<st
   return rows;
 }
 
+// Cruza as duas colunas da MIB privada (serial do cartucho × percentual
+// restante) num mapa serial → percentual. O cruzamento é pelo SERIAL, nunca
+// pela posição da linha: é o serial que a `prtMarkerSuppliesDescription`
+// padrão também embute, então casar por ele garante que o percentual privado
+// vai para o cartucho certo mesmo se as duas tabelas indexarem as linhas de
+// formas diferentes (o que num modelo colorido é bem possível).
+//
+// Descarta silenciosamente qualquer linha que não dê pra confiar — serial
+// vazio, percentual não numérico, fora de 0..100 (a MIB privada usa os
+// mesmos sentinelas negativos da padrão: a coluna vizinha `.16` devolve `-3`
+// nas duas HPs), ou serial repetido em duas linhas (ambíguo, não há como
+// escolher). Sem esse filtro, um sentinela viraria um percentual inventado —
+// exatamente o que este projeto trata como o pior tipo de erro.
+// Normaliza um número de série de cartucho vindo da MIB privada para o MESMO
+// formato que `SUPPLY_SERIAL_PATTERN` produz no lado da MIB padrão.
+//
+// Achado da revisão crítica: o lado padrão já descarta padding de espaço E de
+// caractere de controle depois do serial (a cauda `[\s\x00-\x1f]*$` da regex,
+// endurecida na subtarefa 19), mas aqui havia só `.trim()` — e
+// `String.prototype.trim` NÃO remove `\x00`. Um serial com padding NUL na
+// coluna privada (a mesma classe de padding de que o projeto já se blindou do
+// lado padrão, neste mesmo firmware) nunca casaria com o serial do lado
+// padrão: o cruzamento falharia em silêncio e o toner cheio voltaria a
+// aparecer como o 0% falso da MIB padrão, sem erro em lugar nenhum — a
+// correção inteira desta PR desligada sem aviso. Os dois lados precisam
+// normalizar igual, ou não existe cruzamento confiável.
+function normalizeSupplySerial(raw: string | null): string | null {
+  if (raw === null) return null;
+  const cleaned = raw.replace(/^[\s\x00-\x1f]+/, '').replace(/[\s\x00-\x1f]+$/, '');
+  return cleaned.length > 0 ? cleaned : null;
+}
+
+export function buildVendorPercentBySerial(
+  serials: Map<string, Varbind> | null,
+  remaining: Map<string, Varbind> | null,
+): Map<string, number> {
+  const bySerial = new Map<string, number>();
+  if (!serials || !remaining) return bySerial;
+
+  const ambiguous = new Set<string>();
+  for (const [index, serialVarbind] of serials) {
+    const serial = normalizeSupplySerial(asString(serialVarbind) ?? null);
+    if (serial === null) continue;
+
+    const percent = asNumber(remaining.get(index));
+    if (percent === null || !Number.isInteger(percent) || percent < 0 || percent > 100) continue;
+
+    if (bySerial.has(serial) || ambiguous.has(serial)) {
+      bySerial.delete(serial);
+      ambiguous.add(serial);
+      continue;
+    }
+    bySerial.set(serial, percent);
+  }
+
+  return bySerial;
+}
+
 function asNumber(varbind: Varbind | undefined): number | null {
   if (!varbind) return null;
   if (typeof varbind.value === 'number') return varbind.value;
@@ -558,17 +671,26 @@ async function readPrinter(record: PrinterRecord, ipAddress: string): Promise<Pr
     const pageCount = note(await getScalar(session, OID.prtMarkerLifeCount11));
     const powerOnCount = note(await getScalar(session, OID.prtMarkerPowerOnCount11));
 
-    const [types, descriptions, units, maxCapacities, levels] = await Promise.all([
+    const [types, descriptions, units, maxCapacities, levels, vendorSerials, vendorRemaining] = await Promise.all([
       walkColumn(session, OID.prtMarkerSuppliesType),
       walkColumn(session, OID.prtMarkerSuppliesDescription),
       walkColumn(session, OID.prtMarkerSuppliesSupplyUnit),
       walkColumn(session, OID.prtMarkerSuppliesMaxCapacity),
       walkColumn(session, OID.prtMarkerSuppliesLevel),
+      // Colunas da MIB privada (ver o bloco `samsungSupply*` em OID) — só as
+      // HPs respondem; nas Brother o walk termina vazio, sem erro. Uma falha
+      // de REDE aqui (`null`) também é tolerada: a MIB padrão continua sendo
+      // a fonte, então perder este enriquecimento não invalida a leitura nem
+      // marca `partial` (ao contrário das 5 colunas padrão acima).
+      walkColumn(session, OID.samsungSupplySerial),
+      walkColumn(session, OID.samsungSupplyRemaining),
     ]);
 
     if (!types || !descriptions || !units || !maxCapacities || !levels) {
       throw new PrinterUnreachableError('falha de rede ao varrer a prtMarkerSuppliesTable');
     }
+
+    const vendorPercentBySerial = buildVendorPercentBySerial(vendorSerials, vendorRemaining);
 
     // A união dos índices de todas as colunas (não só de uma) — se um
     // firmware expuser uma linha só em algumas colunas, ela ainda aparece,
@@ -588,18 +710,28 @@ async function readPrinter(record: PrinterRecord, ipAddress: string): Promise<Pr
       if (maxCapacity.status === 'unsupported' || level.status === 'unsupported') partial = true;
 
       const description = asString(descriptions.get(index));
+      const serialNumber = parseSupplyDescription(description).serialNumber;
+
+      // A MIB privada, quando o serial do cartucho casa, é a fonte que o
+      // painel do próprio fabricante usa — então ela ganha da MIB padrão
+      // (que neste modelo reporta 0% com cartucho cheio). `level`/
+      // `maxCapacity` continuam guardando o valor CRU da MIB padrão, sem
+      // reescrita: perder o que a impressora de fato respondeu tiraria a
+      // única forma de auditar essa divergência depois.
+      const vendorPercent = serialNumber === null ? undefined : vendorPercentBySerial.get(serialNumber);
 
       return {
         index,
         description,
-        serialNumber: parseSupplyDescription(description).serialNumber,
+        serialNumber,
         type,
         typeLabel: type === null ? null : (SUPPLY_TYPE_LABELS[type] ?? null),
         unit,
         unitLabel: unit === null ? null : (SUPPLY_UNIT_LABELS[unit] ?? null),
         maxCapacity,
         level,
-        levelPercent: computeLevelPercent(level, maxCapacity, unit),
+        levelPercent: vendorPercent ?? computeLevelPercent(level, maxCapacity, unit),
+        levelSource: vendorPercent === undefined ? ('standard' as const) : ('vendor-private' as const),
       };
     });
 
@@ -784,9 +916,37 @@ function startSnmpHistoryCleanupJob(): void {
   snmpHistoryCleanupTimer.unref?.();
 }
 
-// Sem coleta imediata no boot (mesma escolha de bandwidth-history): a
-// primeira leitura aparece depois do primeiro intervalo, para não disparar
-// tráfego de rede antes do app terminar de subir.
+// Dispara UMA coleta imediata, fora do ciclo de 15 min. Chamada só por
+// src/server.ts (o entrypoint real) — nunca no import do módulo, para que
+// importar o serviço num teste ou num script não gere tráfego de rede.
+//
+// Por que existe: `lastReadings` é memória de processo, então TODO restart
+// zera os consumíveis de todas as impressoras, e sem esta chamada a tela
+// ficava até 15 minutos inteiros dizendo "nunca coletado" — com o dado
+// real disponível o tempo todo, a um GET SNMP de distância. Em
+// desenvolvimento (`tsx watch`, que reinicia a cada edição) isso é
+// permanente: era exatamente o "tem hora que aparece e tem hora que some"
+// relatado pelo usuário, e a causa não era o poller nem a impressora.
+//
+// Não é await: subir o servidor não pode ficar esperando resposta de
+// impressora (uma desligada custa timeout). `collectAllReadings` já trata
+// e loga cada falha por impressora sem propagar.
+//
+// Por que o poller de BANDA continua sem equivalente (assimetria
+// deliberada, confirmada na revisão crítica): lá o buffer em memória se
+// reconstrói sozinho em 5 minutos e existe `bandwidth_samples` no SQLite
+// cobrindo o longo prazo, então um restart não deixa a tela mentindo — só
+// atrasa. Aqui `lastReadings` é a ÚNICA fonte de `/consumables`, e enquanto
+// ele está vazio a tela afirma "nunca coletado" para uma impressora que
+// está ligada e respondendo: não é ausência de dado, é uma afirmação
+// errada. A restrição que motivou a decisão original (subtarefa 15) foi
+// preservada, não revogada — nenhum tráfego sai antes do `listen`, e
+// importar este módulo (teste, script) continua não gerando chamada de
+// rede nenhuma, porque quem dispara é o entrypoint, não o import.
+export function collectOnBoot(): void {
+  void collectAllReadings();
+}
+
 startPolling();
 startSnmpHistoryCleanupJob();
 

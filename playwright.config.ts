@@ -51,8 +51,17 @@ export default defineConfig({
   webServer: [
     {
       // Controller UniFi FAKE — precisa subir antes do backend fazer
-      // qualquer chamada, mas o backend não chama nada no boot, então a
-      // ordem entre eles não é crítica.
+      // qualquer chamada, e a ordem entre eles não é crítica.
+      //
+      // ATENÇÃO (revisão crítica): este comentário dizia "o backend não chama
+      // nada no boot". Deixou de ser verdade em geral — `collectOnBoot()`
+      // (src/server.ts) dispara uma coleta SNMP logo após o listen. Aqui isso
+      // continua sendo um no-op porque `reset-printers-db.mjs` roda ANTES e
+      // deixa o cadastro vazio: sem impressora cadastrada, o ciclo retorna sem
+      // tocar a rede. Se algum dia a suíte passar a semear impressoras no
+      // banco antes de subir o servidor, este boot passará a emitir UDP/161
+      // para o IP que o controller fake reportar — semear pela UI (como os
+      // specs fazem hoje) não tem esse efeito.
       command: 'node e2e/fake-controller/server.mjs',
       port: FAKE_CONTROLLER_PORT,
       reuseExistingServer: false,
