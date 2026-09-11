@@ -5,6 +5,7 @@ import { ZodError } from 'zod';
 import { env } from './config/env.js';
 import authPlugin from './plugins/auth.js';
 import websocketPlugin from './plugins/websocket.js';
+import adRoutes from './routes/ad.routes.js';
 import authRoutes from './routes/auth.routes.js';
 import bandwidthRoutes from './routes/bandwidth.routes.js';
 import clientsRoutes from './routes/clients.routes.js';
@@ -16,6 +17,13 @@ import printersRoutes from './routes/printers.routes.js';
 import securityRoutes from './routes/security.routes.js';
 import sitesRoutes from './routes/sites.routes.js';
 import sshRoutes from './routes/ssh.routes.js';
+import {
+  AdNetworkAccessGroupNotConfiguredError,
+  AdNotConfiguredError,
+  AdPasswordAmbiguousError,
+  AdRequestError,
+  AdUserNotFoundError,
+} from './services/ad.service.js';
 import { auditLogService } from './services/audit-log.service.js';
 import { UniFiApiError } from './services/unifi.service.js';
 import { ClassicApiNotConfiguredError, UniFiClassicApiError } from './services/unifi-classic.service.js';
@@ -75,6 +83,28 @@ export async function buildApp(): Promise<FastifyInstance> {
       return reply.code(400).send({ error: 'Dados inválidos', details: error.flatten() });
     }
 
+    if (error instanceof AdNotConfiguredError || error instanceof AdNetworkAccessGroupNotConfiguredError) {
+      return reply.code(503).send({ error: 'Funcionalidade indisponível', details: error.message });
+    }
+
+    if (error instanceof AdUserNotFoundError) {
+      return reply.code(404).send({ error: error.message });
+    }
+
+    // Cinto e suspensorio da regra "senha nunca vai pro log": as rotas que
+    // podem receber este erro ja o tratam e devolvem a senha tentada no corpo,
+    // mas se alguma rota futura deste modulo esquecer, o catch-all abaixo
+    // (`app.log.error(error)`) e quem atenderia — e o campo nao-enumeravel
+    // ja impede o vazamento, este ramo garante tambem que a resposta nao
+    // vire um 500 generico. ACHADO da 2a revisao critica da PR #25.
+    if (error instanceof AdPasswordAmbiguousError) {
+      return reply.code(502).send({ error: 'Erro no Active Directory', details: error.message });
+    }
+
+    if (error instanceof AdRequestError) {
+      return reply.code(502).send({ error: 'Erro no Active Directory', details: error.message });
+    }
+
     app.log.error(error);
 
     // Erros de outros plugins do Fastify (ex: 429 do @fastify/rate-limit)
@@ -103,6 +133,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(bandwidthRoutes);
   await app.register(sshRoutes);
   await app.register(printersRoutes);
+  await app.register(adRoutes);
 
   app.get('/health', async () => ({ status: 'ok' }));
 
