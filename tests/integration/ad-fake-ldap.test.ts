@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Attribute, Change, Client, NoSuchAttributeError, TypeOrValueExistsError } from 'ldapts';
+import { Attribute, Change, Client, InvalidCredentialsError, NoSuchAttributeError, OperationsError, TypeOrValueExistsError } from 'ldapts';
 import selfsigned from 'selfsigned';
 import { startFakeLdapServer } from '../../e2e/fake-ldap-server/server.mjs';
 import type { AdUser } from '../../src/services/ad.service.js';
@@ -468,6 +468,192 @@ describe('fake-ldap-server — semântica de erro do ModifyRequest (RFC 4511 §4
 
     const entry = Array.from(fakeLdap.directory.values()).find((e) => e.dn === memberDn);
     expect(entry?.attrs.get('department')?.map((b: Buffer) => b.toString('utf8'))).toEqual(['TI']);
+  });
+});
+
+// Pré-requisito bloqueante da subtarefa de grupos (ver o topo da seção da
+// Onda 3 no CLAUDE.md): estas provas usam o `Client` REAL do `ldapts`,
+// conectado direto ao fake — sem `vi.mock`, sem passar por `ad.service.ts`
+// (que sempre faz bind antes de operar, então nunca exercitaria o caminho
+// "não autenticado" mesmo se a proteção não existisse). Cada `it` abre sua
+// PRÓPRIA conexão TCP/TLS (nunca reaproveita um client de outro teste) —
+// é exatamente o que prova que o estado de bind é por conexão, não global.
+describe('fake-ldap-server — exige bind prévio por conexão (RFC 4511 §4.2.1)', () => {
+  beforeEach(restartFakeLdap);
+
+  function connect(): Client {
+    return new Client({ url: fakeLdap.url, tlsOptions: { ca: fakeLdap.caCert } });
+  }
+
+  it('search antes de qualquer bind -> OperationsError (resultCode 1), não os 3 usuários semeados', async () => {
+    // MUTANTE QUE ISTO MATA: remover a chamada a `requireBind` dentro do
+    // `case OP.SearchRequest` de handleMessage (server.mjs) — sem ela, este
+    // teste falharia porque o search devolveria os 3 usuários normalmente,
+    // exatamente o comportamento "generoso demais" que esta subtarefa existe
+    // para fechar.
+    const client = connect();
+    try {
+      await expect(client.search(fakeLdap.usersOu, { scope: 'sub', filter: '(objectClass=user)' })).rejects.toBeInstanceOf(
+        OperationsError,
+      );
+    } finally {
+      await client.unbind().catch(() => undefined);
+    }
+  });
+
+  it('add antes de qualquer bind -> OperationsError, entrada não é criada', async () => {
+    const client = connect();
+    const dn = `CN=intruso,${fakeLdap.usersOu}`;
+    try {
+      await expect(
+        client.add(dn, { objectClass: ['top', 'person', 'organizationalPerson', 'user'], sAMAccountName: ['intruso'] }),
+      ).rejects.toBeInstanceOf(OperationsError);
+    } finally {
+      await client.unbind().catch(() => undefined);
+    }
+    expect(fakeLdap.directory.has(dn.toLowerCase())).toBe(false);
+  });
+
+  it('modify antes de qualquer bind -> OperationsError, atributo não muda', async () => {
+    const client = connect();
+    const memberDn = `CN=jsilva,${fakeLdap.usersOu}`;
+    const change = new Change({ operation: 'replace', modification: new Attribute({ type: 'department', values: ['Hackeado'] }) });
+    try {
+      await expect(client.modify(memberDn, change)).rejects.toBeInstanceOf(OperationsError);
+    } finally {
+      await client.unbind().catch(() => undefined);
+    }
+    const entry = Array.from(fakeLdap.directory.values()).find((e) => e.dn === memberDn);
+    expect(entry?.attrs.get('department')?.map((b: Buffer) => b.toString('utf8'))).toEqual(['TI']);
+  });
+
+  it('delete antes de qualquer bind -> OperationsError, entrada continua existindo', async () => {
+    const client = connect();
+    const memberDn = `CN=jsilva,${fakeLdap.usersOu}`;
+    try {
+      await expect(client.del(memberDn)).rejects.toBeInstanceOf(OperationsError);
+    } finally {
+      await client.unbind().catch(() => undefined);
+    }
+    expect(fakeLdap.directory.has(memberDn.toLowerCase())).toBe(true);
+  });
+
+  it('bind com credencial errada não autentica a conexão -> search seguinte ainda recusa com OperationsError', async () => {
+    // Prova a garantia 3 do pedido: uma tentativa de bind malsucedida não
+    // pode deixar a conexão em estado autenticado. Se `connState.
+    // authenticated` fosse setado incondicionalmente (ou nunca resetado em
+    // caso de falha), o search abaixo passaria normalmente em vez de
+    // recusar.
+    const client = connect();
+    try {
+      await expect(client.bind(fakeLdap.bindDn, 'senha-errada')).rejects.toBeInstanceOf(InvalidCredentialsError);
+      await expect(client.search(fakeLdap.usersOu, { scope: 'sub', filter: '(objectClass=user)' })).rejects.toBeInstanceOf(
+        OperationsError,
+      );
+    } finally {
+      await client.unbind().catch(() => undefined);
+    }
+  });
+
+  it('rebind com credencial errada DERRUBA a autorização de uma conexão já autenticada', async () => {
+    // Mutante que este teste mata (rodado de verdade nesta subtarefa, não só
+    // hipótese): `connState.authenticated = ok` trocado por
+    // `if (ok) connState.authenticated = true;` (nunca resetando para
+    // `false` em falha). Numa conexão NOVA os dois comportamentos são
+    // idênticos (o estado inicial já é `false`) — só um REBIND com
+    // credencial errada, DEPOIS de um bind bem-sucedido na mesma conexão,
+    // expõe a diferença: o mutante deixaria a conexão autenticada por
+    // acidente, sobrevivendo a todos os outros testes deste arquivo.
+    const client = connect();
+    try {
+      await client.bind(fakeLdap.bindDn, fakeLdap.bindPassword);
+      const { searchEntries: before } = await client.search(fakeLdap.usersOu, { scope: 'sub', filter: '(objectClass=user)' });
+      expect(before.length).not.toBe(0);
+
+      await expect(client.bind(fakeLdap.bindDn, 'senha-errada-no-rebind')).rejects.toBeInstanceOf(InvalidCredentialsError);
+      await expect(client.search(fakeLdap.usersOu, { scope: 'sub', filter: '(objectClass=user)' })).rejects.toBeInstanceOf(
+        OperationsError,
+      );
+    } finally {
+      await client.unbind().catch(() => undefined);
+    }
+  });
+
+  it('bind bem-sucedido autoriza a MESMA conexão a buscar, e uma 2ª conexão nova não herda essa autorização', async () => {
+    const authenticated = connect();
+    const other = connect();
+    try {
+      await authenticated.bind(fakeLdap.bindDn, fakeLdap.bindPassword);
+      const { searchEntries } = await authenticated.search(fakeLdap.usersOu, { scope: 'sub', filter: '(objectClass=user)' });
+      expect(searchEntries.length).not.toBe(0);
+
+      // Conexão NOVA, nunca fez bind -> continua exigindo, prova que o
+      // estado é por conexão, não um flag global do servidor.
+      await expect(other.search(fakeLdap.usersOu, { scope: 'sub', filter: '(objectClass=user)' })).rejects.toBeInstanceOf(
+        OperationsError,
+      );
+    } finally {
+      await authenticated.unbind().catch(() => undefined);
+      await other.unbind().catch(() => undefined);
+    }
+  });
+
+  it('unbind volta a conexão ao estado não autenticado: reconectar exige bind de novo', async () => {
+    // Não dá para reenviar operações na MESMA conexão depois de um
+    // UnbindRequest (RFC 4511 §4.3 — o servidor fecha a conexão, o próprio
+    // ldapts encerra o socket junto). A prova observável de "unbind reseta
+    // o estado" é: uma conexão NOVA depois de um unbind explícito continua
+    // exigindo bind — nada de estado sobrevivendo por acidente num objeto
+    // reaproveitado.
+    const first = connect();
+    await first.bind(fakeLdap.bindDn, fakeLdap.bindPassword);
+    const { searchEntries } = await first.search(fakeLdap.usersOu, { scope: 'sub', filter: '(objectClass=user)' });
+    expect(searchEntries.length).not.toBe(0);
+    await first.unbind();
+
+    const second = connect();
+    try {
+      await expect(second.search(fakeLdap.usersOu, { scope: 'sub', filter: '(objectClass=user)' })).rejects.toBeInstanceOf(
+        OperationsError,
+      );
+    } finally {
+      await second.unbind().catch(() => undefined);
+    }
+  });
+
+  // Garantia 5 do pedido: bind ANÔNIMO (RFC 4511 §5.1.2 — DN vazio) e bind
+  // NÃO AUTENTICADO (DN válido + senha vazia, §5.1.1) são caminhos que este
+  // fake recusa DE PROPÓSITO, porque `ad.service.ts` sempre binda com as
+  // duas credenciais configuradas. Sem estes dois testes a recusa era
+  // PROTEÇÃO SEM TRAVA: o mutante
+  // `const ok = normalizeDn(dn) === '' || <expressão original>` (aceitar
+  // bind anônimo) SOBREVIVIA com a suíte inteira verde — executado de
+  // verdade nesta verificação. Um fake que autentica sem credencial é a
+  // forma mais silenciosa possível de reabrir o buraco que esta subtarefa
+  // fecha: todo teste de grupos/computadores passaria sem nunca exercitar
+  // o gate.
+  it('bind ANÔNIMO (DN e senha vazios) é recusado e NÃO autentica a conexão', async () => {
+    const client = connect();
+    try {
+      await expect(client.bind('', '')).rejects.toBeInstanceOf(InvalidCredentialsError);
+      await expect(client.search(fakeLdap.usersOu, { scope: 'sub', filter: '(objectClass=user)' })).rejects.toBeInstanceOf(
+        OperationsError,
+      );
+    } finally {
+      await client.unbind().catch(() => undefined);
+    }
+  });
+
+  it('bind com DN correto mas senha VAZIA é recusado e NÃO autentica a conexão', async () => {
+    const client = connect();
+    try {
+      await expect(client.bind(fakeLdap.bindDn, '')).rejects.toBeInstanceOf(InvalidCredentialsError);
+      await expect(client.search(fakeLdap.usersOu, { scope: 'sub', filter: '(objectClass=user)' })).rejects.toBeInstanceOf(
+        OperationsError,
+      );
+    } finally {
+      await client.unbind().catch(() => undefined);
+    }
   });
 });
 
