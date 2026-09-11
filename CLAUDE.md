@@ -1367,3 +1367,82 @@ mudança, foi o dev server que o usuário tinha pedido para subir.
 `PRINTERS_DB_FILE=./e2e/.printers-e2e.db`. Conferir ESSAS duas coisas é o que prova isolamento.
 Se uma sessão futura precisar mesmo do mtime como evidência, derrube o dev server antes — senão o
 sinal é ruído.
+
+## Incidente + PR #31: `/consumables` afirmava "nunca coletado" com o dado no disco (2026-09-11)
+
+**Mergeada em `master`** (squash `8ce3336`), revisão crítica **47/50**. Achado pelo usuário
+testando ao vivo — print da Brother DCP-L3560CDW dizendo "nunca coletado / Nenhum suprimento
+coletado ainda", com o relato de que "acontece direto".
+
+**Causa raiz**: `/consumables` lia SÓ o buffer em memória (`lastReadings`), que nasce vazio a cada
+restart. A tabela `printer_snmp_history` (90 dias no SQLite) nunca era consultada. O `collectOnBoot`
+da PR #30 era mitigação, não correção: **encurta a janela, não fecha**. Confirmado no incidente —
+o processo ficou **11 minutos no ar sem nenhuma leitura nova e sem um único log de erro**, enquanto
+o banco tinha 66 leituras da mesma impressora, a mais recente de 16 minutos antes.
+
+Agravante: 4 das 5 impressoras não tinham `ipOverride` e dependiam do controller para resolver o
+IP — e o controller estava dando `Connect Timeout`. Sem IP, o poller pula a impressora em silêncio.
+**Corrigido por configuração na mesma sessão**: `ipOverride` nas 5 e **reserva de DHCP** nas 3
+Brothers (via `PATCH /clients/:mac/fixed-ip`). A reserva é a correção de verdade; o `ipOverride`
+sozinho é curativo que envelhece — prova viva: a DCP-1610NW tinha migrado de `.85` para `.77`
+sozinha, e o CLAUDE.md ainda registrava o IP antigo.
+
+**Correção**: `getLatestSnmpHistory()` (usa o índice composto já existente; `EXPLAIN QUERY PLAN`
+confirma `SEARCH ... USING INDEX`, sem varredura) e a rota cai nele quando o buffer está vazio.
+Resposta ganha `source: 'live' | 'history' | 'none'` — **`'none'` passa a ser o único caso em que
+"nunca coletado" é verdade**.
+
+### Três lições desta rodada
+
+1. **Campo de honestidade no backend não serve de nada se a tela ignora.** O `source` foi adicionado
+   na API e o tipo do frontend nem o declarava — a UI mostraria dado velho como se fosse ao vivo,
+   exatamente o que o campo existia para impedir. Quem pegou as 6 fixtures desatualizadas foi o
+   **`tsc -b` do frontend**; no backend o mesmo erro passaria batido, porque `tests/` não é
+   typechecked. É a demonstração prática do custo daquele achado transversal — mesmo campo, mesmo
+   dia, pego de um lado e invisível do outro.
+2. **Teste cujo NOME promete a garantia mas cujo CORPO não a verifica.** Um teste chamado "o
+   histórico NÃO é consultado quando o buffer tem leitura" só afirmava `source === 'live'` —
+   decidido por outro `if`. Removendo a guarda inteira do caminho quente, a suíte passava
+   **661/661 verde**. Ao revisar, desconfiar de teste cujo nome é mais forte que as asserções.
+3. **O mtime do `printers.db` deixou de ser prova de isolamento** — ver a seção própria acima.
+
+### Divergência conhecida, travada por teste e NÃO corrigida
+
+O histórico persiste só `{name, levelPercent}` — o `status` é descartado na escrita. Logo, o mesmo
+suprimento físico sai **`not-measured`** ("Sem medição") pelo caminho ao vivo e **`unknown`** ("o
+valor não pôde ser determinado neste modelo") pelo histórico. O segundo rótulo **afirma uma
+limitação do modelo que não existe**. Não é hipótese: é o caso permanente dos `Transfer Roller`/
+`Fuser Life`/`Pick-up Roller` das 2 HPs (bug de firmware `143065`, item 19(b)). Irrecuperável sem
+migrar o schema do histórico — travado por teste para não derivar em silêncio. **Se alguém for
+mexer nisso, a decisão é migrar o schema, não maquiar o rótulo.**
+
+### Pendências registradas, não corrigidas
+
+- O selo "do histórico" só aparece no **detalhe expandido**. O medidor compacto da linha e o painel
+  de frota exibem dado do histórico **sem marcação** — melhor que antes, mas repete o padrão um
+  nível abaixo. Não se forçou redesenho de UI dentro de um hotfix.
+- **`/diagnostics` não ganhou fallback**, e isso é limite ESTRUTURAL confirmado contra o schema (o
+  histórico não persiste `model`/`systemInfo`/`deviceStatus`/`powerOnCount`/`activeErrors`) — um
+  fallback ali devolveria um diagnóstico com tudo `null`, afirmando algo que nunca aconteceu. Hoje
+  nenhuma tela consome `/diagnostics`, então o impacto é zero. Documentado na própria rota.
+
+### Problema IRMÃO, ainda ABERTO: os toners das Brothers não têm nível na MIB padrão
+
+Confirmado por sondagem SNMP de leitura nas **três** Brothers: `prtMarkerSuppliesLevel` devolve o
+sentinela **`-3`** (`partial`, RFC 3805) para TODOS os cartuchos — na DCP-L3560CDW, os 4 toners e a
+caixa de resíduo. Cilindros e correia informam normalmente. **Não é bug do poller**: o firmware
+declara que não sabe medir. Mesma classe do bug das HPs corrigido na PR #30.
+
+`tools/brother-mib-probe.mjs` (somente leitura) já coleta os candidatos da MIB privada e tem modo
+`--cruzar` para bater contra os percentuais do painel. **Bloqueado aguardando o operador ler os
+painéis** — pela regra do item 19(c), semântica de coluna de MIB privada nunca é inferida por
+correlação numérica sozinha. Indício inicial: os candidatos encontrados parecem **contadores**, não
+percentuais, o que levanta a hipótese de o painel CALCULAR o percentual e não existir campo algum
+via SNMP. Se for o caso, a correção honesta é derivar do contador com a capacidade nominal do
+cartucho — não "achar a coluna".
+
+**Dois enganos da própria sonda, corrigidos e documentados no código para ninguém repetir**: (a) o
+`subtree()`/`getBulk` da lib não é confiável nestas impressoras (achado 2 da subtarefa 5) e fazia a
+DCP-L3560CDW parecer muda — é `getNext` manual, como o `walkColumn()` do poller; (b) o blob TLV da
+Brother é `<tag><tipo><tamanho><valor>`, não `<tag><tamanho><valor>` — a leitura errada saía
+desalinhada e produzia valores que **pareciam dado real**.
