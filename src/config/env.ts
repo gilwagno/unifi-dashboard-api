@@ -80,6 +80,20 @@ const envSchema = z.object({
   // POST/DELETE /ad/users/:username/network-access, não pelo resto do
   // módulo (CRUD de usuário/grupo/computador funciona sem ele).
   AD_NETWORK_ACCESS_GROUP_DN: z.string().min(1).optional(),
+  // Controla a verificação de certificado TLS APENAS da conexão LDAPS deste
+  // módulo (`tlsOptions.rejectUnauthorized` passado por conexão ao `Client`
+  // do `ldapts`) — nunca um `NODE_TLS_REJECT_UNAUTHORIZED` global de
+  // processo (o padrão que `UNIFI_ALLOW_SELF_SIGNED`/unifi.service.ts usa
+  // e que o plano da Onda 3, subtarefa 6, pediu explicitamente para NÃO
+  // repetir aqui: afetaria TODA conexão TLS do processo, não só o AD).
+  // Default `true` (verifica de verdade, como qualquer LDAPS de produção
+  // contra um DC real) — só existe pra permitir os testes de integração
+  // (`tests/integration/ad-fake-ldap.test.ts`) apontarem pro
+  // `e2e/fake-ldap-server`, que serve um certificado autoassinado.
+  AD_TLS_REJECT_UNAUTHORIZED: z
+    .string()
+    .default('true')
+    .transform((v) => v !== 'false'),
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -230,7 +230,11 @@ async function withClient<T>(fn: (client: Client) => Promise<T>): Promise<T> {
     throw new AdNotConfiguredError();
   }
 
-  const client = new Client({ url: env.AD_URL! });
+  // `tlsOptions.rejectUnauthorized` é por-conexão (nunca um
+  // `NODE_TLS_REJECT_UNAUTHORIZED` global de processo) — ver o comentário
+  // de `AD_TLS_REJECT_UNAUTHORIZED` em src/config/env.ts. Default `true`,
+  // só desligado pelos testes de integração contra o `fake-ldap-server`.
+  const client = new Client({ url: env.AD_URL!, tlsOptions: { rejectUnauthorized: env.AD_TLS_REJECT_UNAUTHORIZED } });
   try {
     await client.bind(env.AD_BIND_DN!, env.AD_BIND_PASSWORD!);
     return await fn(client);
