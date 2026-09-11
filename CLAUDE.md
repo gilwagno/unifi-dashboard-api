@@ -1,5 +1,23 @@
 # Gauntlet Loop — unifi-dashboard-api
 
+> Visão consolidada de tudo (implementado + planejado) em `ROADMAP.md` — comece por lá pra
+> conferência rápida. Este arquivo é o histórico detalhado, onda por onda.
+
+## Onda 4 (Acesso Remoto a Qualquer PC — Guacamole) — PLANEJADA, não iniciada
+
+Escopo completo em `docs/remote-access-plan.md`. Depende da Onda 3 (lista de computadores
+vem de `GET /ad/computers`) — não iniciar antes da Onda 3 ter pelo menos esse endpoint
+aprovado. Objetivo: acesso remoto de verdade (ver e controlar a tela, não só disparar
+comando) via Apache Guacamole, clientless, 100% navegador — RDP nativo do Windows como
+protocolo, sem agente instalado em cada PC.
+
+## Infraestrutura — Cloudflare Tunnel + Access — PLANEJADA, não iniciada
+
+Passo a passo em `docs/cloudflare-tunnel-setup.md`. Não é onda de código (não segue o
+harness de 4 pontos) — é a camada de acesso remoto ao dashboard inteiro (e, por trás dele,
+ao Guacamole da Onda 4), sem abrir porta no roteador. Independente das Ondas 3 e 4, pode ser
+feita em paralelo a qualquer momento.
+
 ## Onda 3 (Módulo de Active Directory + Ponte 802.1X) — pré-requisitos concluídos; CRUD de usuários + ponte 802.1X APROVADOS (47/50) e MERGEADOS em 2026-09-11 (PR #25)
 
 Escopo completo, arquitetura, estratégia de teste e ordem de subtarefas em
@@ -759,30 +777,53 @@ corrigido em 2026-09-09.
   pequena/uso interno autenticado, mas README já registra a recomendação de sempre filtrar por
   `from`/`to`/`mac`, e que paginação é o próximo passo se a rede crescer.
 - Suíte final: 311/311, `tsc` limpo.
+## Metodologia (harness de 4 pontos — adotado em 2026-09-10, substitui a rubrica 0-50 usada nas Ondas 1/2)
 
-## Metodologia (rubrica fixa — Seção 3 do plano original, pra referência se o loop continuar)
+Arquitetura completa de agentes e o prompt reutilizável em `docs/gauntlet-loop-prompt.md`. Resumo:
 
-- 0–44: reprovado. 45: cumpriu o pedido, sem lacuna. 46: achou algo real mas não corrigiu.
-  **47: identificou E corrigiu — mínimo pra aprovação.** 48–50: superou de forma genuína.
-- Exceção legítima: tarefa que era só escrever teste (não caçar bug), com investigação genuína
-  documentada (ex: validação por mutação) confirmando que não há bug — conta como "nada pendente",
-  aprovável em 47 mesmo sem correção.
-- Par único executor/crítico por vez, sem paralelismo. Nunca o mesmo modelo nos dois papéis.
-- Crítico sempre roda a suíte de verdade e verifica achados por mutação.
+- **Sistema de pontuação** (máx. 4 pontos por módulo/subtarefa, aprovação mínima = 3):
+  - **+2** — o módulo faz exatamente o que foi designado, de ponta a ponta, contra a
+    API/banco reais (não simulação, placeholder, ou "TODO: implementar depois").
+  - **+1** — o Verificador encontra um problema real (bug, caso não coberto, dado mockado
+    disfarçado) **e** o Executor corrige antes da próxima rodada.
+  - **+1** — nenhuma regressão nos módulos já aprovados anteriormente.
+- Pontuação < 3 → reprovado, volta pro Executor. Pontuação ≥ 3 → segue pra checagem final do
+  Orquestrador — que ainda pode reprovar por julgamento mesmo com pontuação máxima: só aprova
+  se ficar **genuinamente impressionado**, não só "passa no checklist".
+- Papéis: Orquestrador (quebra em módulos, ordena por dependência, aprovação final) + Executor
+  (implementa) + Verificador (julgamento às cegas, sem contexto das decisões internas do
+  Executor). Máx. 3 agentes ativos por vez, nunca o mesmo modelo nos papéis de
+  execução/verificação.
+- Módulo com interface: verificação obrigatoriamente via browser real (Playwright MCP ou
+  equivalente), nunca só leitura de código. Lógica pura de backend: teste automatizado
+  chamando a função real, também nunca só leitura estática.
+- Máximo de 4 rodadas por módulo; se não convergir, parar e reportar o bloqueio em vez de
+  insistir indefinidamente.
 - Mock na camada de serviço, nunca a implementação interna da rota.
 - Checkpoint (commit + PR + atualizar workbench.md) a cada subtarefa aprovada, antes de seguir.
-- Nunca push direto de código funcional — só PR; documentação de fechamento de onda já mergeada
-  pode ser commit direto, com aprovação explícita do usuário na conversa.
+- Nunca push direto de código funcional — só PR; documentação de fechamento de onda já
+  mergeada pode ser commit direto, com aprovação explícita do usuário na conversa.
 
-### Prompt padrão pra iniciar uma rodada (convenção adotada em 2026-09-09)
+**Nota histórica**: as pontuações registradas nas Ondas 1 e 2 abaixo (ex. "47/50") foram
+medidas sob a rubrica anterior (0–50) e não são retroativamente convertidas — ficam como
+registro fiel do que já passou por aquele processo.
 
-Decisão do usuário: toda feature/módulo novo (ou etapa substancial de trabalho) neste projeto passa
-a seguir o prompt "Gauntlet Loop (Harness Edition)" salvo em `docs/gauntlet-loop-prompt.md` —
-mapeamento obrigatório (`CLAUDE.md`/`README.md`/`.env.example`/estrutura de `src`+`frontend`) antes
-de qualquer código, no máximo 3 agentes ativos por vez (orquestrador + executor + verificador),
-mesmo par nunca com o mesmo modelo nos dois papéis. É a mesma metodologia já em uso nas Ondas 1/2
-(rubrica 0–50 acima), só formalizada como um prompt reutilizável em vez de reconstruída a cada
-sessão. Usar por padrão daqui pra frente, salvo pedido explícito do usuário em contrário.
+**Correção de exatidão (2026-09-11)**: a versão anterior desta nota dizia "a partir da Onda 3,
+toda subtarefa nova usa o harness de 4 pontos" — não foi o que aconteceu na prática. A
+subtarefa 1 da Onda 3 (CRUD de usuários AD + ponte 802.1X, PR #25) foi revisada em 2026-09-11
+ainda sob a rubrica 0–50, em DUAS rodadas (43/50 reprovado → 47/50 aprovado), porque a sessão
+que a conduziu seguiu o `CLAUDE.md` commitado, que só descrevia a rubrica antiga — a adoção do
+harness de 4 pontos existia apenas numa cópia não commitada na raiz do repo. A transição vale
+**a partir da subtarefa de grupos do AD** (a próxima da fila). Não converter o 47/50 da PR #25
+para a escala nova: ele mede outra coisa.
+
+### Prompt padrão pra iniciar uma rodada
+
+Toda feature/módulo novo (ou etapa substancial de trabalho) neste projeto segue o prompt
+"Gauntlet Loop (Harness Edition)" salvo em `docs/gauntlet-loop-prompt.md` — mapeamento
+obrigatório (`CLAUDE.md`/`README.md`/`.env.example`/estrutura de `src`+`frontend`) antes de
+qualquer código. Usar por padrão daqui pra frente, salvo pedido explícito do usuário em
+contrário.
 
 ## Caso RESOLVIDO: classificador de modo automático bloqueando o teste de login da HP (2026-09-08,
 ## fechado em 2026-09-09 — ver "Reboot remoto da HP: confirmado funcionando" abaixo)
@@ -1210,3 +1251,52 @@ coisas ao mesmo tempo e mascarava a lacuna real.
 **Regra a seguir daqui pra frente**: um mutante precisa isolar UMA proteção por vez, e alegação de
 mutação escrita em mensagem de commit não substitui rodar o mutante — se o crítico não reexecutou,
 trate como não verificado.
+
+## PR #30 (impressoras) — revisão crítica INTERROMPIDA no meio, achados parciais (2026-09-11)
+
+Branch `fix/printers-toner-level-vendor-mib`, PR #30 aberta e **não mergeada**. A revisão
+crítica (Opus) foi interrompida pelo usuário antes de terminar. Registro do estado real para
+que nenhuma sessão futura trate isso como "revisado e aprovado" — **não está**.
+
+**Nada ficou quebrado no disco**: nenhum mutante sobrou aplicado, suíte 578/578 verde e
+typechecks limpos no momento da parada. Nada commitado. `printers.db` de produção intocado
+(mtime `2026-09-10 17:25:50.132265100` conferido antes e depois). Nenhuma chamada de rede real
+contra impressora ou controller em nenhum momento.
+
+**3 achados reais, confirmados por mutação executada, já CORRIGIDOS na worktree do revisor
+(não commitados):**
+1. **SÉRIO — o carro-chefe da PR não tinha teste nenhum do lado da rota.** Apagar o ramo
+   `levelSource === 'vendor-private'` de `resolveSupplyStatus` deixava a suíte 563/563 VERDE.
+   É exatamente o ramo que impede o sintoma que originou a PR: medidor em "100%" e o selo, na
+   MESMA tela, dizendo "Desconhecido". Corrigido com 6 testes; o mutante passa a morrer com 4.
+2. **REAL — assimetria de normalização do serial do cartucho.** O lado PADRÃO já descartava
+   padding de caractere de controle (endurecimento da subtarefa 19), mas o lado da MIB privada
+   fazia só `.trim()` — e `String.prototype.trim` **não remove `\x00`**. Um padding NUL na
+   coluna privada faria os dois seriais nunca casarem, o cruzamento falhar **em silêncio**, e o
+   toner cheio voltar a aparecer como o 0% falso. A correção inteira da PR desligada sem erro
+   em lugar nenhum. Corrigido com `normalizeSupplySerial()` + 3 testes.
+3. **MENOR — guarda de serial vazio/só-padding sem teste que a mate**, inalcançável pelo
+   caminho de `collectAllReadings`. Corrigido com 3 testes diretos em
+   `buildVendorPercentBySerial`.
+
+**2 divergências registradas, NÃO corrigidas:**
+- O comentário de `resolveSupplyStatus` afirma que "só há substituição quando a leitura padrão
+  é comprovadamente lixo" — na prática a MIB privada ganha **incondicionalmente** sempre que o
+  serial casa, mesmo com a leitura padrão sadia. Divergência código×documentação, sem
+  consequência prática provada.
+- `collectOnBoot` (commit `eb3379a`) **inverte a decisão da subtarefa 15** (pollers
+  deliberadamente sem coleta imediata no boot por causa da chamada de rede). A inversão está
+  justificada no comentário do serviço e na mensagem de commit, mas **este arquivo nunca foi
+  atualizado** — quem ler só o `CLAUDE.md` vai achar que a decisão antiga ainda vale.
+
+**Achado de metodologia, pré-existente e independente desta PR**: o `tsconfig.json` da raiz tem
+`include: ["src/**/*.ts"]` — **nenhum arquivo de `tests/` é typechecked**. "`tsc --noEmit`
+limpo" não diz nada sobre os testes do backend. Foi assim que fixtures de `PrinterSupply`
+ficaram sem o campo obrigatório `levelSource` novo sem ninguém perceber.
+
+**O que NUNCA foi revisado**: mutação no frontend, o commit `811f053` (layout do card), os 2
+specs de e2e de `c05b15e` (nunca rodados pelo revisor), o `.gitignore` de `3466367`, e a
+verificação prática da continuidade do histórico SNMP. **Nota não atribuída** — a estimativa
+preliminar do revisor era 46/50 pra PR como o autor entregou (o achado 1 derruba a alegação de
+que a divergência medidor×selo estava fechada), subindo com as 3 correções dele, mas sem o
+frontend e o e2e revisados isso não é uma nota, é um palpite parcial.
