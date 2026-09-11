@@ -20,6 +20,27 @@ feita em paralelo a qualquer momento.
 
 ## Onda 3 (Módulo de Active Directory + Ponte 802.1X) — pré-requisitos concluídos; CRUD de usuários + ponte 802.1X APROVADOS (47/50) e MERGEADOS em 2026-09-11 (PR #25)
 
+### ⛔ PRÉ-REQUISITO BLOQUEANTE da subtarefa de GRUPOS (registrado 2026-09-11)
+
+**Antes de qualquer código de grupos ou computadores, o `e2e/fake-ldap-server` precisa passar a
+rastrear estado de bind POR CONEXÃO.** Hoje ele não rastreia: um `search`/`add`/`modify` enviado
+sem bind prévio é aceito, coisa que um Active Directory real recusa (resultCode 1 / 53). Enquanto
+grupos e computadores não existem isso não afeta nada — `ad.service.ts` sempre faz bind antes de
+qualquer operação — mas no instante em que o fake ganhar mais superfície ele vira um buraco da
+classe que este projeto já tratou como grave três vezes: **um fake generoso demais aceita o que o
+serviço real recusaria, e o teste passa sem exercitar a proteção que ele afirma travar.**
+
+Isto está aqui, e não só como recomendação solta no fim do arquivo, por pedido explícito do
+usuário: *"é fácil ficar pra trás quando a sessão seguinte só lê o topo do arquivo"*. Se você está
+começando grupos e este parágrafo ainda existe, ele ainda não foi feito — confira no código antes
+de assumir que sim.
+
+Precedente que justifica o rigor: na verificação da própria subtarefa 6, remover a validação do
+`handleModify` do fake fez ele aceitar calado um `add` de valor já existente e um `delete` de valor
+ausente — e a suíte seguiu **18/18 verde**. O teste de idempotência da ponte 802.1X afirmava em
+comentário estar travando os `catch (TypeOrValueExistsError)`/`catch (NoSuchAttributeError)` do
+`ad.service.ts`, mas com o fake permissivo esses caminhos **nunca eram executados**.
+
 Escopo completo, arquitetura, estratégia de teste e ordem de subtarefas em
 `docs/ad-module-plan.md` — carregar esse documento no contexto de qualquer par que trabalhe
 nesta onda, mesmo papel que `docs/printers-snmp-research.md` teve pra Onda 2.

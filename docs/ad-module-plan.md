@@ -137,7 +137,10 @@ de verdade, resetar senha de verdade) do que qualquer coisa já implementada.
 2. ✅ **CONCLUÍDA em 2026-09-11** (mesma PR #25). `ad.routes.ts` — 12 rotas `/ad/users*`, com
    rate limit restrito em toda mutação e auditoria pelo hook global de `app.ts`.
 3. ⬜ `ad.service.ts`/`ad.routes.ts` — grupos (criar, listar, add/remove membro).
-   **Vem DEPOIS da subtarefa 6** — ver a nota de reordenação abaixo.
+   **Vem DEPOIS da subtarefa 6** — ver a nota de reordenação abaixo. **PRÉ-REQUISITO
+   BLOQUEANTE**: o `fake-ldap-server` precisa rastrear estado de bind por conexão antes de
+   ganhar a superfície de grupos (hoje aceita operação sem bind prévio, que um AD real recusa)
+   — ver o bloco no topo do `CLAUDE.md`.
 4. ⬜ `ad.service.ts`/`ad.routes.ts` — computadores (listar, habilitar/desabilitar)
 5. ✅ **CONCLUÍDA em 2026-09-11** (mesma PR #25). Ponte 802.1X — `POST`/`DELETE`
    `/ad/users/:username/network-access` sobre o grupo de `AD_NETWORK_ACCESS_GROUP_DN`,
