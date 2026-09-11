@@ -802,3 +802,146 @@ describe('GET /printers/:id/consumables — fallback para o histórico persistid
     expect(body.collectedAt).toBe('2026-09-11T11:00:00.000Z');
   });
 });
+
+// ---------------------------------------------------------------------------
+// REVISÃO CRÍTICA (verificador, 2026-09-11) — lacunas confirmadas por MUTAÇÃO
+// EXECUTADA sobre o código desta PR, não por leitura.
+// ---------------------------------------------------------------------------
+describe('GET /printers/:id/consumables — fallback: proteções que faltavam', () => {
+  // MUTANTE QUE SOBREVIVEU antes deste teste:
+  //   `const persisted = reading ? null : printersRepository.getLatestSnmpHistory(id)`
+  //   -> `const persisted = printersRepository.getLatestSnmpHistory(id)`
+  // Suíte inteira (661/661) continuava VERDE. O teste vizinho que se chama
+  // "o histórico NÃO é consultado quando o buffer tem leitura (caminho quente
+  // intacto)" só afirmava `source === 'live'`, e `source` é decidido por
+  // `if (!reading)` — ou seja, ele passa igual com a guarda deletada. O NOME
+  // do teste prometia a garantia; o CORPO não verificava nada dela.
+  //
+  // Consequência real: a PR afirma no código ("Só toca o disco quando a
+  // memória não tem nada — o caminho quente continua sem nenhuma consulta ao
+  // SQLite") uma propriedade do caminho quente desta rota, que o frontend
+  // chama para TODA impressora a cada ciclo de polling de 60s. Sem esta
+  // asserção, alguém remove a guarda num refactor e passa a fazer uma query
+  // SQLite por impressora por ciclo, para sempre, sem um teste vermelho.
+  it('não faz NENHUMA consulta ao histórico em disco quando o buffer em memória tem leitura', async () => {
+    const { app, token } = await authedApp();
+    const auth = { authorization: `Bearer ${token}` };
+    const printer = await createPrinter(app, auth);
+
+    getLastReadingMock.mockReturnValueOnce({
+      printerId: printer.id,
+      collectedAt: '2026-09-11T12:00:00.000Z',
+      pageCount: { kind: 'value', value: 500 },
+      supplies: [],
+      partial: false,
+    } as unknown as PrinterSnmpReading);
+
+    const spy = vi.spyOn(printersRepository, 'getLatestSnmpHistory');
+    try {
+      const res = await app.inject({ method: 'GET', url: `/printers/${printer.id}/consumables`, headers: auth });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().source).toBe('live');
+      // A garantia de verdade: o disco não foi tocado nenhuma vez.
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // O contrário do anterior: prova que a chamada acontece (uma vez só) quando
+  // a memória está vazia. Sem este par, "não chamou" também passaria verde
+  // numa implementação que nunca chama o fallback em situação nenhuma.
+  it('consulta o histórico em disco exatamente uma vez quando o buffer está vazio', async () => {
+    const { app, token } = await authedApp();
+    const auth = { authorization: `Bearer ${token}` };
+    const printer = await createPrinter(app, auth);
+
+    getLastReadingMock.mockReturnValueOnce(undefined);
+
+    const spy = vi.spyOn(printersRepository, 'getLatestSnmpHistory');
+    try {
+      await app.inject({ method: 'GET', url: `/printers/${printer.id}/consumables`, headers: auth });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledWith(printer.id);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // DIVERGÊNCIA SEMÂNTICA REAL entre o caminho ao vivo e o degradado, para o
+  // MESMO suprimento físico. `printer_snmp_history` persiste só
+  // `{name, levelPercent}` (ver RecordSnmpHistoryInput) — o
+  // `SnmpMeasurement.status` do nível é DESCARTADO na escrita. Então:
+  //
+  //   ao vivo  : level.status === 'ok' + levelPercent === null -> 'not-measured'
+  //              ("Sem medição / Valor lido, mas não foi possível calcular um
+  //               percentual confiável" — SUPPLY_STATUS_INFO no frontend)
+  //   histórico: levelPercent === null                          -> 'unknown'
+  //              ("Desconhecido / O valor não pôde ser determinado via SNMP
+  //               NESTE MODELO")
+  //
+  // Não é hipótese: é exatamente o caso das 2 HPs reais deste projeto, cujos
+  // Transfer Roller / Fuser Life / Pick-up Roller reportam level=143065 com
+  // maxCapacity=100 PERMANENTEMENTE (bug de firmware, CLAUDE.md subtarefa
+  // 19(b)) — o teste 'nível ok porém levelPercent não calculável ... vira
+  // "not-measured"' acima usa esse mesmo "Transfer Roller". Depois de todo
+  // restart, esses 3 suprimentos trocam de rótulo na tela, e o rótulo novo
+  // afirma uma limitação DO MODELO que não existe (o valor foi lido; o que
+  // não dá pra calcular é o percentual). Numa PR cujo motivo de existir é
+  // parar de afirmar coisa falsa na tela, é a mesma classe de defeito um
+  // nível abaixo.
+  //
+  // A informação foi destruída na ESCRITA do histórico, então não dá pra
+  // recuperar sem migrar o schema — fora do escopo de um hotfix. Fica
+  // TRAVADO aqui: o comportamento é conhecido e deliberado, e qualquer
+  // mudança (nos dois lados) quebra este teste em vez de passar despercebida.
+  it('LIMITAÇÃO CONHECIDA: o mesmo suprimento sem percentual sai "not-measured" ao vivo e "unknown" pelo histórico', async () => {
+    const { app, token } = await authedApp();
+    const auth = { authorization: `Bearer ${token}` };
+    const printer = await createPrinter(app, auth);
+
+    // Caminho ao vivo: a HP real, com o bug de firmware level > maxCapacity.
+    getLastReadingMock.mockReturnValueOnce({
+      printerId: printer.id,
+      collectedAt: '2026-09-11T12:00:00.000Z',
+      pageCount: { kind: 'value', value: 10 },
+      supplies: [
+        {
+          index: 1,
+          description: 'Transfer Roller',
+          typeLabel: 'other',
+          serialNumber: null,
+          level: { kind: 'value', value: 143065 },
+          maxCapacity: { kind: 'value', value: 100 },
+          levelPercent: null,
+          levelSource: 'standard',
+        },
+      ],
+      partial: false,
+    } as unknown as PrinterSnmpReading);
+
+    const live = (
+      await app.inject({ method: 'GET', url: `/printers/${printer.id}/consumables`, headers: auth })
+    ).json();
+    expect(live.source).toBe('live');
+    expect(live.supplies[0].status).toBe('not-measured');
+
+    // Mesmo suprimento, mesma impressora, vindo do disco depois de um restart.
+    printersRepository.recordSnmpHistoryEntry(printer.id, {
+      collectedAt: '2026-09-11T12:00:00.000Z',
+      pageCount: 10,
+      partial: false,
+      supplies: [{ name: 'Transfer Roller', levelPercent: null }],
+    });
+    getLastReadingMock.mockReturnValueOnce(undefined);
+
+    const fromHistory = (
+      await app.inject({ method: 'GET', url: `/printers/${printer.id}/consumables`, headers: auth })
+    ).json();
+    expect(fromHistory.source).toBe('history');
+    // A divergência, explícita. Se um dia o schema do histórico passar a
+    // guardar o status do nível, é AQUI que a mudança precisa ser encarada.
+    expect(fromHistory.supplies[0].status).toBe('unknown');
+    expect(fromHistory.supplies[0].status).not.toBe(live.supplies[0].status);
+  });
+});

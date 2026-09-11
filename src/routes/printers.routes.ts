@@ -907,6 +907,27 @@ export default async function printersRoutes(app: FastifyInstance) {
     if (!record) {
       return reply.code(404).send({ error: 'Impressora não encontrada' });
     }
+    // POR QUE ESTA ROTA **NÃO** TEM O FALLBACK PARA O HISTÓRICO que
+    // /consumables (logo acima) ganhou — registrado na revisão crítica para
+    // não parecer descuido nem virar suposição numa leitura futura: as duas
+    // leem o MESMO `getLastReading`, e só uma cai para o disco.
+    //
+    // É limite ESTRUTURAL, não esquecimento. `printer_snmp_history` persiste
+    // apenas `{collectedAt, pageCount, supplies:{name, levelPercent},
+    // partial}` (ver RecordSnmpHistoryInput em db/printers.db.ts). Nenhum dos
+    // campos que DEFINEM esta resposta — `model` (hrDeviceDescr),
+    // `systemInfo` (sysDescr), `deviceStatus`, `powerOnCount`,
+    // `activeErrors` — é gravado em lugar nenhum. Servir o histórico aqui
+    // devolveria `collectedAt` preenchido com todo o resto `null`, ou seja,
+    // afirmaria "diagnostiquei esta impressora às HH:MM e não achei erro
+    // nenhum" quando na verdade nada foi diagnosticado. Seria trocar o
+    // silêncio honesto por uma afirmação falsa — exatamente o defeito que o
+    // fallback de /consumables existe para corrigir, invertido.
+    //
+    // Fechar isto de verdade exige persistir esses campos no histórico
+    // (migração de schema), não um fallback. Enquanto isso não for pedido, o
+    // comportamento correto é o atual: `collectedAt: null` após um restart,
+    // até o poller coletar. Travado por teste (printers-diagnostics.test.ts).
     return toDiagnosticsResponse(id, getLastReading(id));
   });
 
