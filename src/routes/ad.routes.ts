@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { env } from '../config/env.js';
 import {
+  AdPasswordAmbiguousError,
   createUser,
   deleteUser,
   getUser,
@@ -96,7 +97,38 @@ export default async function adRoutes(app: FastifyInstance) {
   app.post('/ad/users', mutationConfig, async (request, reply) => {
     const body = createUserBody.parse(request.body);
     const password = body.password ?? generatePassword();
-    const user = await createUser({ ...body, password });
+    let user;
+    try {
+      user = await createUser({ ...body, password });
+    } catch (error) {
+      // ACHADO GRAVE da revisão crítica (mesmo precedente de
+      // PrinterSwsPasswordVerificationError em printers.routes.ts): o `add`
+      // do objeto JÁ ACONTECEU e o `modify` que grava a senha pode ou não
+      // ter aplicado antes de falhar. Sem este ramo, uma chamada SEM
+      // `password` no corpo (senha gerada aqui por `randomBytes`) perderia
+      // pra sempre a única cópia da senha que o AD PODE ter passado a
+      // exigir — ela não pode ir pro log (regra do projeto) e morreria no
+      // 502 genérico do error handler central. Devolver o valor tentado não
+      // cria exposição nova: o caminho de sucesso já devolve a senha em
+      // claro pro mesmo chamador autenticado, pelo mesmo canal.
+      if (error instanceof AdPasswordAmbiguousError) {
+        request.log.error(
+          { sAMAccountName: body.sAMAccountName },
+          'CRIAÇÃO DE USUÁRIO AD EM ESTADO AMBÍGUO — a conta foi criada (desabilitada) mas não foi possível ' +
+            'confirmar se a senha/habilitação aplicaram. A senha tentada foi devolvida em texto puro APENAS no ' +
+            'corpo desta resposta HTTP.',
+        );
+        return reply.code(502).send({
+          error: 'Não foi possível confirmar a criação do usuário',
+          details: error.message,
+          // Única cópia da senha tentada que sai do processo.
+          attemptedSAMAccountName: body.sAMAccountName,
+          attemptedPassword: error.attemptedPassword,
+          accountEnabled: false,
+        });
+      }
+      throw error;
+    }
     // Mesma disciplina do segredo SNMP/senha admin da HP: a senha só
     // aparece UMA VEZ, na resposta de sucesso desta chamada — nunca em log,
     // nunca devolvida por GET /ad/users/:username depois.
@@ -137,7 +169,26 @@ export default async function adRoutes(app: FastifyInstance) {
     const { username } = usernameParam.parse(request.params);
     const body = resetPasswordBody.parse(request.body ?? {});
     const password = body.password ?? generatePassword();
-    await resetPassword(username, password, body.mustChangePasswordAtNextLogon ?? true);
+    try {
+      await resetPassword(username, password, body.mustChangePasswordAtNextLogon ?? true);
+    } catch (error) {
+      // Mesmo raciocínio do POST /ad/users acima — aqui é ainda mais grave:
+      // a senha do usuário pode JÁ TER MUDADO no AD, e sem este ramo o
+      // operador ficaria sem a única cópia do valor novo.
+      if (error instanceof AdPasswordAmbiguousError) {
+        request.log.error(
+          { username },
+          'RESET DE SENHA AD EM ESTADO AMBÍGUO — a escrita já havia sido despachada e não foi possível confirmar ' +
+            'o resultado. A senha tentada foi devolvida em texto puro APENAS no corpo desta resposta HTTP.',
+        );
+        return reply.code(502).send({
+          error: 'Não foi possível confirmar a troca de senha',
+          details: error.message,
+          attemptedPassword: error.attemptedPassword,
+        });
+      }
+      throw error;
+    }
     // Mesma disciplina de POST /ad/users: única vez que a senha aparece.
     return reply.send({ ok: true, password });
   });

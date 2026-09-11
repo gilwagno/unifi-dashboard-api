@@ -1,4 +1,14 @@
-import { Attribute, Change, Client, NoSuchObjectError, escapeFilter } from 'ldapts';
+import {
+  AlreadyExistsError,
+  Attribute,
+  Change,
+  Client,
+  DN,
+  NoSuchAttributeError,
+  NoSuchObjectError,
+  TypeOrValueExistsError,
+  escapeFilter,
+} from 'ldapts';
 import { env } from '../config/env.js';
 
 // Client LDAPS para o Active Directory (Onda 3, ver docs/ad-module-plan.md)
@@ -48,6 +58,32 @@ export class AdUserNotFoundError extends Error {
   constructor(username: string) {
     super(`Usuário "${username}" não encontrado no Active Directory`);
     this.name = 'AdUserNotFoundError';
+  }
+}
+
+// ACHADO GRAVE da revisão crítica (2026-09-10): `createUser` e
+// `resetPassword` só podem gravar a senha DEPOIS de outra operação LDAP já
+// ter sido despachada (o `add` que cria a conta, ou a resolução do DN via
+// busca) — se a operação que grava a senha falhar de um jeito que não deixa
+// claro se colou no servidor (timeout, conexão derrubada no meio), a ÚNICA
+// cópia da senha tentada (gerada aleatoriamente quando o chamador não
+// informa uma) não pode ser simplesmente descartada num erro genérico: o
+// operador ficaria sem saber se o AD já exige aquela senha ou não, sem
+// nenhuma forma de recuperar o valor. Mesma classe de bug já corrigida em
+// `PrinterSwsPasswordVerificationError` (printer-hp-sws.service.ts) — o
+// texto do REPORT do crítico cita esse precedente explicitamente. Nunca vai
+// pro log (só no corpo da resposta HTTP, ver ad.routes.ts).
+export class AdPasswordAmbiguousError extends Error {
+  constructor(
+    username: string,
+    public readonly attemptedPassword: string,
+    public readonly cause?: unknown,
+  ) {
+    super(
+      `Não foi possível confirmar se a senha de "${username}" foi realmente alterada no Active Directory — ` +
+        'a operação de escrita foi despachada mas a confirmação falhou.',
+    );
+    this.name = 'AdPasswordAmbiguousError';
   }
 }
 
@@ -123,7 +159,12 @@ export interface AdUser {
   mail: string | null;
   department: string | null;
   title: string | null;
-  enabled: boolean;
+  // `null` quando userAccountControl não veio na leitura (ex.: a conta de
+  // serviço do bind não tem permissão de ler esse atributo neste objeto) —
+  // ACHADO da revisão crítica: assumir "habilitada" nesse caso falha ABERTO
+  // (uma conta desabilitada podia aparecer como ativa num módulo cujo
+  // objetivo é controlar acesso à rede). Nunca inventa um valor.
+  enabled: boolean | null;
   lockedOut: boolean;
   userWorkstations: string[];
 }
@@ -142,7 +183,7 @@ const USER_SEARCH_ATTRIBUTES = [
 ];
 
 function toAdUser(entry: Record<string, string | string[] | Buffer | Buffer[]>, dn: string): AdUser {
-  const uac = asNumber(entry.userAccountControl) ?? UF_NORMAL_ACCOUNT;
+  const uac = asNumber(entry.userAccountControl);
   const lockoutTime = asString(entry.lockoutTime);
 
   return {
@@ -152,7 +193,9 @@ function toAdUser(entry: Record<string, string | string[] | Buffer | Buffer[]>, 
     mail: asString(entry.mail),
     department: asString(entry.department),
     title: asString(entry.title),
-    enabled: (uac & UF_ACCOUNTDISABLE) === 0,
+    // `uac === null` (atributo não veio) vira `null`, nunca "habilitada"
+    // por padrão — ver o comentário de AdUser.enabled.
+    enabled: uac === null ? null : (uac & UF_ACCOUNTDISABLE) === 0,
     // '0' ou ausente = não bloqueado. Qualquer outro valor é um FILETIME
     // Windows (timestamp do bloqueio) — não precisamos decodificar a data
     // aqui, só a presença de um valor não-zero já significa "bloqueado".
@@ -171,7 +214,12 @@ async function withClient<T>(fn: (client: Client) => Promise<T>): Promise<T> {
     await client.bind(env.AD_BIND_DN!, env.AD_BIND_PASSWORD!);
     return await fn(client);
   } catch (err) {
-    if (err instanceof AdNotConfiguredError || err instanceof AdUserNotFoundError) throw err;
+    if (
+      err instanceof AdNotConfiguredError ||
+      err instanceof AdUserNotFoundError ||
+      err instanceof AdPasswordAmbiguousError
+    )
+      throw err;
     const message = err instanceof Error ? err.message : String(err);
     throw new AdRequestError(`Falha na operação com o Active Directory: ${message}`, err);
   } finally {
@@ -213,10 +261,16 @@ export async function searchUsers(query?: string): Promise<AdUser[]> {
       ? escapeFilter`(&(objectClass=user)(objectCategory=person)(|(cn=*${query}*)(sAMAccountName=*${query}*)(mail=*${query}*)))`
       : '(&(objectClass=user)(objectCategory=person))';
 
+    // `paged: true` — ACHADO da revisão crítica (suspeita, não confirmada
+    // contra um AD real): sem paginação explícita, uma OU com mais
+    // usuários que o `MaxPageSize` do DC (1000 por padrão) faria o AD
+    // recusar com SizeLimitExceededError, e a listagem inteira viraria um
+    // 502 sem pista nenhuma da causa. Barato de evitar, sem downside.
     const { searchEntries } = await client.search(env.AD_USERS_OU!, {
       scope: 'sub',
       filter,
       attributes: USER_SEARCH_ATTRIBUTES,
+      paged: true,
     });
 
     return searchEntries.map((entry) =>
@@ -244,38 +298,82 @@ export interface CreateAdUserInput {
   mustChangePasswordAtNextLogon?: boolean;
 }
 
-// Cria o usuário em 3 passos LDAP separados — técnica padrão documentada
-// pela Microsoft para criar contas via LDAP puro (sem ADSI/PowerShell AD
-// module): o AD recusa `unicodePwd` no mesmo `add` que cria o objeto, então
-// (1) cria o objeto já com UF_PASSWD_NOTREQD (senão o `add` falha por
-// "sem senha"), (2) define a senha via `modify` (unicodePwd), (3) habilita
-// a conta (remove UF_PASSWD_NOTREQD/UF_ACCOUNTDISABLE). Se o passo 2 ou 3
-// falhar, a conta fica criada mas DESABILITADA — nunca uma conta habilitada
-// sem senha definida.
+// DN derivado do domínio configurado (AD_BASE_DN, ex. "DC=empresa,DC=local"
+// -> "empresa.local") — ACHADO da revisão crítica (suspeita, não confirmada
+// contra um AD real): sem `mail`, o UPN virava só `sAMAccountName` pelado,
+// sem sufixo de domínio nenhum — o AD aceita isso via LDAP, mas não é um UPN
+// de logon válido (`user@dominio`). Deriva o sufixo do próprio `AD_BASE_DN`
+// em vez de inventar um domínio — é a fonte de verdade que este módulo já
+// tem configurada, mesmo raciocínio de nunca supor um valor que já está
+// disponível em outro lugar.
+function domainSuffixFromBaseDn(baseDn: string): string {
+  return baseDn
+    .split(',')
+    .map((rdn) => rdn.trim())
+    .filter((rdn) => rdn.toUpperCase().startsWith('DC='))
+    .map((rdn) => rdn.slice(3))
+    .join('.');
+}
+
+// ACHADO GRAVE da revisão crítica: o DN era montado por concatenação crua
+// (`CN=${displayName},...`), sem nenhum escape — um `displayName` com
+// vírgula (ex.: "Silva, João", nome brasileiro comum) produzia um DN
+// SINTATICAMENTE INVÁLIDO (a vírgula separa RDNs em LDAP), e um valor como
+// "hacker,OU=Servidores" produzia um DN válido mas apontando pra outro
+// container, driblando a OU pretendida. Corrigido usando `sAMAccountName`
+// (não `displayName`) como CN — é único por definição (já é a chave de
+// busca de todo o resto deste serviço) e mais curto/restrito (a rota já
+// valida até 20 caracteres, o limite do próprio AD) — e escapado de verdade
+// via `DN`/`addPairRDN` do `ldapts` (o mesmo `Filter.escape`-like usado
+// internamente pela lib), em vez de reimplementar escape de DN à mão.
+function buildUserDn(sAMAccountName: string): string {
+  return `${new DN().addPairRDN('CN', sAMAccountName).toString()},${env.AD_USERS_OU}`;
+}
+
+// Cria o usuário em 2 operações LDAP (reduzido de 3 pela revisão crítica —
+// ver achado abaixo): técnica padrão documentada pela Microsoft pra criar
+// contas via LDAP puro (sem ADSI/PowerShell AD module): o AD recusa
+// `unicodePwd` no mesmo `add` que cria o objeto, então (1) cria o objeto já
+// com UF_PASSWD_NOTREQD (senão o `add` falha por "sem senha"), (2) UM ÚNICO
+// `modify` atômico que define a senha (unicodePwd) E habilita a conta
+// (remove UF_PASSWD_NOTREQD/UF_ACCOUNTDISABLE) E, se pedido, força troca no
+// próximo logon (pwdLastSet=0) — os 3 atributos no mesmo `client.modify`
+// (LDAP garante atomicidade entre changes da mesma requisição: ou todos
+// aplicam, ou nenhum aplica). Antes da revisão crítica, os passos 2 e 3
+// eram `modify`s SEPARADOS — havia uma janela real entre "senha definida"
+// e "conta habilitada" onde uma falha no meio perdia a senha gerada sem
+// deixar rastro. Combinando num só, a garantia "nunca uma conta habilitada
+// sem senha" fica estrutural (não depende de nenhum dos dois `modify`
+// terem rodado em sequência), e só resta uma janela entre o `add` (passo 1)
+// e o `modify` atômico (passo 2) — se o `modify` falhar de um jeito
+// ambíguo (sem confirmar se aplicou), a conta fica desabilitada+sem senha
+// (seguro, igual antes) OU já habilitada+com a senha pretendida — nunca um
+// meio-termo perigoso. Essa janela ainda pode perder a única cópia da senha
+// gerada, por isso o `catch` abaixo a preserva via AdPasswordAmbiguousError
+// (mesma disciplina de PrinterSwsPasswordVerificationError, achado grave da
+// revisão crítica).
 export async function createUser(input: CreateAdUserInput): Promise<AdUser> {
   const mustChangePassword = input.mustChangePasswordAtNextLogon ?? true;
-  const dn = `CN=${input.displayName},${env.AD_USERS_OU}`;
+  const dn = buildUserDn(input.sAMAccountName);
+  const domainSuffix = domainSuffixFromBaseDn(env.AD_BASE_DN ?? '');
+  const userPrincipalName = input.mail ?? (domainSuffix ? `${input.sAMAccountName}@${domainSuffix}` : input.sAMAccountName);
 
   return withClient(async (client) => {
     await client.add(dn, {
       objectClass: ['top', 'person', 'organizationalPerson', 'user'],
-      cn: input.displayName,
+      cn: input.sAMAccountName,
       sAMAccountName: input.sAMAccountName,
-      userPrincipalName: input.mail ?? input.sAMAccountName,
+      userPrincipalName,
       displayName: input.displayName,
       ...(input.mail ? { mail: input.mail } : {}),
       userAccountControl: String(UF_NORMAL_ACCOUNT | UF_ACCOUNTDISABLE | UF_PASSWD_NOTREQD),
     });
 
-    await client.modify(
-      dn,
+    const changes = [
       new Change({
         operation: 'replace',
         modification: new Attribute({ type: 'unicodePwd', values: [encodeAdPassword(input.password)] }),
       }),
-    );
-
-    const changes = [
       new Change({
         operation: 'replace',
         modification: new Attribute({ type: 'userAccountControl', values: [String(UF_NORMAL_ACCOUNT)] }),
@@ -289,10 +387,21 @@ export async function createUser(input: CreateAdUserInput): Promise<AdUser> {
         }),
       );
     }
-    await client.modify(dn, changes);
+
+    try {
+      await client.modify(dn, changes);
+    } catch (err) {
+      // Estado AMBÍGUO: o `add` já aconteceu (a conta existe, desabilitada
+      // e sem senha exigida) e este `modify` pode ou não ter aplicado a
+      // senha antes de falhar — não dá pra saber sem reler o objeto, e
+      // mesmo relendo não dá pra confirmar a SENHA (unicodePwd nunca é
+      // legível via LDAP). Preserva a senha tentada em vez de descartá-la
+      // num erro genérico.
+      throw new AdPasswordAmbiguousError(input.sAMAccountName, input.password, err);
+    }
 
     const entry = await findUserEntry(client, input.sAMAccountName);
-    return toAdUser(entry, dn);
+    return toAdUser(entry, asString(entry.distinguishedName) ?? dn);
   });
 }
 
@@ -341,7 +450,20 @@ export async function setUserEnabled(username: string, enabled: boolean): Promis
   return withClient(async (client) => {
     const entry = await findUserEntry(client, username);
     const dn = asString(entry.distinguishedName) ?? (entry.dn as unknown as string);
-    const currentUac = asNumber(entry.userAccountControl) ?? UF_NORMAL_ACCOUNT;
+    const currentUac = asNumber(entry.userAccountControl);
+    // ACHADO da revisão crítica: assumir UF_NORMAL_ACCOUNT quando o atributo
+    // não vem legível (ex.: a conta de serviço do bind sem permissão de
+    // leitura nesse campo específico) fazia esta função GRAVAR um valor
+    // adivinhado por cima da configuração real — apagando em silêncio
+    // qualquer outro bit já setado (DONT_EXPIRE_PASSWORD, SMARTCARD_REQUIRED
+    // etc.), a mesma classe de bug já corrigida em `extractAdminField`
+    // (printer-hp-sws.service.ts). Recusar a escrita é mais seguro do que
+    // adivinhar o estado atual de uma credencial mestra de acesso à rede.
+    if (currentUac === null) {
+      throw new AdRequestError(
+        `Não foi possível ler userAccountControl de "${username}" antes de ${enabled ? 'habilitar' : 'desabilitar'} — recusando a escrita para não sobrescrever bits desconhecidos.`,
+      );
+    }
     const nextUac = enabled ? currentUac & ~UF_ACCOUNTDISABLE : currentUac | UF_ACCOUNTDISABLE;
 
     await client.modify(
@@ -372,6 +494,16 @@ export async function unlockUser(username: string): Promise<void> {
   });
 }
 
+// ACHADO GRAVE da revisão crítica, corrigido: os dois `modify` (senha +
+// pwdLastSet) eram chamadas SEPARADAS — se a segunda falhasse depois da
+// primeira ter sucesso, a senha do usuário JÁ TINHA MUDADO no AD, mas a
+// única cópia da senha nova (gerada aleatoriamente quando o chamador não
+// informa uma) morria num erro genérico, sem `pwdLastSet=0` aplicado.
+// Combinadas num ÚNICO `client.modify(dn, [...])`, o LDAP garante
+// atomicidade entre as changes da mesma requisição — ou as duas aplicam,
+// ou nenhuma aplica. Se a chamada falhar de um jeito que não confirma qual
+// dos dois casos aconteceu, a senha tentada é preservada via
+// AdPasswordAmbiguousError (nunca descartada num erro genérico).
 export async function resetPassword(
   username: string,
   newPassword: string,
@@ -381,22 +513,25 @@ export async function resetPassword(
     const entry = await findUserEntry(client, username);
     const dn = asString(entry.distinguishedName) ?? (entry.dn as unknown as string);
 
-    await client.modify(
-      dn,
+    const changes = [
       new Change({
         operation: 'replace',
         modification: new Attribute({ type: 'unicodePwd', values: [encodeAdPassword(newPassword)] }),
       }),
-    );
-
+    ];
     if (mustChangePasswordAtNextLogon) {
-      await client.modify(
-        dn,
+      changes.push(
         new Change({
           operation: 'replace',
           modification: new Attribute({ type: 'pwdLastSet', values: ['0'] }),
         }),
       );
+    }
+
+    try {
+      await client.modify(dn, changes);
+    } catch (err) {
+      throw new AdPasswordAmbiguousError(username, newPassword, err);
     }
   });
 }
@@ -432,6 +567,15 @@ export async function setUserWorkstations(username: string, workstations: string
 // chamada específica (não "lembrar de tirar da lista genérica de grupos")
 // de propósito: revogar acesso de alguém não pode depender de alguém
 // lembrar de editar o grupo certo manualmente.
+// ACHADO da revisão crítica: a ponte 802.1X não era idempotente — conceder
+// acesso a quem já tem (o AD recusa com TypeOrValueExistsError/
+// AlreadyExistsError) ou revogar de quem já não tem (NoSuchAttributeError)
+// virava um 502 genérico. Numa ação de SEGURANÇA (é literalmente "esta
+// pessoa tem ou não tem acesso à rede agora"), um operador vendo 502 ao
+// revogar acesso durante um incidente pode concluir, errado, que a pessoa
+// AINDA tem acesso — o pior tipo de ambiguidade nesta função específica.
+// Tratar o estado final desejado como sucesso (idempotente) é mais seguro
+// do que expor a distinção "já estava assim" vs "acabei de aplicar".
 export async function grantNetworkAccess(username: string): Promise<void> {
   if (!env.AD_NETWORK_ACCESS_GROUP_DN) throw new AdNetworkAccessGroupNotConfiguredError();
 
@@ -439,10 +583,15 @@ export async function grantNetworkAccess(username: string): Promise<void> {
     const entry = await findUserEntry(client, username);
     const dn = asString(entry.distinguishedName) ?? (entry.dn as unknown as string);
 
-    await client.modify(
-      env.AD_NETWORK_ACCESS_GROUP_DN!,
-      new Change({ operation: 'add', modification: new Attribute({ type: 'member', values: [dn] }) }),
-    );
+    try {
+      await client.modify(
+        env.AD_NETWORK_ACCESS_GROUP_DN!,
+        new Change({ operation: 'add', modification: new Attribute({ type: 'member', values: [dn] }) }),
+      );
+    } catch (err) {
+      if (err instanceof TypeOrValueExistsError || err instanceof AlreadyExistsError) return;
+      throw err;
+    }
   });
 }
 
@@ -453,10 +602,15 @@ export async function revokeNetworkAccess(username: string): Promise<void> {
     const entry = await findUserEntry(client, username);
     const dn = asString(entry.distinguishedName) ?? (entry.dn as unknown as string);
 
-    await client.modify(
-      env.AD_NETWORK_ACCESS_GROUP_DN!,
-      new Change({ operation: 'delete', modification: new Attribute({ type: 'member', values: [dn] }) }),
-    );
+    try {
+      await client.modify(
+        env.AD_NETWORK_ACCESS_GROUP_DN!,
+        new Change({ operation: 'delete', modification: new Attribute({ type: 'member', values: [dn] }) }),
+      );
+    } catch (err) {
+      if (err instanceof NoSuchAttributeError) return;
+      throw err;
+    }
   });
 }
 

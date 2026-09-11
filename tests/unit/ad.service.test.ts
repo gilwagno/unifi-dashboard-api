@@ -22,6 +22,23 @@ let bindCalls: Array<{ dn: string; password: string }>;
 let unbindCount: number;
 let bindShouldThrow: Error | null;
 let delShouldThrowNoSuchObject: boolean;
+// Captura o filtro LDAP EXATO recebido por `client.search` — usado pro
+// teste de injeção (achado 1 da revisão crítica): sem isso, não dá pra
+// provar que um `username` hostil foi realmente escapado antes de virar
+// parte da string do filtro (o diretório falso "funcionar certo" não prova
+// que o FILTRO em si ficou seguro).
+let searchFilters: string[];
+// Permite simular uma falha no `modify` de um DN específico — usado pros
+// testes de estado AMBÍGUO (achado 3 da revisão crítica): a operação
+// LDAP real falha DEPOIS de despachada, sem confirmar se aplicou.
+let modifyShouldThrowForDn: string | null;
+// Conta quantas requisições `modify` SEPARADAS o serviço despachou — é o que
+// prova o achado 3 de verdade: senha e pwdLastSet (e senha e UAC, no
+// createUser) precisam ir na MESMA requisição, porque só aí o LDAP garante
+// que ou as duas aplicam ou nenhuma aplica. Um contador é a única forma de
+// travar isso: o estado final do diretório fica idêntico com 1 ou com 2
+// modifys.
+let modifyCallCount: number;
 
 class FakeNoSuchObjectError extends Error {
   code = 32;
@@ -84,7 +101,17 @@ function applyChange(entry: FakeEntry, change: { operation: string; modification
   }
 }
 
-vi.mock('ldapts', () => {
+// `importOriginal` traz `DN`, `escapeFilter`, `TypeOrValueExistsError`,
+// `AlreadyExistsError` e `NoSuchAttributeError` REAIS do pacote (funções/
+// classes puras, sem rede) — ACHADO GRAVE da revisão crítica: um
+// `escapeFilter` reimplementado aqui (concatenação crua, sem escapar nada)
+// deixava a suíde 100% verde mesmo com a proteção contra injeção de filtro
+// LDAP REMOVIDA do código de produção — a mesma classe de "mock desarmando
+// o teste que deveria travar a regressão" que este projeto já tratou como
+// grave na subtarefa 15 da Onda 2. Só `Client`/`Change`/`Attribute`/
+// `NoSuchObjectError` continuam fakes (esses SÃO o diretório em memória).
+vi.mock('ldapts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('ldapts')>();
   class Attribute {
     type: string;
     values: unknown[];
@@ -115,6 +142,7 @@ vi.mock('ldapts', () => {
     }
 
     async search(baseDN: string, options: { filter: string; scope?: string }) {
+      searchFilters.push(options.filter);
       const entries = [...directory.values()].filter((entry) => matchesFilter(options.filter, entry));
       return {
         searchEntries: entries.map((entry) => ({ dn: entry.dn, ...entry.attributes })),
@@ -128,6 +156,8 @@ vi.mock('ldapts', () => {
     }
 
     async modify(dn: string, changes: InstanceType<typeof Change> | InstanceType<typeof Change>[]): Promise<void> {
+      modifyCallCount += 1;
+      if (modifyShouldThrowForDn === dn) throw new Error('conexão derrubada no meio da escrita (simulado)');
       const entry = directory.get(dn);
       if (!entry) throw new FakeNoSuchObjectError();
       const list = Array.isArray(changes) ? changes : [changes];
@@ -144,11 +174,18 @@ vi.mock('ldapts', () => {
     }
   }
 
-  function escapeFilter(strings: TemplateStringsArray, ...values: unknown[]): string {
-    return strings.reduce((acc, str, i) => acc + str + (i < values.length ? String(values[i]) : ''), '');
-  }
-
-  return { Client, Change, Attribute, NoSuchObjectError: FakeNoSuchObjectError, escapeFilter };
+  return {
+    Client,
+    Change,
+    Attribute,
+    NoSuchObjectError: FakeNoSuchObjectError,
+    // Reais — ver o comentário acima do vi.mock.
+    DN: actual.DN,
+    escapeFilter: actual.escapeFilter,
+    TypeOrValueExistsError: actual.TypeOrValueExistsError,
+    AlreadyExistsError: actual.AlreadyExistsError,
+    NoSuchAttributeError: actual.NoSuchAttributeError,
+  };
 });
 
 const AD_ENV = {
@@ -196,6 +233,9 @@ beforeEach(() => {
   unbindCount = 0;
   bindShouldThrow = null;
   delShouldThrowNoSuchObject = false;
+  searchFilters = [];
+  modifyShouldThrowForDn = null;
+  modifyCallCount = 0;
 });
 
 afterEach(() => {
@@ -291,7 +331,10 @@ describe('ad.service — searchUsers/getUser', () => {
 });
 
 describe('ad.service — createUser', () => {
-  it('cria em 3 passos: add (desabilitado+senha não exigida), modify unicodePwd, modify UAC final', async () => {
+  // Reduzido de 3 pra 2 operações LDAP pela revisão crítica (achado grave:
+  // senha+UAC combinados num único `modify` atômico, fechando a janela
+  // ambígua entre "senha definida" e "conta habilitada").
+  it('cria em 2 passos: add (desabilitado+senha não exigida), modify atômico (unicodePwd+UAC+pwdLastSet)', async () => {
     const { createUser } = await importAdService();
 
     const user = await createUser({
@@ -301,7 +344,7 @@ describe('ad.service — createUser', () => {
       password: 'S3nh4Inicial!',
     });
 
-    const dn = `CN=Paulo Pereira,${AD_ENV.AD_USERS_OU}`;
+    const dn = `CN=ppereira,${AD_ENV.AD_USERS_OU}`;
     const entry = directory.get(dn)!;
     expect(entry).toBeDefined();
     // UAC final: normal (512), habilitado.
@@ -316,7 +359,7 @@ describe('ad.service — createUser', () => {
     const { createUser } = await importAdService();
     await createUser({ sAMAccountName: 'ppereira', displayName: 'Paulo Pereira', password: 'Senha123!' });
 
-    const dn = `CN=Paulo Pereira,${AD_ENV.AD_USERS_OU}`;
+    const dn = `CN=ppereira,${AD_ENV.AD_USERS_OU}`;
     // O fake decodifica o Buffer recebido de volta para string (ver
     // applyChange) — se a codificação estivesse errada (sem aspas, ou
     // utf8 em vez de utf16le), este valor não bateria com a senha original.
@@ -332,16 +375,37 @@ describe('ad.service — createUser', () => {
       mustChangePasswordAtNextLogon: false,
     });
 
-    const dn = `CN=Paulo Pereira,${AD_ENV.AD_USERS_OU}`;
+    const dn = `CN=ppereira,${AD_ENV.AD_USERS_OU}`;
     expect(directory.get(dn)!.attributes.pwdLastSet).toBeUndefined();
   });
 
-  it('sem mail: userPrincipalName cai para o próprio sAMAccountName', async () => {
+  // Achado 10 da revisão crítica: sem `mail`, o UPN caía pro sAMAccountName
+  // PELADO, sem sufixo de domínio — não é um UPN de logon válido. Agora
+  // deriva o sufixo do próprio AD_BASE_DN configurado ("DC=test,DC=local"
+  // -> "test.local").
+  it('sem mail: userPrincipalName usa sAMAccountName + domínio derivado de AD_BASE_DN', async () => {
     const { createUser } = await importAdService();
     await createUser({ sAMAccountName: 'ppereira', displayName: 'Paulo Pereira', password: 'Senha123!' });
 
-    const dn = `CN=Paulo Pereira,${AD_ENV.AD_USERS_OU}`;
-    expect(directory.get(dn)!.attributes.userPrincipalName).toBe('ppereira');
+    const dn = `CN=ppereira,${AD_ENV.AD_USERS_OU}`;
+    expect(directory.get(dn)!.attributes.userPrincipalName).toBe('ppereira@test.local');
+  });
+
+  it('DN é derivado do sAMAccountName, não do displayName — nome com vírgula não quebra nem escreve fora da OU', async () => {
+    const { createUser } = await importAdService();
+    // "Silva, João" quebraria um DN montado por concatenação crua da forma
+    // antiga (a vírgula é separador de RDN em LDAP) — achado grave da
+    // revisão crítica.
+    const user = await createUser({
+      sAMAccountName: 'jsilva2',
+      displayName: 'Silva, João',
+      password: 'Senha123!',
+    });
+
+    const dn = `CN=jsilva2,${AD_ENV.AD_USERS_OU}`;
+    expect(directory.get(dn)).toBeDefined();
+    expect(directory.get(dn)!.attributes.displayName).toBe('Silva, João');
+    expect(user.dn).toBe(dn);
   });
 });
 
@@ -533,6 +597,136 @@ describe('ad.service — erros de conexão/protocolo', () => {
     seedUser();
     const { getUser } = await importAdService();
     await getUser('jsilva');
+    expect(unbindCount).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ACHADO 1 da revisão crítica — injeção de filtro LDAP
+// ---------------------------------------------------------------------------
+// Estes testes só têm valor porque o `vi.mock` acima passou a usar o
+// `escapeFilter` REAL do `ldapts` (via importOriginal). Com o escape falso
+// que existia antes (concatenação crua), eles falhariam — era exatamente a
+// rede de segurança ausente que o crítico apontou: remover o `escapeFilter`
+// do código de produção deixava a suíte inteira verde.
+describe('ad.service — escape de filtro LDAP (injeção)', () => {
+  it('username hostil não injeta operador no filtro de getUser', async () => {
+    seedUser();
+    const { getUser, AdUserNotFoundError } = await importAdService();
+
+    // Sem escape, `*)(objectClass=*` fecharia o `(sAMAccountName=...)` e
+    // abriria um novo termo — o filtro casaria QUALQUER objeto do diretório,
+    // devolvendo um usuário que o chamador não tinha direito de ver.
+    await expect(getUser('*)(objectClass=*')).rejects.toThrow(AdUserNotFoundError);
+
+    const [filter] = searchFilters;
+    // Os metacaracteres chegaram ao filtro ESCAPADOS (\2a = '*', \28 = '(',
+    // \29 = ')'), não como sintaxe LDAP ativa.
+    expect(filter).toContain('\\2a');
+    expect(filter).toContain('\\28');
+    expect(filter).toContain('\\29');
+    // E o filtro continua com exatamente os 3 termos que o serviço monta —
+    // nenhum termo extra entrou pelo valor do usuário.
+    expect(filter).toBe(
+      '(&(objectClass=user)(objectCategory=person)(sAMAccountName=\\2a\\29\\28objectClass=\\2a))',
+    );
+  });
+
+  it('query hostil não injeta operador no filtro de searchUsers', async () => {
+    seedUser();
+    const { searchUsers } = await importAdService();
+
+    const users = await searchUsers(')(|(objectClass=*');
+    // Nada casou: o valor virou texto literal de busca, não sintaxe.
+    expect(users).toEqual([]);
+    expect(searchFilters[0]).toContain('\\29\\28');
+    expect(searchFilters[0]).not.toContain(')(|(objectClass=*');
+  });
+
+  it('backslash no valor também é escapado (não vira escape de outro caractere)', async () => {
+    seedUser();
+    const { getUser, AdUserNotFoundError } = await importAdService();
+
+    await expect(getUser('a\\2a')).rejects.toThrow(AdUserNotFoundError);
+    // A barra literal vira \5c; o "2a" que o usuário digitou continua texto,
+    // não é reinterpretado como o metacaractere '*'.
+    expect(searchFilters[0]).toContain('a\\5c2a');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ACHADO 3 da revisão crítica — senha perdida em estado AMBÍGUO
+// ---------------------------------------------------------------------------
+describe('ad.service — senha em estado ambíguo', () => {
+  it('createUser: falha do modify preserva a senha tentada em AdPasswordAmbiguousError', async () => {
+    const { createUser, AdPasswordAmbiguousError, AdRequestError } = await importAdService();
+    const dn = `CN=ppereira,${AD_ENV.AD_USERS_OU}`;
+    modifyShouldThrowForDn = dn;
+
+    try {
+      await createUser({ sAMAccountName: 'ppereira', displayName: 'Paulo Pereira', password: 'S3nh4Gerada!' });
+      expect.unreachable('deveria ter lançado');
+    } catch (err) {
+      // NÃO pode virar o AdRequestError genérico — esse caminho descartaria
+      // a senha, que pode ser a única cópia existente (gerada na rota).
+      expect(err).not.toBeInstanceOf(AdRequestError);
+      expect(err).toBeInstanceOf(AdPasswordAmbiguousError);
+      expect((err as InstanceType<typeof AdPasswordAmbiguousError>).attemptedPassword).toBe('S3nh4Gerada!');
+    }
+
+    // A conta existe, mas ficou DESABILITADA e sem senha exigida — nunca
+    // habilitada sem senha definida.
+    const entry = directory.get(dn)!;
+    expect(entry).toBeDefined();
+    expect(Number(entry.attributes.userAccountControl) & 0x0002).not.toBe(0); // ACCOUNTDISABLE
+  });
+
+  it('resetPassword: falha do modify preserva a senha tentada', async () => {
+    const dn = seedUser();
+    modifyShouldThrowForDn = dn;
+    const { resetPassword, AdPasswordAmbiguousError, AdRequestError } = await importAdService();
+
+    try {
+      await resetPassword('jsilva', 'N0vaSenh4!', true);
+      expect.unreachable('deveria ter lançado');
+    } catch (err) {
+      expect(err).not.toBeInstanceOf(AdRequestError);
+      expect(err).toBeInstanceOf(AdPasswordAmbiguousError);
+      expect((err as InstanceType<typeof AdPasswordAmbiguousError>).attemptedPassword).toBe('N0vaSenh4!');
+    }
+  });
+
+  it('resetPassword aplica senha e pwdLastSet num ÚNICO modify (atômico)', async () => {
+    const dn = seedUser();
+    const { resetPassword } = await importAdService();
+    await resetPassword('jsilva', 'N0vaSenh4!', true);
+
+    const entry = directory.get(dn)!;
+    expect(entry.attributes.pwdLastSet).toBe('0');
+    expect(entry.attributes.unicodePwd).toBe('N0vaSenh4!');
+    // O CONTADOR é o que prova o achado: com dois modifys separados (a
+    // versão anterior), uma falha entre eles deixava a senha JÁ TROCADA no
+    // AD sem o pwdLastSet — e o estado final do diretório no caminho feliz
+    // seria idêntico, então só a contagem trava a regressão.
+    expect(modifyCallCount).toBe(1);
+  });
+
+  it('createUser aplica senha, UAC e pwdLastSet num ÚNICO modify (atômico)', async () => {
+    const { createUser } = await importAdService();
+    await createUser({ sAMAccountName: 'ppereira', displayName: 'Paulo Pereira', password: 'S3nh4Inicial!' });
+
+    // 1 `add` + 1 `modify`. Eram 2 modifys antes da revisão crítica, com uma
+    // janela real entre "senha definida" e "conta habilitada".
+    expect(modifyCallCount).toBe(1);
+  });
+
+  it('AdPasswordAmbiguousError atravessa withClient sem virar AdRequestError', async () => {
+    const dn = seedUser();
+    modifyShouldThrowForDn = dn;
+    const { resetPassword, AdPasswordAmbiguousError } = await importAdService();
+
+    await expect(resetPassword('jsilva', 'N0vaSenh4!', false)).rejects.toBeInstanceOf(AdPasswordAmbiguousError);
+    // E o unbind continua acontecendo (o finally do withClient não é pulado).
     expect(unbindCount).toBe(1);
   });
 });
