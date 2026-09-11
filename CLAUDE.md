@@ -20,6 +20,51 @@ feita em paralelo a qualquer momento.
 
 ## Onda 3 (Módulo de Active Directory + Ponte 802.1X) — pré-requisitos concluídos; CRUD de usuários + ponte 802.1X APROVADOS (47/50) e MERGEADOS em 2026-09-11 (PR #25)
 
+### Subtarefa 6 (`fake-ldap-server`) — CONCLUÍDA e MERGEADA em 2026-09-11 (PR #32, squash `0bf5259`)
+
+Antecipada para vir antes de grupos (ver a nota de reordenação em `docs/ad-module-plan.md`).
+Aprovada em **3/4** em duas rodadas de revisão — **primeira subtarefa avaliada pelo harness de 4
+pontos**, não mais pela rubrica 0–50.
+
+`e2e/fake-ldap-server/server.mjs` é um servidor LDAP em memória escrito à mão sobre `node:tls`, e
+`tests/integration/ad-fake-ldap.test.ts` roda o `Client` **real** do `ldapts` por socket de verdade
+contra as funções **de produção** de `ad.service.ts` — **sem nenhum `vi.mock('ldapts')`**. Os testes
+unitários com mock continuam existindo; esta é uma camada a mais, não substituição.
+
+**O que o protocolo real revelou e o mock jamais revelaria** (a justificativa inteira de ter feito
+isto antes de grupos): `createUser()` **não envia `objectCategory`** no `add()`. Contra um AD real é
+invisível, porque o schema deriva sozinho — contra um LDAP sem esse comportamento, a releitura
+pós-criação (cujo filtro exige `objectCategory=person`) não acha o usuário recém-criado e o código
+cai em `AdPasswordAmbiguousError`, a mesma classe de "senha perdida" que as duas revisões da PR #25
+trataram como grave. O `vi.mock` nunca pegaria: o diretório falso dele não reavalia o filtro contra
+o que o `add()` de fato escreveu.
+
+**Segurança — a flag de TLS foi ELIMINADA, não apenas defendida.** Existiu um
+`AD_TLS_REJECT_UNAUTHORIZED`; a revisão confirmou que estava escopado por conexão e com default
+seguro, mas a pergunta certa era *"por que ela precisa existir?"* — não dá pra configurar errado um
+botão que não existe. A flag morreu por completo e entrou **`AD_TLS_CA_FILE`**, que só **estende** a
+lista de CAs confiáveis. Cinco sondas executadas confirmam falha fechada em todo valor errado
+(caminho inexistente → `ENOENT`; diretório → `EISDIR`; arquivo vazio e arquivo com lixo → recusa com
+`self-signed certificate`; string vazia → boot morre). **Erro de digitação no caminho não vira
+conexão insegura.** Precedente a seguir em qualquer flag futura deste tipo.
+
+**Os 3 achados das revisões são todos da mesma família — PROTEÇÃO SEM TRAVA**, que já é o padrão
+mais recorrente deste projeto: (a) o default seguro do TLS não tinha teste nenhum (mutante
+`.default('true')` → `.default('false')` **sobrevivia** com 675/675 verde); (b) o fake era **generoso
+demais** — removendo a validação do `handleModify` ele aceitava calado um `add` de valor já existente
+e um `delete` de valor ausente, e o teste de idempotência da ponte 802.1X passava **sem nunca
+executar** os `catch` que afirma travar (mesma classe da subtarefa 15); (c) sem `min(1)` no schema,
+`AD_TLS_CA_FILE=` vazio viraria `undefined` em silêncio.
+
+Decisões registradas: `ldapjs` rejeitado (descontinuado pelo mantenedor); diretório real em Docker
+rejeitado (peso inexistente no resto do ciclo de teste); `asn1-ber` entrou como **devDependency**,
+promovido de transitiva do `net-snmp` em vez de ficar dependendo dela em silêncio. Registrado sem
+correção: `buildTlsOptions()` é chamado FORA do `try` de `withClient`, então `ENOENT`/`EISDIR`
+escapam crus sem virar `AdRequestError` — falha fechada e não vaza segredo, mas sai do contrato de
+erros do módulo.
+
+Suíte após o merge: **backend 690/690** (44 arquivos), `tsc --noEmit` limpo.
+
 ### ⛔ PRÉ-REQUISITO BLOQUEANTE da subtarefa de GRUPOS (registrado 2026-09-11)
 
 **Antes de qualquer código de grupos ou computadores, o `e2e/fake-ldap-server` precisa passar a

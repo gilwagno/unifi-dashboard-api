@@ -149,8 +149,9 @@ de verdade, resetar senha de verdade) do que qualquer coisa já implementada.
 5. ✅ **CONCLUÍDA em 2026-09-11** (mesma PR #25). Ponte 802.1X — `POST`/`DELETE`
    `/ad/users/:username/network-access` sobre o grupo de `AD_NETWORK_ACCESS_GROUP_DN`,
    idempotente nos dois sentidos.
-6. 🚧 `fake-ldap-server` + testes de integração contra ele. **ANTECIPADA — é a subtarefa em
-   andamento, veio para antes de grupos** (ver nota abaixo). Os testes unitários e de
+6. ✅ **CONCLUÍDA em 2026-09-11** (PR #32, squash `0bf5259`, aprovada 3/4 no harness de 4
+   pontos). `fake-ldap-server` + testes de integração contra ele. **ANTECIPADA — veio para antes
+   de grupos** (ver nota abaixo). Os testes unitários e de
    integração já existem, mas o `ldapts` é inteiramente mockado — **nenhuma linha deste
    módulo jamais falou o protocolo LDAP de verdade**, e é exatamente isso que esta subtarefa
    existe pra cobrir.
