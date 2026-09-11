@@ -620,6 +620,41 @@ describe('fake-ldap-server — exige bind prévio por conexão (RFC 4511 §4.2.1
       await second.unbind().catch(() => undefined);
     }
   });
+
+  // Garantia 5 do pedido: bind ANÔNIMO (RFC 4511 §5.1.2 — DN vazio) e bind
+  // NÃO AUTENTICADO (DN válido + senha vazia, §5.1.1) são caminhos que este
+  // fake recusa DE PROPÓSITO, porque `ad.service.ts` sempre binda com as
+  // duas credenciais configuradas. Sem estes dois testes a recusa era
+  // PROTEÇÃO SEM TRAVA: o mutante
+  // `const ok = normalizeDn(dn) === '' || <expressão original>` (aceitar
+  // bind anônimo) SOBREVIVIA com a suíte inteira verde — executado de
+  // verdade nesta verificação. Um fake que autentica sem credencial é a
+  // forma mais silenciosa possível de reabrir o buraco que esta subtarefa
+  // fecha: todo teste de grupos/computadores passaria sem nunca exercitar
+  // o gate.
+  it('bind ANÔNIMO (DN e senha vazios) é recusado e NÃO autentica a conexão', async () => {
+    const client = connect();
+    try {
+      await expect(client.bind('', '')).rejects.toBeInstanceOf(InvalidCredentialsError);
+      await expect(client.search(fakeLdap.usersOu, { scope: 'sub', filter: '(objectClass=user)' })).rejects.toBeInstanceOf(
+        OperationsError,
+      );
+    } finally {
+      await client.unbind().catch(() => undefined);
+    }
+  });
+
+  it('bind com DN correto mas senha VAZIA é recusado e NÃO autentica a conexão', async () => {
+    const client = connect();
+    try {
+      await expect(client.bind(fakeLdap.bindDn, '')).rejects.toBeInstanceOf(InvalidCredentialsError);
+      await expect(client.search(fakeLdap.usersOu, { scope: 'sub', filter: '(objectClass=user)' })).rejects.toBeInstanceOf(
+        OperationsError,
+      );
+    } finally {
+      await client.unbind().catch(() => undefined);
+    }
+  });
 });
 
 // Confirma que o tipo exportado pelo serviço bate com o que o servidor real
