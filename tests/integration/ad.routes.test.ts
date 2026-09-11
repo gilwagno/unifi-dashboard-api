@@ -441,9 +441,11 @@ describe('rotas de AD — senha em estado ambíguo (502 com o valor tentado)', (
     const body = res.json();
     expect(body.attemptedPassword).toBe('S3nh4Informada!');
     expect(body.attemptedSAMAccountName).toBe('ppereira');
-    // A conta pode ter ficado criada e DESABILITADA — o corpo diz isso em vez
-    // de deixar o operador supor que nada aconteceu.
-    expect(body.accountEnabled).toBe(false);
+    // ACHADO da 2a revisao critica: aqui o estado e DESCONHECIDO (o modify
+    // pode ter aplicado antes de falhar) — o corpo devolve `null`, nunca a
+    // afirmacao `false`, que seria uma mentira sobre uma conta de producao
+    // possivelmente ja habilitada com acesso a rede.
+    expect(body.accountEnabled).toBeNull();
     await app.close();
   });
 
@@ -506,6 +508,61 @@ describe('rotas de AD — senha em estado ambíguo (502 com o valor tentado)', (
     // O que importa: o ramo do ambíguo NÃO sequestra qualquer erro — só o
     // tipado. Nenhuma senha vaza num caminho que não é o ambíguo.
     expect(res.json().attemptedPassword).toBeUndefined();
+    await app.close();
+  });
+
+  it('POST /ad/users propaga accountEnabled=true quando so a releitura falhou', async () => {
+    const { app, headers } = await authedApp();
+    vi.mocked(createUser).mockImplementationOnce(async (input) => {
+      // Cenario: o modify JA confirmou (conta habilitada, senha aplicada) e o
+      // que falhou foi a leitura de volta.
+      throw new AdPasswordAmbiguousError(input.sAMAccountName, input.password, undefined, true);
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/ad/users',
+      headers,
+      payload: { sAMAccountName: 'ppereira', displayName: 'Paulo Pereira' },
+    });
+
+    expect(res.statusCode).toBe(502);
+    // Sem repassar o campo do erro, a rota afirmaria `false` e o operador
+    // deixaria passar uma conta JA ATIVA achando que nada colou.
+    expect(res.json().accountEnabled).toBe(true);
+    expect(typeof res.json().attemptedPassword).toBe('string');
+    await app.close();
+  });
+
+  it('POST /ad/users recusa sAMAccountName com caractere proibido pelo AD (400, sem chegar no servico)', async () => {
+    const { app, headers } = await authedApp();
+    const callsBefore = vi.mocked(createUser).mock.calls.length;
+
+    for (const sAMAccountName of ['x,OU=Servidores', 'a=b', 'a\b', 'a"b']) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/ad/users',
+        headers,
+        payload: { sAMAccountName, displayName: 'Hostil' },
+      });
+      expect(res.statusCode).toBe(400);
+    }
+    // Defesa em profundidade: nenhuma dessas chamadas sequer alcanca o servico.
+    expect(vi.mocked(createUser).mock.calls.length).toBe(callsBefore);
+    await app.close();
+  });
+
+  it('rota SEM tratamento do ambíguo cai no handler central como 502 e sem senha no corpo', async () => {
+    const { app, headers } = await authedApp();
+    // DELETE /ad/users/:username nao tem (nem precisa de) o ramo do ambiguo —
+    // o mapeamento em src/app.ts e a rede de seguranca para qualquer rota
+    // futura deste modulo.
+    vi.mocked(deleteUser).mockRejectedValueOnce(new AdPasswordAmbiguousError('jsilva', 'S3nh4-SUPER-SECRETA'));
+
+    const res = await app.inject({ method: 'DELETE', url: '/ad/users/jsilva', headers });
+
+    expect(res.statusCode).toBe(502);
+    expect(res.body).not.toContain('S3nh4-SUPER-SECRETA');
     await app.close();
   });
 });

@@ -40,7 +40,21 @@ const searchQuery = z.object({
 });
 
 const createUserBody = z.object({
-  sAMAccountName: z.string().trim().min(1).max(20, 'sAMAccountName do AD tem limite de 20 caracteres'),
+  sAMAccountName: z
+    .string()
+    .trim()
+    .min(1)
+    .max(20, 'sAMAccountName do AD tem limite de 20 caracteres')
+    // Conjunto de caracteres que o PROPRIO AD recusa em sAMAccountName
+    // (virgula, barras, : ; | = + * ? < > " [ ] e caracteres de controle).
+    // Barrar aqui e defesa em profundidade sobre o escape de DN do servico:
+    // o CN do DN novo vem deste valor, e depender so de a biblioteca escapar
+    // certo (ou de o DC recusar depois) deixa a unica barreira fora do nosso
+    // codigo. ACHADO da 2a revisao critica.
+    .regex(
+      /^[^,\\\/:;|=+*?<>\"\[\]\u0000-\u001f]+$/,
+      'sAMAccountName contem caractere nao permitido pelo Active Directory',
+    ),
   displayName: z.string().trim().min(1),
   mail: z.string().trim().email().optional(),
   // Omitir gera uma senha aleatória — mesmo padrão de
@@ -124,7 +138,12 @@ export default async function adRoutes(app: FastifyInstance) {
           // Única cópia da senha tentada que sai do processo.
           attemptedSAMAccountName: body.sAMAccountName,
           attemptedPassword: error.attemptedPassword,
-          accountEnabled: false,
+          // `null` quando nem o proprio servico sabe (a escrita falhou sem
+          // confirmar) — nunca afirmar `false` num caso em que o `modify`
+          // pode ter aplicado; `true` quando o que falhou foi so a releitura
+          // posterior. Ver AdPasswordAmbiguousError.accountEnabled (achado da
+          // 2a revisao critica).
+          accountEnabled: error.accountEnabled,
         });
       }
       throw error;

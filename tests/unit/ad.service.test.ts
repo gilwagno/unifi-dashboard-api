@@ -39,6 +39,11 @@ let modifyShouldThrowForDn: string | null;
 // travar isso: o estado final do diretório fica idêntico com 1 ou com 2
 // modifys.
 let modifyCallCount: number;
+// Faz `client.search` falhar DEPOIS que algum `modify` já rodou — usado pro
+// achado da 2a revisao critica: no `createUser`, a releitura final acontece
+// depois de a senha JA TER SIDO CONFIRMADA; uma falha ali descartava a unica
+// copia da senha gerada.
+let searchShouldThrowAfterModify: boolean;
 
 class FakeNoSuchObjectError extends Error {
   code = 32;
@@ -143,6 +148,9 @@ vi.mock('ldapts', async (importOriginal) => {
 
     async search(baseDN: string, options: { filter: string; scope?: string }) {
       searchFilters.push(options.filter);
+      if (searchShouldThrowAfterModify && modifyCallCount > 0) {
+        throw new Error('conexão derrubada na releitura (simulado)');
+      }
       const entries = [...directory.values()].filter((entry) => matchesFilter(options.filter, entry));
       return {
         searchEntries: entries.map((entry) => ({ dn: entry.dn, ...entry.attributes })),
@@ -236,6 +244,7 @@ beforeEach(() => {
   searchFilters = [];
   modifyShouldThrowForDn = null;
   modifyCallCount = 0;
+  searchShouldThrowAfterModify = false;
 });
 
 afterEach(() => {
@@ -728,5 +737,84 @@ describe('ad.service — senha em estado ambíguo', () => {
     await expect(resetPassword('jsilva', 'N0vaSenh4!', false)).rejects.toBeInstanceOf(AdPasswordAmbiguousError);
     // E o unbind continua acontecendo (o finally do withClient não é pulado).
     expect(unbindCount).toBe(1);
+  });
+});
+
+describe('ad.service — DN do usuário novo (escape de RDN)', () => {
+  it('sAMAccountName com vírgula/igual NÃO escapa da OU configurada (achado 2 da revisão crítica)', async () => {
+    const { createUser } = await importAdService();
+    // Valor hostil: com concatenação crua (`CN=${sam},${OU}`), isto produz um
+    // DN VÁLIDO apontando pra OU=Servidores — o objeto seria criado FORA da
+    // OU pretendida. Com o RDN escapado, a vírgula e o '=' viram parte do CN.
+    await createUser({
+      sAMAccountName: 'x,OU=Servidores',
+      displayName: 'Hostil',
+      password: 'S3nh4Inicial!',
+    });
+
+    const dns = [...directory.keys()];
+    expect(dns).toHaveLength(1);
+    const [dn] = dns;
+    // O DN precisa terminar EXATAMENTE na OU configurada, com um único RDN
+    // antes dela — nada de "OU=Servidores" no meio do caminho.
+    expect(dn.endsWith(`,${AD_ENV.AD_USERS_OU}`)).toBe(true);
+    const rdn = dn.slice(0, dn.length - AD_ENV.AD_USERS_OU.length - 1);
+    expect(rdn).toBe('CN=x\\,OU\\=Servidores');
+    expect(rdn).not.toContain('OU=Servidores');
+  });
+});
+
+describe('ad.service — releitura pós-escrita (achado da 2ª revisão crítica)', () => {
+  it('createUser preserva a senha quando a RELEITURA falha depois do modify confirmado', async () => {
+    searchShouldThrowAfterModify = true;
+    const { createUser, AdPasswordAmbiguousError } = await importAdService();
+
+    // A senha JÁ FOI aplicada (o modify confirmou) — sem este tratamento, a
+    // falha da busca virava AdRequestError/404 genérico e a única cópia da
+    // senha gerada se perdia, exatamente o achado bloqueante nº 3 sobrevivendo
+    // neste caminho.
+    const err = await createUser({
+      sAMAccountName: 'ppereira',
+      displayName: 'Paulo Pereira',
+      password: 'S3nh4Inicial!',
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(AdPasswordAmbiguousError);
+    expect((err as { attemptedPassword: string }).attemptedPassword).toBe('S3nh4Inicial!');
+    // Aqui dá pra AFIRMAR o estado: o modify aplicou, a conta está habilitada.
+    expect((err as { accountEnabled: boolean | null }).accountEnabled).toBe(true);
+  });
+
+  it('falha do PRÓPRIO modify deixa accountEnabled desconhecido (nunca afirma false)', async () => {
+    const { createUser, AdPasswordAmbiguousError } = await importAdService();
+    // O add cria a entrada; o modify seguinte falha — pode ou não ter aplicado.
+    const { DN } = await import('ldapts');
+    modifyShouldThrowForDn = `${new DN().addPairRDN('CN', 'ppereira').toString()},${AD_ENV.AD_USERS_OU}`;
+
+    const err = await createUser({
+      sAMAccountName: 'ppereira',
+      displayName: 'Paulo Pereira',
+      password: 'S3nh4Inicial!',
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(AdPasswordAmbiguousError);
+    expect((err as { accountEnabled: boolean | null }).accountEnabled).toBeNull();
+  });
+});
+
+describe('ad.service — AdPasswordAmbiguousError não vaza a senha em serialização', () => {
+  it('attemptedPassword é acessível mas NÃO enumerável (pino/JSON nunca gravam a senha)', async () => {
+    const { AdPasswordAmbiguousError } = await importAdService();
+    const err = new AdPasswordAmbiguousError('jsilva', 'S3nh4-SUPER-SECRETA');
+
+    // A rota precisa do valor...
+    expect(err.attemptedPassword).toBe('S3nh4-SUPER-SECRETA');
+    // ...mas nenhum serializador automático pode alcançá-lo. Confirmado
+    // empiricamente que o serializador de erro do pino inclui as props
+    // próprias ENUMERÁVEIS — com o campo enumerável, `app.log.error(error)`
+    // (catch-all de src/app.ts) gravaria a senha em claro no log.
+    expect(Object.keys(err)).not.toContain('attemptedPassword');
+    expect(Object.propertyIsEnumerable.call(err, 'attemptedPassword')).toBe(false);
+    expect(JSON.stringify({ ...err })).not.toContain('S3nh4-SUPER-SECRETA');
   });
 });

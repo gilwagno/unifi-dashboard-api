@@ -20,6 +20,7 @@ import sshRoutes from './routes/ssh.routes.js';
 import {
   AdNetworkAccessGroupNotConfiguredError,
   AdNotConfiguredError,
+  AdPasswordAmbiguousError,
   AdRequestError,
   AdUserNotFoundError,
 } from './services/ad.service.js';
@@ -88,6 +89,16 @@ export async function buildApp(): Promise<FastifyInstance> {
 
     if (error instanceof AdUserNotFoundError) {
       return reply.code(404).send({ error: error.message });
+    }
+
+    // Cinto e suspensorio da regra "senha nunca vai pro log": as rotas que
+    // podem receber este erro ja o tratam e devolvem a senha tentada no corpo,
+    // mas se alguma rota futura deste modulo esquecer, o catch-all abaixo
+    // (`app.log.error(error)`) e quem atenderia — e o campo nao-enumeravel
+    // ja impede o vazamento, este ramo garante tambem que a resposta nao
+    // vire um 500 generico. ACHADO da 2a revisao critica da PR #25.
+    if (error instanceof AdPasswordAmbiguousError) {
+      return reply.code(502).send({ error: 'Erro no Active Directory', details: error.message });
     }
 
     if (error instanceof AdRequestError) {

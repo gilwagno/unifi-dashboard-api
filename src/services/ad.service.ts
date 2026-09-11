@@ -78,12 +78,33 @@ export class AdPasswordAmbiguousError extends Error {
     username: string,
     public readonly attemptedPassword: string,
     public readonly cause?: unknown,
+    // Estado CONHECIDO da conta depois da falha ambígua, quando dá pra
+    // afirmar: `true` = a escrita da senha/habilitação já confirmou e o
+    // que falhou foi a releitura posterior; `null` = desconhecido (a
+    // própria escrita falhou sem confirmar). NUNCA afirmar `false` num
+    // caminho em que o `modify` pode ter aplicado — ACHADO da 2ª revisão
+    // crítica: a rota devolvia `accountEnabled: false` fixo, uma afirmação
+    // possivelmente FALSA sobre uma conta de produção com acesso à rede.
+    public readonly accountEnabled: boolean | null = null,
   ) {
     super(
       `Não foi possível confirmar se a senha de "${username}" foi realmente alterada no Active Directory — ` +
         'a operação de escrita foi despachada mas a confirmação falhou.',
     );
     this.name = 'AdPasswordAmbiguousError';
+    // ACHADO da 2a revisao critica, confirmado empiricamente: o serializador
+    // de erro do pino inclui as propriedades proprias ENUMERAVEIS do Error —
+    // um `app.log.error(error)` (o catch-all de src/app.ts) gravaria a senha
+    // EM CLARO no log, violando a regra dura do projeto. Tornar o campo
+    // nao-enumeravel mantem o acesso programatico (`error.attemptedPassword`,
+    // usado pela rota) e tira o valor de qualquer serializacao automatica
+    // (pino, JSON.stringify, util.inspect padrao).
+    Object.defineProperty(this, 'attemptedPassword', {
+      value: attemptedPassword,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
   }
 }
 
@@ -400,8 +421,19 @@ export async function createUser(input: CreateAdUserInput): Promise<AdUser> {
       throw new AdPasswordAmbiguousError(input.sAMAccountName, input.password, err);
     }
 
-    const entry = await findUserEntry(client, input.sAMAccountName);
-    return toAdUser(entry, asString(entry.distinguishedName) ?? dn);
+    // ACHADO da 2ª revisão crítica: esta releitura acontece DEPOIS do
+    // `modify` ter CONFIRMADO — a conta já está habilitada e já exige a
+    // senha gerada. Se a busca falhar aqui (rede caindo entre as duas
+    // operações, ou replicação do DC ainda não propagada), o erro
+    // genérico/404 descartava a única cópia da senha: exatamente o achado
+    // bloqueante nº 3 da 1ª revisão, sobrevivendo neste caminho. A senha é
+    // preservada, e desta vez `accountEnabled` é afirmável (`true`).
+    try {
+      const entry = await findUserEntry(client, input.sAMAccountName);
+      return toAdUser(entry, asString(entry.distinguishedName) ?? dn);
+    } catch (err) {
+      throw new AdPasswordAmbiguousError(input.sAMAccountName, input.password, err, true);
+    }
   });
 }
 
