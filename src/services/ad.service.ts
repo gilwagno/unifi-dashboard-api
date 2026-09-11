@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import {
   AlreadyExistsError,
   Attribute,
@@ -225,16 +226,27 @@ function toAdUser(entry: Record<string, string | string[] | Buffer | Buffer[]>, 
   };
 }
 
+// Constrói `tlsOptions` do `Client` — nunca um jeito de DESLIGAR a
+// verificação de certificado, só de ESTENDER quem é confiável (ver
+// `AD_TLS_CA_FILE` em src/config/env.ts). Sem a env var, `tlsOptions` fica
+// vazio e o `ldapts`/Node verificam contra as CAs padrão do sistema —
+// exatamente o que aconteceria contra um AD real com certificado emitido
+// por uma CA pública/AD CS já confiada pelo SO. Lido a cada chamada (não
+// cacheado): este módulo não é um poller de alta frequência (ver o
+// comentário de topo do arquivo sobre abrir/fechar conexão por operação),
+// então o custo de um `readFileSync` a mais por chamada é desprezível
+// perto do round-trip de rede que já acontece de qualquer forma.
+function buildTlsOptions(): import('node:tls').ConnectionOptions | undefined {
+  if (!env.AD_TLS_CA_FILE) return undefined;
+  return { ca: readFileSync(env.AD_TLS_CA_FILE, 'utf8') };
+}
+
 async function withClient<T>(fn: (client: Client) => Promise<T>): Promise<T> {
   if (!isAdConfigured()) {
     throw new AdNotConfiguredError();
   }
 
-  // `tlsOptions.rejectUnauthorized` é por-conexão (nunca um
-  // `NODE_TLS_REJECT_UNAUTHORIZED` global de processo) — ver o comentário
-  // de `AD_TLS_REJECT_UNAUTHORIZED` em src/config/env.ts. Default `true`,
-  // só desligado pelos testes de integração contra o `fake-ldap-server`.
-  const client = new Client({ url: env.AD_URL!, tlsOptions: { rejectUnauthorized: env.AD_TLS_REJECT_UNAUTHORIZED } });
+  const client = new Client({ url: env.AD_URL!, tlsOptions: buildTlsOptions() });
   try {
     await client.bind(env.AD_BIND_DN!, env.AD_BIND_PASSWORD!);
     return await fn(client);

@@ -1,5 +1,9 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Attribute, Change, Client, NoSuchAttributeError, TypeOrValueExistsError } from 'ldapts';
+import selfsigned from 'selfsigned';
 import { startFakeLdapServer } from '../../e2e/fake-ldap-server/server.mjs';
 import type { AdUser } from '../../src/services/ad.service.js';
 
@@ -18,6 +22,11 @@ import type { AdUser } from '../../src/services/ad.service.js';
 // livre", para nunca colidir com outra suíte/execução em paralelo).
 
 let fakeLdap: Awaited<ReturnType<typeof startFakeLdapServer>>;
+// Diretório temporário só para os arquivos PEM de CA que os testes
+// escrevem em disco (AD_TLS_CA_FILE exige um caminho de arquivo, não um
+// PEM inline) — nunca dentro do repo, sempre limpo no afterAll.
+let tmpDir: string;
+let trustedCaFile: string;
 
 async function importAdService() {
   vi.resetModules();
@@ -27,19 +36,25 @@ async function importAdService() {
   process.env.AD_BIND_PASSWORD = fakeLdap.bindPassword;
   process.env.AD_USERS_OU = fakeLdap.usersOu;
   process.env.AD_NETWORK_ACCESS_GROUP_DN = fakeLdap.networkAccessGroupDn;
-  // Único jeito de aceitar o certificado autoassinado do fake sem desligar
-  // verificação TLS globalmente no processo (ver o comentário desta
-  // variável em src/config/env.ts) — nunca usar isto contra um AD real.
-  process.env.AD_TLS_REJECT_UNAUTHORIZED = 'false';
+  // A verificação de certificado continua LIGADA (não existe — e nunca
+  // existiu, de propósito — uma variável para desligá-la, ver o comentário
+  // de `AD_TLS_CA_FILE` em src/config/env.ts): isto só ESTENDE a lista de
+  // CAs confiadas com a CA do fake (autoassinado, então o certificado dele
+  // é sua própria CA raiz — ver `caCert` no retorno de `startFakeLdapServer`).
+  process.env.AD_TLS_CA_FILE = trustedCaFile;
   return import('../../src/services/ad.service.js');
 }
 
 beforeAll(async () => {
   fakeLdap = await startFakeLdapServer();
+  tmpDir = mkdtempSync(join(tmpdir(), 'ad-fake-ldap-ca-'));
+  trustedCaFile = join(tmpDir, 'fake-ldap-ca.pem');
+  writeFileSync(trustedCaFile, fakeLdap.caCert, 'utf8');
 });
 
 afterAll(async () => {
   await fakeLdap.stop();
+  rmSync(tmpDir, { recursive: true, force: true });
 });
 
 afterEach(() => {
@@ -49,8 +64,22 @@ afterEach(() => {
   delete process.env.AD_BIND_PASSWORD;
   delete process.env.AD_USERS_OU;
   delete process.env.AD_NETWORK_ACCESS_GROUP_DN;
-  delete process.env.AD_TLS_REJECT_UNAUTHORIZED;
+  delete process.env.AD_TLS_CA_FILE;
 });
+
+// Cada `describe` abaixo sobe seu PRÓPRIO servidor por teste (ver comentário
+// junto de cada `beforeEach` local) para isolar o diretório mutado — mas
+// cada boot novo gera um par de chave/certificado NOVO (`selfsigned`, ver
+// server.mjs), então o arquivo de CA confiada precisa ser reescrito a cada
+// restart. Sem isto, só o PRIMEIRO teste de cada arquivo funcionaria — os
+// seguintes tentariam validar um certificado novo contra a CA do certificado
+// ANTERIOR e o handshake TLS falharia de verdade (exatamente o
+// comportamento que este arquivo existe para provar, só que no lugar errado).
+async function restartFakeLdap(): Promise<void> {
+  await fakeLdap.stop();
+  fakeLdap = await startFakeLdapServer();
+  writeFileSync(trustedCaFile, fakeLdap.caCert, 'utf8');
+}
 
 // O diretório do fake é recriado do zero (3 usuários semeados: jsilva
 // habilitado, mreis desabilitado, ptravado bloqueado — ver
@@ -59,10 +88,7 @@ afterEach(() => {
 // então cada `describe` sobe seu PRÓPRIO servidor (`beforeEach` local) para
 // não vazar estado de um teste para o outro.
 describe('ad.service — protocolo LDAP real (fake-ldap-server)', () => {
-  beforeEach(async () => {
-    await fakeLdap.stop();
-    fakeLdap = await startFakeLdapServer();
-  });
+  beforeEach(restartFakeLdap);
 
   it('searchUsers() sem query lista os 3 usuários semeados', async () => {
     const { searchUsers } = await importAdService();
@@ -294,39 +320,78 @@ describe('ad.service — protocolo LDAP real (fake-ldap-server)', () => {
 // que as duas garantias abaixo estavam sem NENHUM teste: os dois mutantes
 // SOBREVIVERAM com a suíte inteira verde (675/675).
 
-describe('AD_TLS_REJECT_UNAUTHORIZED — o default seguro', () => {
-  // MUTANTE QUE ISTO MATA: trocar `.default('true')` por `.default('false')`
-  // em src/config/env.ts. Sem este teste, a suíte ficava verde com a
-  // verificação de certificado da conexão LDAPS DESLIGADA por padrão — a
-  // conexão que carrega AD_BIND_DN/AD_BIND_PASSWORD contra o DC real
-  // aceitaria qualquer certificado, sem ninguém perceber.
-  it('sem a env var definida, o default é true E o client REAL de fato recusa um certificado autoassinado', async () => {
+// Ponto de design revisado: NÃO existe mais nenhuma variável que DESLIGUE a
+// verificação de certificado desta conexão (o antigo `AD_TLS_REJECT_UNAUTHORIZED`
+// foi removido por completo — ver docs/ad-module-plan.md e o histórico deste
+// arquivo). O que existe é `AD_TLS_CA_FILE`, que só ESTENDE a lista de CAs
+// confiadas. Os 3 testes abaixo prova que a verificação continua acontecendo
+// de VERDADE nesse novo desenho: (1) sem nenhuma CA extra configurada, um
+// certificado autoassinado desconhecido é recusado; (2) com uma CA extra que
+// NÃO é a do servidor, ainda é recusado — prova que é o CONTEÚDO da CA que
+// importa, não a mera presença do arquivo; (3) só com a CA certa o handshake
+// passa (já provado implicitamente por todo o resto deste arquivo via
+// `importAdService`, mas aqui de forma isolada e explícita).
+describe('AD_TLS_CA_FILE — a verificação de certificado é real, não um interruptor', () => {
+  // MUTANTE QUE ISTO MATA: `buildTlsOptions` (ad.service.ts) devolver
+  // `undefined` mesmo com `AD_TLS_CA_FILE` configurado (ex.: alguém apaga a
+  // linha `ca: readFileSync(...)` num refactor futuro). Sem este teste, a
+  // suíte inteira continuaria verde com a CA do fake sendo IGNORADA — só que
+  // aí TODOS os outros testes deste arquivo estariam de fato rodando com a
+  // verificação de certificado efetivamente desligada por baixo (o client
+  // aceitaria o certificado do fake por padrões de sistema seguirem
+  // vigentes só por coincidência nenhuma, na verdade recusaria — mas o
+  // ponto é que nenhum teste estaria PROVANDO que é a CA que faz a diferença).
+  it('sem AD_TLS_CA_FILE, o client REAL recusa o certificado autoassinado do fake (verificação padrão do SO)', async () => {
     vi.resetModules();
     process.env.AD_URL = fakeLdap.url;
     process.env.AD_BASE_DN = fakeLdap.baseDn;
     process.env.AD_BIND_DN = fakeLdap.bindDn;
     process.env.AD_BIND_PASSWORD = fakeLdap.bindPassword;
     process.env.AD_USERS_OU = fakeLdap.usersOu;
-    delete process.env.AD_TLS_REJECT_UNAUTHORIZED;
+    delete process.env.AD_TLS_CA_FILE;
 
     const { env } = await import('../../src/config/env.js');
-    expect(env.AD_TLS_REJECT_UNAUTHORIZED).toBe(true);
+    expect(env.AD_TLS_CA_FILE).toBeUndefined();
 
     // Não basta ler a config: prova o EFEITO no caminho de produção
     // (`withClient` é o mesmo para teste e para um AD real — não existe
-    // client separado). Com o default `true`, o handshake contra o fake
-    // (certificado autoassinado) precisa falhar de verdade.
+    // client separado). Sem CA extra, o handshake contra o fake
+    // (certificado autoassinado, desconhecido do sistema) precisa falhar.
     const service = await import('../../src/services/ad.service.js');
     await expect(service.searchUsers()).rejects.toThrow(/self-signed|self signed|certificate/i);
   });
 
-  // Fail-safe: só a string exata 'false' desliga. Qualquer outro valor
-  // (typo, 'FALSE', '0', vazio) precisa continuar VERIFICANDO.
-  it.each(['FALSE', '0', 'no', ''])('valor %o não desliga a verificação (só a string exata "false")', async (value) => {
+  it('com AD_TLS_CA_FILE apontando para uma CA DIFERENTE da do servidor, o client REAL ainda recusa', async () => {
+    // CA "decoy": um par autoassinado NOVO, sem nenhuma relação com o
+    // fake-ldap-server desta suíte. Se este teste passasse com QUALQUER
+    // arquivo de CA (em vez de recusar), provaria que `buildTlsOptions`
+    // vira, na prática, um "confie em qualquer coisa" — o mesmo problema
+    // que a variável antiga tinha, só que disfarçado atrás de um nome novo.
+    const decoy = await selfsigned.generate([{ name: 'commonName', value: 'ca-errada.test' }], {
+      keySize: 2048,
+      algorithm: 'sha256',
+    });
+    const decoyFile = join(tmpDir, 'ca-decoy.pem');
+    writeFileSync(decoyFile, decoy.cert, 'utf8');
+
     vi.resetModules();
-    process.env.AD_TLS_REJECT_UNAUTHORIZED = value;
-    const { env } = await import('../../src/config/env.js');
-    expect(env.AD_TLS_REJECT_UNAUTHORIZED).toBe(true);
+    process.env.AD_URL = fakeLdap.url;
+    process.env.AD_BASE_DN = fakeLdap.baseDn;
+    process.env.AD_BIND_DN = fakeLdap.bindDn;
+    process.env.AD_BIND_PASSWORD = fakeLdap.bindPassword;
+    process.env.AD_USERS_OU = fakeLdap.usersOu;
+    process.env.AD_TLS_CA_FILE = decoyFile;
+
+    const service = await import('../../src/services/ad.service.js');
+    await expect(service.searchUsers()).rejects.toThrow(/self-signed|self signed|certificate|unable to verify/i);
+  });
+
+  it('com AD_TLS_CA_FILE apontando para a CA certa, bind + search passam de verdade', async () => {
+    // A mesma configuração que `importAdService()` usa em todo o resto do
+    // arquivo — aqui isolada, para deixar explícito que o caminho feliz
+    // depende da CA bater, não de alguma verificação ter sumido.
+    const { searchUsers } = await importAdService();
+    await expect(searchUsers()).resolves.not.toHaveLength(0);
   });
 });
 
@@ -345,9 +410,11 @@ describe('fake-ldap-server — semântica de erro do ModifyRequest (RFC 4511 §4
   const memberDn = 'CN=jsilva,OU=Funcionarios,DC=fakeldap,DC=test';
 
   beforeEach(async () => {
-    await fakeLdap.stop();
-    fakeLdap = await startFakeLdapServer();
-    client = new Client({ url: fakeLdap.url, tlsOptions: { rejectUnauthorized: false } });
+    await restartFakeLdap();
+    // Mesma regra do resto do arquivo: a verificação de certificado
+    // continua ligada, só estendida com a CA do fake — nunca
+    // `rejectUnauthorized: false`.
+    client = new Client({ url: fakeLdap.url, tlsOptions: { ca: fakeLdap.caCert } });
     await client.bind(fakeLdap.bindDn, fakeLdap.bindPassword);
   });
 

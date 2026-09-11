@@ -761,6 +761,12 @@ export async function startFakeLdapServer(options = {}) {
   return {
     port,
     url: `ldaps://127.0.0.1:${port}`,
+    // Certificado (PEM) do próprio servidor — autoassinado, então ele é
+    // sua PRÓPRIA CA raiz. Quem conectar deve passar isto como
+    // `tlsOptions.ca`, nunca desligar a verificação de certificado (ver
+    // `AD_TLS_CA_FILE` em src/config/env.ts): a verificação continua
+    // acontecendo de verdade, só que contra esta CA em vez da CA do SO.
+    caCert: pems.cert,
     ...config,
     directory,
     async stop() {

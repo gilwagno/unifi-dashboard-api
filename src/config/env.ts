@@ -80,20 +80,19 @@ const envSchema = z.object({
   // POST/DELETE /ad/users/:username/network-access, não pelo resto do
   // módulo (CRUD de usuário/grupo/computador funciona sem ele).
   AD_NETWORK_ACCESS_GROUP_DN: z.string().min(1).optional(),
-  // Controla a verificação de certificado TLS APENAS da conexão LDAPS deste
-  // módulo (`tlsOptions.rejectUnauthorized` passado por conexão ao `Client`
-  // do `ldapts`) — nunca um `NODE_TLS_REJECT_UNAUTHORIZED` global de
-  // processo (o padrão que `UNIFI_ALLOW_SELF_SIGNED`/unifi.service.ts usa
-  // e que o plano da Onda 3, subtarefa 6, pediu explicitamente para NÃO
-  // repetir aqui: afetaria TODA conexão TLS do processo, não só o AD).
-  // Default `true` (verifica de verdade, como qualquer LDAPS de produção
-  // contra um DC real) — só existe pra permitir os testes de integração
-  // (`tests/integration/ad-fake-ldap.test.ts`) apontarem pro
-  // `e2e/fake-ldap-server`, que serve um certificado autoassinado.
-  AD_TLS_REJECT_UNAUTHORIZED: z
-    .string()
-    .default('true')
-    .transform((v) => v !== 'false'),
+  // Caminho para um arquivo PEM com uma CA adicional a confiar na conexão
+  // LDAPS deste módulo (além das CAs do sistema operacional) — cenário real
+  // de AD corporativo com PKI interna própria, cujo certificado do DC não é
+  // assinado por nenhuma CA pública. NÃO é um interruptor de verificação:
+  // não existe (e nunca existiu, de propósito) um jeito de desligar a
+  // verificação de certificado desta conexão — só de ESTENDER quem é
+  // confiável. Sem esta variável, a verificação usa só as CAs padrão do
+  // Node (o comportamento correto contra um DC com certificado emitido por
+  // uma CA pública/AD CS registrada no sistema). Os testes de integração
+  // (`tests/integration/ad-fake-ldap.test.ts`) usam isto para apontar para
+  // o certificado autoassinado do `e2e/fake-ldap-server` — a verificação
+  // continua acontecendo de verdade, só que contra essa CA de teste.
+  AD_TLS_CA_FILE: z.string().min(1).optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -104,16 +103,5 @@ if (!parsed.success) {
   process.exit(1);
 }
 
-// Um `.env` de produção com esta flag desligada aceita QUALQUER certificado
-// na conexão LDAPS que carrega AD_BIND_DN/AD_BIND_PASSWORD — o valor existe
-// só para os testes de integração contra o e2e/fake-ldap-server. Nunca deve
-// passar despercebido num boot real.
-if (parsed.data.AD_TLS_REJECT_UNAUTHORIZED === false) {
-  console.warn(
-    '⚠️  AD_TLS_REJECT_UNAUTHORIZED=false — a verificação de certificado TLS da conexão LDAPS ' +
-      'está DESLIGADA. Use isto apenas nos testes de integração (e2e/fake-ldap-server), nunca ' +
-      'contra um Active Directory real.',
-  );
-}
 
 export const env = parsed.data;
