@@ -6,9 +6,20 @@ import { buildNetworkStatusResolver } from './printer-network-status.service.js'
 // Poller SNMP de consumíveis + contador de páginas (Onda 2, subtarefa 5).
 //
 // Modelado em bandwidth-history.service.ts: estado em memória a nível de
-// módulo, `setInterval` unref()'d iniciado no import do módulo, sem coleta
-// imediata no boot, e falha pontual logada e ignorada sem derrubar o
-// processo nem o poller. Diferença: aqui não guardamos série temporal, só a
+// módulo, `setInterval` unref()'d iniciado no import do módulo, e falha
+// pontual logada e ignorada sem derrubar o processo nem o poller.
+//
+// ATENÇÃO (revisão crítica): este bloco dizia também "sem coleta imediata no
+// boot", copiado de bandwidth-history.service.ts. Deixou de ser verdade —
+// ver `collectOnBoot` no fim do arquivo, que src/server.ts chama DEPOIS do
+// listen. A restrição original (não gerar tráfego de rede antes de o app
+// subir, e não gerar tráfego nenhum só por importar o módulo) continua
+// valendo e é o que a forma dessa função preserva; o que mudou é que a
+// primeira leitura não espera mais o ciclo de 15 min. O poller de banda
+// segue sem coleta no boot, de propósito (assimetria explicada em
+// `collectOnBoot`).
+//
+// Diferença para o de banda: aqui não guardamos série temporal, só a
 // ÚLTIMA leitura bem-sucedida por impressora (`getLastReading`), que é o que
 // `GET /printers/:id/consumables` (subtarefa 6) vai expor.
 //
@@ -188,11 +199,18 @@ export interface PrinterSupply {
   levelPercent: number | null;
   // De onde `levelPercent` veio. `'standard'` = calculado do
   // prtMarkerSuppliesLevel/MaxCapacity da MIB padrão (o caminho de todas as
-  // Brother e o default de qualquer impressora nova). `'vendor-private'` = a
-  // MIB padrão desta linha era inutilizável e o valor veio da MIB privada do
-  // fabricante, cruzada pelo número de série do cartucho (ver o bloco dos
-  // OIDs `samsungSupply*`). Nunca é uma preferência de fonte: só há
-  // substituição quando a leitura padrão é comprovadamente lixo.
+  // Brother e o default de qualquer impressora nova). `'vendor-private'` = o
+  // valor veio da MIB privada do fabricante, cruzada pelo número de série do
+  // cartucho (ver o bloco dos OIDs `samsungSupply*`).
+  //
+  // CORREÇÃO DE COMENTÁRIO (revisão crítica): a versão anterior dizia "a MIB
+  // padrão desta linha era inutilizável" e "só há substituição quando a
+  // leitura padrão é comprovadamente lixo". É falso como descrição do código:
+  // nada aqui avalia a qualidade da leitura padrão. A regra real é
+  // POSICIONAL-INDEPENDENTE e incondicional — se o serial do cartucho casa
+  // entre a tabela padrão e a privada, o valor privado ganha, mesmo que o
+  // padrão estivesse coerente. É por isso que este campo existe: sem ele não
+  // dá pra saber, olhando a leitura, qual das duas fontes produziu o número.
   levelSource: 'standard' | 'vendor-private';
 }
 
@@ -516,6 +534,25 @@ async function walkColumn(session: SnmpSession, baseOid: string): Promise<Map<st
 // nas duas HPs), ou serial repetido em duas linhas (ambíguo, não há como
 // escolher). Sem esse filtro, um sentinela viraria um percentual inventado —
 // exatamente o que este projeto trata como o pior tipo de erro.
+// Normaliza um número de série de cartucho vindo da MIB privada para o MESMO
+// formato que `SUPPLY_SERIAL_PATTERN` produz no lado da MIB padrão.
+//
+// Achado da revisão crítica: o lado padrão já descarta padding de espaço E de
+// caractere de controle depois do serial (a cauda `[\s\x00-\x1f]*$` da regex,
+// endurecida na subtarefa 19), mas aqui havia só `.trim()` — e
+// `String.prototype.trim` NÃO remove `\x00`. Um serial com padding NUL na
+// coluna privada (a mesma classe de padding de que o projeto já se blindou do
+// lado padrão, neste mesmo firmware) nunca casaria com o serial do lado
+// padrão: o cruzamento falharia em silêncio e o toner cheio voltaria a
+// aparecer como o 0% falso da MIB padrão, sem erro em lugar nenhum — a
+// correção inteira desta PR desligada sem aviso. Os dois lados precisam
+// normalizar igual, ou não existe cruzamento confiável.
+function normalizeSupplySerial(raw: string | null): string | null {
+  if (raw === null) return null;
+  const cleaned = raw.replace(/^[\s\x00-\x1f]+/, '').replace(/[\s\x00-\x1f]+$/, '');
+  return cleaned.length > 0 ? cleaned : null;
+}
+
 export function buildVendorPercentBySerial(
   serials: Map<string, Varbind> | null,
   remaining: Map<string, Varbind> | null,
@@ -525,8 +562,8 @@ export function buildVendorPercentBySerial(
 
   const ambiguous = new Set<string>();
   for (const [index, serialVarbind] of serials) {
-    const serial = asString(serialVarbind)?.trim();
-    if (!serial) continue;
+    const serial = normalizeSupplySerial(asString(serialVarbind) ?? null);
+    if (serial === null) continue;
 
     const percent = asNumber(remaining.get(index));
     if (percent === null || !Number.isInteger(percent) || percent < 0 || percent > 100) continue;
@@ -894,6 +931,18 @@ function startSnmpHistoryCleanupJob(): void {
 // Não é await: subir o servidor não pode ficar esperando resposta de
 // impressora (uma desligada custa timeout). `collectAllReadings` já trata
 // e loga cada falha por impressora sem propagar.
+//
+// Por que o poller de BANDA continua sem equivalente (assimetria
+// deliberada, confirmada na revisão crítica): lá o buffer em memória se
+// reconstrói sozinho em 5 minutos e existe `bandwidth_samples` no SQLite
+// cobrindo o longo prazo, então um restart não deixa a tela mentindo — só
+// atrasa. Aqui `lastReadings` é a ÚNICA fonte de `/consumables`, e enquanto
+// ele está vazio a tela afirma "nunca coletado" para uma impressora que
+// está ligada e respondendo: não é ausência de dado, é uma afirmação
+// errada. A restrição que motivou a decisão original (subtarefa 15) foi
+// preservada, não revogada — nenhum tráfego sai antes do `listen`, e
+// importar este módulo (teste, script) continua não gerando chamada de
+// rede nenhuma, porque quem dispara é o entrypoint, não o import.
 export function collectOnBoot(): void {
   void collectAllReadings();
 }

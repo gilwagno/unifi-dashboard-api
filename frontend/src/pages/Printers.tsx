@@ -921,14 +921,24 @@ export function Printers() {
 
   return (
     <Layout title="Manutenção">
+      {/* `role` aqui não é enfeite de acessibilidade: é o que torna a
+          distinção ERRO × aviso verificável. A dupla escrita do apelido
+          (`submitAlias`) promete relatar uma falha na segunda metade como
+          sucesso PARCIAL e NUNCA como sucesso — sem um papel distinto, a
+          mesma mensagem no balão neutro de sucesso passava no teste, porque
+          só o TEXTO era verificado (mutante `setError` -> `setNotice`
+          executado na revisão crítica: suíte 50/50 verde). */}
       {error && (
-        <div className="mb-4 rounded-lg border border-[oklch(88%_0.06_25)] bg-[oklch(97%_0.03_25)] px-4 py-3 text-sm text-[oklch(40%_0.15_25)]">
+        <div
+          role="alert"
+          className="mb-4 rounded-lg border border-[oklch(88%_0.06_25)] bg-[oklch(97%_0.03_25)] px-4 py-3 text-sm text-[oklch(40%_0.15_25)]"
+        >
           {error}
         </div>
       )}
 
       {notice && (
-        <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+        <div role="status" className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
           {notice}
         </div>
       )}

@@ -246,6 +246,45 @@ describe('Printers page', () => {
     expect(screen.getByText('ADF Rubber Pad')).toBeInTheDocument();
   });
 
+  // Achado da revisão crítica: o medidor compacto existe pra mostrar "de
+  // relance, com cor, se precisa trocar" — mas o realce de toner BAIXO não
+  // tinha teste nenhum. Mutante executado (`const isLow = false`): suíte
+  // 50/50 verde, ou seja, dava pra apagar o único sinal visual de alerta da
+  // tela de lista sem nenhuma linha vermelha. Como a diferença é só de
+  // classe CSS (anel e texto avermelhados), o teste compara o suprimento
+  // 'low' com um 'ok' na MESMA leitura: exige que sejam distinguíveis, sem
+  // cravar o valor exato da cor.
+  it('destaca visualmente no medidor compacto o suprimento em nível baixo, e só ele', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    vi.mocked(api.getPrinterConsumables).mockResolvedValue({
+      printerId: 'p1',
+      collectedAt: '2026-09-10T16:44:02.000Z',
+      pageCount: 59934,
+      lowThresholdPct: 15,
+      supplies: [
+        // Os dois nomes caem no MESMO preenchimento neutro
+        // (`NEUTRAL_SUPPLY_FILL`) de propósito: se um fosse "Black Toner", a
+        // cor do tubo já os diferenciaria e o teste passaria mesmo com o
+        // realce de "baixo" apagado — foi assim que a primeira versão deste
+        // teste deixou o mutante `isLow = false` sobreviver.
+        { name: 'Fuser Life', serialNumber: null, levelPercent: 4, status: 'low' },
+        { name: 'Transfer Roller', serialNumber: null, levelPercent: 80, status: 'ok' },
+      ],
+    });
+
+    renderPrinters();
+    await screen.findByText('HPLaserMFP135w');
+
+    const baixo = await screen.findByTitle('Fuser Life: 4%');
+    const normal = await screen.findByTitle('Transfer Roller: 80%');
+
+    // Normaliza tudo que é PERCENTUAL (altura do preenchimento e rótulo) para
+    // que a única diferença que possa sobrar seja o realce de "baixo".
+    const semPercentual = (el: HTMLElement) => el.innerHTML.replace(/\d+(\.\d+)?%/g, 'N%');
+
+    expect(semPercentual(baixo)).not.toEqual(semPercentual(normal));
+  });
+
   // Achado real do usuário testando ao vivo: o poller SNMP do backend
   // coleta a cada 15min, e a lista de impressoras já recarrega sozinha a
   // cada 60s (usePolling) — mas o medidor de toner da linha ficava preso no
@@ -680,6 +719,35 @@ describe('Printers page', () => {
 
       expect(await screen.findByText(/NÃO foi alterado/)).toBeInTheDocument();
       expect(screen.queryByText(/no UniFi e no cadastro local/)).not.toBeInTheDocument();
+      // Achado da revisão crítica: sem esta linha o teste verificava só o
+      // TEXTO, e trocar `setError` por `setNotice` (mutante executado) deixava
+      // a suíte 50/50 verde — a falha parcial apareceria no balão NEUTRO de
+      // sucesso, que é exatamente o "dizer atualizado com metade aplicada"
+      // que este teste existe pra impedir.
+      expect(within(screen.getByRole('alert')).getByText(/NÃO foi alterado/)).toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    // Contrapeso do caso acima: o sucesso REAL tem que continuar caindo no
+    // balão neutro, não no de erro. Sem ele, trocar `setNotice` por
+    // `setError` no caminho feliz também passaria.
+    it('sucesso completo nas duas escritas aparece como aviso neutro, nunca como erro', async () => {
+      vi.mocked(api.listPrinters).mockResolvedValue([printerComApelidoDivergente]);
+      vi.mocked(api.setClientAlias).mockResolvedValue({ ok: true });
+      vi.mocked(api.updatePrinter).mockResolvedValue({ ...printerComApelidoDivergente });
+
+      const user = userEvent.setup();
+      renderPrinters();
+      const card = (await screen.findByText('HPLaserMFP135w')).closest('div.overflow-hidden') as HTMLElement;
+
+      await user.click(within(card).getByRole('button', { name: 'Renomear apelido no UniFi' }));
+      const input = within(card).getByDisplayValue('HP Laser MFP 135w (Comercial)');
+      await user.clear(input);
+      await user.type(input, 'Impressora Financeiro');
+      await user.click(within(card).getByRole('button', { name: 'Salvar' }));
+
+      expect(await screen.findByRole('status')).toHaveTextContent(/no UniFi e no cadastro local/);
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     });
 
     it('não altera nada se o usuário cancelar a confirmação', async () => {
@@ -713,6 +781,28 @@ describe('Printers page', () => {
     // valor que pode existir e ser diferente, sem nunca tê-lo lido.
     it('não oferece igualar quando o status de rede é desconhecido', async () => {
       vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_UNKNOWN]);
+      renderPrinters();
+      const card = (await screen.findByText(PRINTER_UNKNOWN.name)).closest('div.overflow-hidden') as HTMLElement;
+      expect(within(card).queryByRole('button', { name: /Não confere/ })).not.toBeInTheDocument();
+    });
+
+    // Achado da revisão crítica: o teste acima NÃO trava a guarda
+    // `source !== 'unknown'` — o fixture PRINTER_UNKNOWN também tem
+    // `alias: null`, então a cláusula seguinte já o satisfaz sozinha.
+    // Mutante executado (`source !== 'unknown'` -> `true`): suíte 50/50
+    // verde. Hoje o backend sempre emite `alias: null` junto de
+    // `source: 'unknown'` (constante UNKNOWN_NETWORK_STATUS), então a guarda
+    // é defesa em profundidade — e é justamente por isso que precisa de um
+    // caso que a exercite sozinha: no dia em que um apelido sobreviver a uma
+    // leitura degradada, o atalho proporia SOBRESCREVER um valor que nunca
+    // chegou a ser lido.
+    it('não oferece igualar com status desconhecido mesmo que venha um apelido junto', async () => {
+      vi.mocked(api.listPrinters).mockResolvedValue([
+        {
+          ...PRINTER_UNKNOWN,
+          network: { ...PRINTER_UNKNOWN.network, source: 'unknown', alias: 'Um apelido qualquer' },
+        },
+      ]);
       renderPrinters();
       const card = (await screen.findByText(PRINTER_UNKNOWN.name)).closest('div.overflow-hidden') as HTMLElement;
       expect(within(card).queryByRole('button', { name: /Não confere/ })).not.toBeInTheDocument();

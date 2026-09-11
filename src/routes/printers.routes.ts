@@ -404,10 +404,22 @@ function statusFromPercent(percent: number, thresholdPct: number | null): Consum
 function resolveSupplyStatus(supply: PrinterSupply, thresholdPct: number | null): ConsumableSupplyStatus {
   // Quando `levelPercent` veio da MIB privada do fabricante (ver
   // `levelSource`/`samsungSupply*` em printer-snmp.service.ts), o status
-  // deriva DELE e o sentinela da MIB padrão não tem voto: essa substituição
-  // só acontece porque a leitura padrão é lixo comprovado nesse firmware, e
-  // deixar o sentinela decidir aqui faria o mesmo suprimento aparecer como
-  // "100%" no medidor e "Desconhecido" no selo, na mesma tela.
+  // deriva DELE e o sentinela da MIB padrão não tem voto — senão o mesmo
+  // suprimento apareceria como "100%" no medidor e "Desconhecido" no selo,
+  // na mesma tela.
+  //
+  // CORREÇÃO DE COMENTÁRIO (revisão crítica): a versão anterior deste bloco
+  // afirmava que a substituição "só acontece porque a leitura padrão é lixo
+  // comprovado nesse firmware". Isso descreve a MOTIVAÇÃO da mudança, não o
+  // que o código faz: o poller nunca avalia se a leitura padrão é confiável —
+  // basta o serial do cartucho casar entre as duas tabelas para a MIB privada
+  // ganhar, inclusive numa impressora cuja MIB padrão esteja perfeita. A
+  // regra em vigor é "quando o fabricante responde pelo serial, ele manda",
+  // e é ela que este ramo implementa. Comportamento mantido de propósito:
+  // não existe critério objetivo de "leitura padrão é lixo" (o 0% falso das
+  // HPs se apresenta como leitura VÁLIDA, com unit=19/maxCapacity=100 — foi
+  // exatamente isso que originou o bug), e a coluna privada é a mesma fonte
+  // que o painel do próprio fabricante consome.
   if (supply.levelSource === 'vendor-private' && supply.levelPercent !== null) {
     return statusFromPercent(supply.levelPercent, thresholdPct);
   }

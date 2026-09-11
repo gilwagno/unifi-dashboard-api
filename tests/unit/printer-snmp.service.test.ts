@@ -206,6 +206,7 @@ const {
   runSnmpHistoryCleanup,
   parseSupplyDescription,
   supplyDisplayName,
+  buildVendorPercentBySerial,
 } = await import('../../src/services/printer-snmp.service.js');
 
 // --- Dados de referência (colhidos das impressoras reais) ----------------
@@ -543,6 +544,29 @@ describe('poller SNMP — coleta', () => {
   // home.json do próprio painel reportavam 100. Os números aqui são os
   // valores reais colhidos da `.89`.
   describe('MIB privada do fabricante quando a prtMarkerSuppliesLevel padrão é lixo (2 HPs reais)', () => {
+    // Padding NUL real, escrito sem byte cru no fonte (o arquivo segue ASCII-safe).
+    const NUL = String.fromCharCode(0);
+
+    // Teste DIRETO da função exportada: a guarda de serial vazio não é
+    // alcançável pelo caminho de coleta (uma description vazia do lado padrão
+    // já vira `serialNumber: null` e nunca consulta o mapa), então testá-la só
+    // pelo `collectAllReadings` deixaria a guarda viva sob mutação — provado
+    // rodando o mutante `return cleaned;` (sem a guarda) com a suíte inteira
+    // verde. Ela é defesa em profundidade: o dia em que o lado padrão passar a
+    // devolver string vazia em vez de `null`, uma chave `''` no mapa casaria
+    // com QUALQUER suprimento sem serial e espalharia o percentual de um
+    // cartucho para outro.
+    it.each([
+      ['vazio', ''],
+      ['só espaço', '   '],
+      ['só caractere de controle', NUL + NUL],
+    ])('buildVendorPercentBySerial não indexa linha com serial %s', (_label, bruto) => {
+      const serials = new Map([['1.1', { oid: 'x', type: 4, value: Buffer.from(bruto) } as never]]);
+      const remaining = new Map([['1.1', { oid: 'y', type: 2, value: 100 } as never]]);
+
+      expect(buildVendorPercentBySerial(serials, remaining).size).toBe(0);
+    });
+
     function hpComTonerCheio(): FakeDevice['entries'] {
       return {
         [OID.sysDescr]: Buffer.from('HP Laser MFP 135w'),
@@ -650,6 +674,58 @@ describe('poller SNMP — coleta', () => {
       await collectAllReadings();
 
       const toner = getLastReading('p-hp-serial-duplicado')!.supplies[0];
+      expect(toner.levelSource).toBe('standard');
+      expect(toner.levelPercent).toBe(0);
+    });
+
+    // Achado da revisão crítica desta PR: o lado PADRÃO já descarta padding de
+    // caractere de controle depois do serial (cauda `[\s\x00-\x1f]*$` da
+    // SUPPLY_SERIAL_PATTERN, endurecida na subtarefa 19), mas o lado privado
+    // só fazia `.trim()` — que não remove `\x00`. Com padding NUL só de um dos
+    // lados, os dois seriais nunca casavam, o cruzamento falhava EM SILÊNCIO e
+    // o toner cheio voltava a aparecer como o 0% falso da MIB padrão. Sem erro
+    // em lugar nenhum: a correção inteira desta PR desligada sem aviso.
+    it.each([
+      ['NUL no lado privado', 'CRUM-210729A5BB3' + NUL + NUL, 'Black Toner S/N:CRUM-210729A5BB3'],
+      ['NUL no lado padrao', 'CRUM-210729A5BB3', 'Black Toner S/N:CRUM-210729A5BB3' + NUL],
+      ['espaço nos dois', '  CRUM-210729A5BB3 ', 'Black Toner S/N:CRUM-210729A5BB3  '],
+    ])(
+      'cruza pelo serial mesmo com padding (%s) — os dois lados normalizam igual',
+      async (label, vendorSerial, standardDescription) => {
+        const entries = hpComTonerCheio();
+        entries[`${OID.vendorSerial}.1.1`] = Buffer.from(vendorSerial);
+        entries[`${OID.description}.1.1`] = Buffer.from(standardDescription);
+        const id = `p-hp-padding-${label.replace(/\s/g, '-')}`;
+        registeredPrinters = [printer({ id })];
+        devices.set('10.0.0.10', { entries, noSuchOidStyle: 'v2c' });
+
+        await collectAllReadings();
+
+        const toner = getLastReading(id)!.supplies[0];
+        expect(toner.levelSource).toBe('vendor-private');
+        expect(toner.levelPercent).toBe(100);
+      },
+    );
+
+    // Serial privado vazio/só-padding não identifica cartucho nenhum. Sem esta
+    // guarda ele entra no mapa como chave `''` — inofensivo hoje só porque o
+    // lado padrão também devolve `null` para description vazia, mas é uma
+    // coincidência entre dois arquivos, não uma invariante travada.
+    it.each([
+      ['vazio', ''],
+      ['só espaço', '   '],
+      ['so caractere de controle', NUL + NUL],
+    ])('ignora linha privada com serial %s em vez de indexá-la por chave vazia', async (_l, bruto) => {
+      const entries = hpComTonerCheio();
+      entries[`${OID.vendorSerial}.1.1`] = Buffer.from(bruto);
+      entries[`${OID.description}.1.1`] = Buffer.from('   ');
+      const id = `p-hp-serial-vazio-${_l.replace(/\s/g, '-')}`;
+      registeredPrinters = [printer({ id })];
+      devices.set('10.0.0.10', { entries, noSuchOidStyle: 'v2c' });
+
+      await collectAllReadings();
+
+      const toner = getLastReading(id)!.supplies[0];
       expect(toner.levelSource).toBe('standard');
       expect(toner.levelPercent).toBe(0);
     });

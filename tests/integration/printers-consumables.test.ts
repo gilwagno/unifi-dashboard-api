@@ -560,4 +560,97 @@ describe('GET /printers/:id/consumables', () => {
 
     await app.close();
   });
+
+  // Achado da revisão crítica da PR do toner: a substituição pela MIB privada
+  // do fabricante (`levelSource: 'vendor-private'`) tinha teste do lado do
+  // POLLER, mas NENHUM do lado da rota — apagar o ramo inteiro de
+  // `resolveSupplyStatus` deixava a suíte 563/563 verde (mutante executado e
+  // sobrevivente). É justamente o ramo que existe para impedir o sintoma que
+  // originou a PR: o medidor mostrando "100%" e o selo, na MESMA tela,
+  // dizendo "Desconhecido"/"Sem medição" — porque o percentual vem do valor
+  // do fabricante e o status vinha do sentinela da MIB padrão.
+  describe('status derivado da MIB privada quando ela substituiu o nível padrão', () => {
+    function vendorSupply(overrides: Record<string, unknown> = {}) {
+      return {
+        index: '1.1',
+        description: 'Black Toner',
+        serialNumber: 'CRUM-210729A5BB3',
+        type: 3,
+        typeLabel: 'toner',
+        unit: 19,
+        unitLabel: 'percent',
+        maxCapacity: { status: 'ok', value: 100 },
+        // Sentinela na MIB PADRÃO: sozinho, mandaria o selo para 'unknown'.
+        level: { status: 'unknown' },
+        levelPercent: 100,
+        levelSource: 'vendor-private',
+        ...overrides,
+      };
+    }
+
+    it.each([
+      ['sentinela unknown na MIB padrão', { level: { status: 'unknown' } }],
+      ['sentinela partial na MIB padrão', { level: { status: 'partial' } }],
+      ['erro de leitura na MIB padrão', { level: { status: 'error' } }],
+      ['OID padrão inexistente', { level: { status: 'unsupported' } }],
+    ])('%s não contamina o selo: 100%% no medidor tem que ser "ok" no selo', async (_label, over) => {
+      const { app, token } = await authedApp();
+      const auth = { authorization: `Bearer ${token}` };
+      const printer = await createPrinter(app, auth, { maintenance: { consumableLowThresholdPct: 20 } });
+
+      getLastReadingMock.mockReturnValueOnce(
+        buildReading({ printerId: printer.id, supplies: [vendorSupply(over)] as never }),
+      );
+
+      const res = await app.inject({ method: 'GET', url: `/printers/${printer.id}/consumables`, headers: auth });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().supplies).toEqual([
+        { name: 'Black Toner', serialNumber: 'CRUM-210729A5BB3', levelPercent: 100, status: 'ok' },
+      ]);
+
+      await app.close();
+    });
+
+    it('o threshold continua valendo em cima do valor do fabricante (5% com limite 20 é "low")', async () => {
+      const { app, token } = await authedApp();
+      const auth = { authorization: `Bearer ${token}` };
+      const printer = await createPrinter(app, auth, { maintenance: { consumableLowThresholdPct: 20 } });
+
+      getLastReadingMock.mockReturnValueOnce(
+        buildReading({
+          printerId: printer.id,
+          supplies: [vendorSupply({ levelPercent: 5, level: { status: 'ok', value: 0 } })] as never,
+        }),
+      );
+
+      const res = await app.inject({ method: 'GET', url: `/printers/${printer.id}/consumables`, headers: auth });
+
+      expect(res.json().supplies[0].status).toBe('low');
+
+      await app.close();
+    });
+
+    // O contrapeso: sem substituição, o sentinela da MIB padrão TEM que
+    // continuar mandando. Sem este caso, trocar a condição por um `true`
+    // constante também passaria.
+    it('sem substituição (levelSource standard) o sentinela padrão continua mandando no selo', async () => {
+      const { app, token } = await authedApp();
+      const auth = { authorization: `Bearer ${token}` };
+      const printer = await createPrinter(app, auth, { maintenance: { consumableLowThresholdPct: 20 } });
+
+      getLastReadingMock.mockReturnValueOnce(
+        buildReading({
+          printerId: printer.id,
+          supplies: [vendorSupply({ levelSource: 'standard', level: { status: 'unknown' } })] as never,
+        }),
+      );
+
+      const res = await app.inject({ method: 'GET', url: `/printers/${printer.id}/consumables`, headers: auth });
+
+      expect(res.json().supplies[0].status).toBe('unknown');
+
+      await app.close();
+    });
+  });
 });
