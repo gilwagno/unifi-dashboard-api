@@ -1252,11 +1252,10 @@ coisas ao mesmo tempo e mascarava a lacuna real.
 mutação escrita em mensagem de commit não substitui rodar o mutante — se o crítico não reexecutou,
 trate como não verificado.
 
-## PR #30 (impressoras) — revisão crítica CONCLUÍDA, 47/50, aprovada (2026-09-11)
+## PR #30 (impressoras) — revisão crítica CONCLUÍDA, 47/50, MERGEADA em 2026-09-11 (squash `5f9f9f2`)
 
 Branch `fix/printers-toner-level-vendor-mib`, commits `97b1d19`/`eb3379a`/`811f053`/`3466367`/
-`c05b15e` + `28ad06c` (as correções da revisão). **Aprovada para merge; PR ainda aberta nesta
-data.** A revisão chegou a ser interrompida no meio por pedido do usuário e depois retomada até
+`c05b15e` + `28ad06c` (as correções da revisão). **Mergeada em `master` em 2026-09-11** (squash `5f9f9f2`, branch remota deletada). A revisão chegou a ser interrompida no meio por pedido do usuário e depois retomada até
 o fim — decisão explícita dele de não fechar sem revisar frontend e e2e, que se mostrou certa:
 **3 dos 6 achados estavam justamente no frontend**, e os três sobreviveram aos mutantes com a
 suíte de frontend verde.

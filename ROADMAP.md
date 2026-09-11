@@ -39,10 +39,8 @@
 > a troca de senha foi implementada e aplicada ao vivo nas duas HPs reais, encerrando a
 > vulnerabilidade de senha de fábrica). Nenhuma delas bloqueia mais nada.
 
-- **PR #30 aberta, revisada e APROVADA (47/50), aguardando merge**
-  (`fix/printers-toner-level-vendor-mib`) — toner das HPs em 0% com cartucho cheio, coleta
-  SNMP no boot, layout do card, 2 specs de e2e, mais as correções dos 6 achados da revisão.
-  Ver o registro completo no `CLAUDE.md`.
+> A PR #30 (toner das HPs em 0%) foi **mergeada em 2026-09-11** (squash `5f9f9f2`) — saiu
+> desta lista.
 - **Variáveis `AD_*` não configuradas no `.env` real** — documentadas no `.env.example`, mas
   ausentes. Sem elas o módulo de AD responde 503 por desenho (o resto do app funciona
   normal), e **nenhuma linha do módulo jamais falou com um Active Directory de verdade**.
