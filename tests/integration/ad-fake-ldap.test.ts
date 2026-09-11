@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Attribute, Change, Client, NoSuchAttributeError, TypeOrValueExistsError } from 'ldapts';
 import { startFakeLdapServer } from '../../e2e/fake-ldap-server/server.mjs';
 import type { AdUser } from '../../src/services/ad.service.js';
 
@@ -284,6 +285,94 @@ describe('ad.service — protocolo LDAP real (fake-ldap-server)', () => {
     vi.resetModules();
     const fresh = await import('../../src/services/ad.service.js');
     await expect(fresh.searchUsers()).rejects.toBeInstanceOf(fresh.AdRequestError);
+  });
+});
+
+// --- Achados da verificação (Onda 3, subtarefa 6) ------------------------
+//
+// Estes dois blocos existem porque a revisão às cegas provou por MUTAÇÃO
+// que as duas garantias abaixo estavam sem NENHUM teste: os dois mutantes
+// SOBREVIVERAM com a suíte inteira verde (675/675).
+
+describe('AD_TLS_REJECT_UNAUTHORIZED — o default seguro', () => {
+  // MUTANTE QUE ISTO MATA: trocar `.default('true')` por `.default('false')`
+  // em src/config/env.ts. Sem este teste, a suíte ficava verde com a
+  // verificação de certificado da conexão LDAPS DESLIGADA por padrão — a
+  // conexão que carrega AD_BIND_DN/AD_BIND_PASSWORD contra o DC real
+  // aceitaria qualquer certificado, sem ninguém perceber.
+  it('sem a env var definida, o default é true E o client REAL de fato recusa um certificado autoassinado', async () => {
+    vi.resetModules();
+    process.env.AD_URL = fakeLdap.url;
+    process.env.AD_BASE_DN = fakeLdap.baseDn;
+    process.env.AD_BIND_DN = fakeLdap.bindDn;
+    process.env.AD_BIND_PASSWORD = fakeLdap.bindPassword;
+    process.env.AD_USERS_OU = fakeLdap.usersOu;
+    delete process.env.AD_TLS_REJECT_UNAUTHORIZED;
+
+    const { env } = await import('../../src/config/env.js');
+    expect(env.AD_TLS_REJECT_UNAUTHORIZED).toBe(true);
+
+    // Não basta ler a config: prova o EFEITO no caminho de produção
+    // (`withClient` é o mesmo para teste e para um AD real — não existe
+    // client separado). Com o default `true`, o handshake contra o fake
+    // (certificado autoassinado) precisa falhar de verdade.
+    const service = await import('../../src/services/ad.service.js');
+    await expect(service.searchUsers()).rejects.toThrow(/self-signed|self signed|certificate/i);
+  });
+
+  // Fail-safe: só a string exata 'false' desliga. Qualquer outro valor
+  // (typo, 'FALSE', '0', vazio) precisa continuar VERIFICANDO.
+  it.each(['FALSE', '0', 'no', ''])('valor %o não desliga a verificação (só a string exata "false")', async (value) => {
+    vi.resetModules();
+    process.env.AD_TLS_REJECT_UNAUTHORIZED = value;
+    const { env } = await import('../../src/config/env.js');
+    expect(env.AD_TLS_REJECT_UNAUTHORIZED).toBe(true);
+  });
+});
+
+describe('fake-ldap-server — semântica de erro do ModifyRequest (RFC 4511 §4.6)', () => {
+  // MUTANTE QUE ISTO MATA: remover o "Passo 1: validar TODOS os changes"
+  // de handleModify (e2e/fake-ldap-server/server.mjs). Sem este teste o
+  // fake ficava GENEROSO DEMAIS — aceitava calado um `add` de valor já
+  // existente e um `delete` de valor ausente. Consequência real: os `catch`
+  // de TypeOrValueExistsError/NoSuchAttributeError em
+  // grantNetworkAccess/revokeNetworkAccess (o achado bloqueante da revisão
+  // crítica da PR #25) NUNCA eram exercitados, apesar de o teste de
+  // idempotência acima afirmar em comentário que eram — o servidor jamais
+  // chegava a recusar nada.
+  let client: Client;
+  const groupDn = () => fakeLdap.networkAccessGroupDn;
+  const memberDn = 'CN=jsilva,OU=Funcionarios,DC=fakeldap,DC=test';
+
+  beforeEach(async () => {
+    await fakeLdap.stop();
+    fakeLdap = await startFakeLdapServer();
+    client = new Client({ url: fakeLdap.url, tlsOptions: { rejectUnauthorized: false } });
+    await client.bind(fakeLdap.bindDn, fakeLdap.bindPassword);
+  });
+
+  afterEach(async () => {
+    await client.unbind().catch(() => undefined);
+  });
+
+  it('add de um valor que JÁ existe -> TypeOrValueExistsError (resultCode 20) de verdade', async () => {
+    const change = new Change({ operation: 'add', modification: new Attribute({ type: 'member', values: [memberDn] }) });
+    await client.modify(groupDn(), change);
+    await expect(client.modify(groupDn(), change)).rejects.toBeInstanceOf(TypeOrValueExistsError);
+  });
+
+  it('delete de um valor que NÃO existe -> NoSuchAttributeError (resultCode 16) de verdade', async () => {
+    const del = new Change({ operation: 'delete', modification: new Attribute({ type: 'member', values: [memberDn] }) });
+    await expect(client.modify(groupDn(), del)).rejects.toBeInstanceOf(NoSuchAttributeError);
+  });
+
+  it('atomicidade: um ModifyRequest com 2 changes, o 2º inválido, não aplica NENHUM dos dois', async () => {
+    const ok = new Change({ operation: 'replace', modification: new Attribute({ type: 'department', values: ['Novo'] }) });
+    const bad = new Change({ operation: 'delete', modification: new Attribute({ type: 'title', values: ['NaoExiste'] }) });
+    await expect(client.modify(memberDn, [ok, bad])).rejects.toBeInstanceOf(NoSuchAttributeError);
+
+    const entry = Array.from(fakeLdap.directory.values()).find((e) => e.dn === memberDn);
+    expect(entry?.attrs.get('department')?.map((b: Buffer) => b.toString('utf8'))).toEqual(['TI']);
   });
 });
 

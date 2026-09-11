@@ -104,4 +104,16 @@ if (!parsed.success) {
   process.exit(1);
 }
 
+// Um `.env` de produção com esta flag desligada aceita QUALQUER certificado
+// na conexão LDAPS que carrega AD_BIND_DN/AD_BIND_PASSWORD — o valor existe
+// só para os testes de integração contra o e2e/fake-ldap-server. Nunca deve
+// passar despercebido num boot real.
+if (parsed.data.AD_TLS_REJECT_UNAUTHORIZED === false) {
+  console.warn(
+    '⚠️  AD_TLS_REJECT_UNAUTHORIZED=false — a verificação de certificado TLS da conexão LDAPS ' +
+      'está DESLIGADA. Use isto apenas nos testes de integração (e2e/fake-ldap-server), nunca ' +
+      'contra um Active Directory real.',
+  );
+}
+
 export const env = parsed.data;
