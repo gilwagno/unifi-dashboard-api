@@ -464,3 +464,54 @@ describe('GET /printers/:id/diagnostics', () => {
     await app.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// REVISÃO CRÍTICA (verificador, 2026-09-11)
+// ---------------------------------------------------------------------------
+// A PR que deu a /consumables um fallback para `printer_snmp_history` NÃO deu
+// o mesmo a /diagnostics, embora as duas leiam o mesmo `getLastReading`. A
+// alegação de que isso é limite ESTRUTURAL (e não descuido) foi conferida
+// contra o schema e CONFIRMADA: RecordSnmpHistoryInput persiste só
+// `{collectedAt, pageCount, supplies:{name, levelPercent}, partial}` — nenhum
+// dos campos que definem esta resposta (`model`, `systemInfo`, `deviceStatus`,
+// `powerOnCount`, `activeErrors`) existe no disco.
+//
+// Servir o histórico aqui devolveria `collectedAt` preenchido com todo o resto
+// `null` — afirmaria "diagnostiquei às HH:MM e não há erro" quando nada foi
+// diagnosticado. O silêncio honesto é o comportamento CERTO, e é este teste
+// que o trava: se alguém "uniformizar" as duas rotas copiando o fallback sem
+// migrar o schema, isto fica vermelho em vez de passar despercebido.
+describe('GET /printers/:id/diagnostics — NÃO cai para o histórico persistido (limite estrutural)', () => {
+  it('com leituras no disco e buffer vazio, continua respondendo "nunca coletada" em vez de um diagnóstico vazio com data', async () => {
+    const { app, token } = await authedApp();
+    const auth = { authorization: `Bearer ${token}` };
+    const printer = await createPrinter(app, auth);
+
+    // Histórico rico no disco — o mesmo dado que /consumables usaria.
+    printersRepository.recordSnmpHistoryEntry(printer.id, {
+      collectedAt: '2026-09-11T11:54:06.370Z',
+      pageCount: 4821,
+      partial: false,
+      supplies: [{ name: 'Black Toner', levelPercent: 8 }],
+    });
+
+    getLastReadingMock.mockReturnValueOnce(undefined);
+
+    const res = await app.inject({ method: 'GET', url: `/printers/${printer.id}/diagnostics`, headers: auth });
+
+    expect(res.statusCode).toBe(200);
+    // `collectedAt` null é a resposta CORRETA: nenhum campo de diagnóstico
+    // foi coletado. Uma data aqui, com model/systemInfo/activeErrors null,
+    // seria a afirmação falsa que este teste existe para impedir.
+    expect(res.json()).toEqual({
+      printerId: printer.id,
+      collectedAt: null,
+      model: null,
+      systemInfo: null,
+      deviceStatus: 'not-measured',
+      activeErrors: null,
+      partial: false,
+      powerOnCount: null,
+    });
+  });
+});

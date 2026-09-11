@@ -675,6 +675,24 @@ export class PrintersRepository {
     return rows.map(snmpHistoryRowToRecord);
   }
 
+  // Última leitura persistida de UMA impressora. Existe para que
+  // GET /printers/:id/consumables consiga responder depois de um restart:
+  // `lastReadings` (printer-snmp.service.ts) é memória de processo e nasce
+  // vazio, mas esta tabela guarda 90 dias. Sem isto, a rota afirmava "nunca
+  // coletado" para uma impressora com dezenas de leituras no disco — não
+  // ausência de dado, uma afirmação FALSA (o mesmo vocabulário que o
+  // `collectOnBoot` já usava para justificar a própria existência).
+  //
+  // `ORDER BY collected_at DESC LIMIT 1` usa o mesmo índice composto
+  // (printer_id, collected_at) já criado para listSnmpHistory — sem índice
+  // novo e sem varredura.
+  getLatestSnmpHistory(printerId: string): PrinterSnmpHistoryEntry | null {
+    const row = this.db
+      .prepare('SELECT * FROM printer_snmp_history WHERE printer_id = $printerId ORDER BY collected_at DESC LIMIT 1')
+      .get({ printerId }) as unknown as SnmpHistoryRow | undefined;
+    return row ? snmpHistoryRowToRecord(row) : null;
+  }
+
   // Usado pelo job de retenção diário (printer-snmp.service.ts) — apaga
   // TODAS as impressoras de uma vez (sem filtro por printer_id), mesma forma
   // de bandwidth-history.db.ts#deleteSamplesOlderThan.

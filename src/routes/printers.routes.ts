@@ -55,7 +55,7 @@ import {
   PrinterSwsPasswordVerificationError,
 } from '../services/printer-hp-sws.service.js';
 import { randomBytes } from 'node:crypto';
-import type { WbmCredentials } from '../db/printers.db.js';
+import type { WbmCredentials, PrinterSnmpHistoryEntry } from '../db/printers.db.js';
 
 // Cadastro (nome, MAC, segredo SNMP, política de manutenção) do módulo de
 // manutenção de impressoras — primeira rota do projeto com persistência em
@@ -378,6 +378,29 @@ interface ConsumablesResponse {
   // própria) sem que "nunca alertar" vire um silêncio invisível num módulo
   // cujo objetivo é justamente alertar sobre manutenção.
   lowThresholdPct: number | null;
+  // De onde veio esta resposta. 'live' = buffer em memória do poller (a
+  // leitura mais recente possível). 'history' = a última leitura PERSISTIDA
+  // em `printer_snmp_history`, usada quando o buffer está vazio — o caso
+  // normal logo depois de todo restart, porque `lastReadings` é memória de
+  // processo. 'none' = não há leitura em lugar nenhum (impressora
+  // recém-cadastrada, ou nunca alcançada).
+  //
+  // POR QUE ISTO EXISTE (bug real, observado em produção em 2026-09-11): a
+  // rota lia SÓ o buffer em memória, então depois de qualquer restart ela
+  // respondia `collectedAt: null, supplies: []` — e a tela dizia "nunca
+  // coletado" — para uma impressora com 66 leituras no disco, a mais recente
+  // de 16 minutos antes. Não era ausência de dado, era uma afirmação FALSA,
+  // exatamente o problema que o `collectOnBoot` tinha tentado mitigar sem
+  // resolver: ele encurta a janela, não a fecha (se o ciclo de boot falhar,
+  // demorar, ou o controller estiver inalcançável, a janela volta a ser
+  // permanente). A fonte da verdade sobre "já coletei isto alguma vez" é o
+  // disco, não a memória.
+  //
+  // O campo é exposto em vez de silenciosamente servir o histórico como se
+  // fosse ao vivo: `collectedAt` já diz QUANDO, e `source` diz se aquilo
+  // ainda é o estado corrente do poller. Servir dado velho sem dizer que é
+  // velho seria trocar uma afirmação falsa por outra.
+  source: 'live' | 'history' | 'none';
   supplies: ConsumableSupply[];
 }
 
@@ -463,15 +486,48 @@ function toConsumablesResponse(
   printerId: string,
   reading: PrinterSnmpReading | undefined,
   thresholdPct: number | null,
+  // Última leitura persistida, consultada pela ROTA (não por este helper) só
+  // quando o buffer em memória está vazio. Recebida como parâmetro para
+  // manter esta função pura e testável sem banco.
+  persisted: PrinterSnmpHistoryEntry | null = null,
 ): ConsumablesResponse {
   if (!reading) {
-    // Cadastrada, mas o poller ainda não coletou nada dela (recém-criada ou
-    // sempre offline até agora) — estado válido, não um erro.
-    return { printerId, collectedAt: null, pageCount: null, lowThresholdPct: thresholdPct, supplies: [] };
+    if (persisted) {
+      // Degradado e HONESTO: o histórico guarda só nome + levelPercent por
+      // suprimento (ver suppliesForHistory), então `serialNumber` não existe
+      // aqui e vira `null` — nunca um valor inventado. O `status` é derivado
+      // do mesmo `statusFromPercent` usado no caminho ao vivo, com o mesmo
+      // threshold, então um toner baixo continua aparecendo como baixo (é o
+      // que alimenta o painel "precisa de atenção" da frota).
+      return {
+        printerId,
+        collectedAt: persisted.collectedAt,
+        pageCount: persisted.pageCount,
+        lowThresholdPct: thresholdPct,
+        source: 'history',
+        supplies: persisted.supplies.map((supply) => ({
+          name: supply.name,
+          serialNumber: null,
+          levelPercent: supply.levelPercent,
+          status: supply.levelPercent === null ? 'unknown' : statusFromPercent(supply.levelPercent, thresholdPct),
+        })),
+      };
+    }
+    // Cadastrada, mas nunca coletada em lugar nenhum — nem memória, nem
+    // disco. Só AGORA "nunca coletado" é uma afirmação verdadeira.
+    return {
+      printerId,
+      collectedAt: null,
+      pageCount: null,
+      lowThresholdPct: thresholdPct,
+      source: 'none',
+      supplies: [],
+    };
   }
 
   return {
     printerId,
+    source: 'live',
     collectedAt: reading.collectedAt,
     // `pageCount` também é um SnmpMeasurement (subtarefa 5): o contador pode
     // vir com sentinela (-1/-2/-3) ou falha de leitura, e nesses casos vira
@@ -838,7 +894,11 @@ export default async function printersRoutes(app: FastifyInstance) {
     if (!record) {
       return reply.code(404).send({ error: 'Impressora não encontrada' });
     }
-    return toConsumablesResponse(id, getLastReading(id), record.maintenance.consumableLowThresholdPct);
+    const reading = getLastReading(id);
+    // Só toca o disco quando a memória não tem nada — o caminho quente
+    // (poller ativo) continua sem nenhuma consulta ao SQLite.
+    const persisted = reading ? null : printersRepository.getLatestSnmpHistory(id);
+    return toConsumablesResponse(id, reading, record.maintenance.consumableLowThresholdPct, persisted);
   });
 
   app.get('/printers/:id/diagnostics', async (request, reply) => {
@@ -847,6 +907,27 @@ export default async function printersRoutes(app: FastifyInstance) {
     if (!record) {
       return reply.code(404).send({ error: 'Impressora não encontrada' });
     }
+    // POR QUE ESTA ROTA **NÃO** TEM O FALLBACK PARA O HISTÓRICO que
+    // /consumables (logo acima) ganhou — registrado na revisão crítica para
+    // não parecer descuido nem virar suposição numa leitura futura: as duas
+    // leem o MESMO `getLastReading`, e só uma cai para o disco.
+    //
+    // É limite ESTRUTURAL, não esquecimento. `printer_snmp_history` persiste
+    // apenas `{collectedAt, pageCount, supplies:{name, levelPercent},
+    // partial}` (ver RecordSnmpHistoryInput em db/printers.db.ts). Nenhum dos
+    // campos que DEFINEM esta resposta — `model` (hrDeviceDescr),
+    // `systemInfo` (sysDescr), `deviceStatus`, `powerOnCount`,
+    // `activeErrors` — é gravado em lugar nenhum. Servir o histórico aqui
+    // devolveria `collectedAt` preenchido com todo o resto `null`, ou seja,
+    // afirmaria "diagnostiquei esta impressora às HH:MM e não achei erro
+    // nenhum" quando na verdade nada foi diagnosticado. Seria trocar o
+    // silêncio honesto por uma afirmação falsa — exatamente o defeito que o
+    // fallback de /consumables existe para corrigir, invertido.
+    //
+    // Fechar isto de verdade exige persistir esses campos no histórico
+    // (migração de schema), não um fallback. Enquanto isso não for pedido, o
+    // comportamento correto é o atual: `collectedAt: null` após um restart,
+    // até o poller coletar. Travado por teste (printers-diagnostics.test.ts).
     return toDiagnosticsResponse(id, getLastReading(id));
   });
 
