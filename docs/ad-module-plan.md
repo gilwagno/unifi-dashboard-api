@@ -137,15 +137,16 @@ de verdade, resetar senha de verdade) do que qualquer coisa já implementada.
 2. ✅ **CONCLUÍDA em 2026-09-11** (mesma PR #25). `ad.routes.ts` — 12 rotas `/ad/users*`, com
    rate limit restrito em toda mutação e auditoria pelo hook global de `app.ts`.
 3. ⬜ `ad.service.ts`/`ad.routes.ts` — grupos (criar, listar, add/remove membro).
-   **PRÓXIMA DA FILA.**
+   **Vem DEPOIS da subtarefa 6** — ver a nota de reordenação abaixo.
 4. ⬜ `ad.service.ts`/`ad.routes.ts` — computadores (listar, habilitar/desabilitar)
 5. ✅ **CONCLUÍDA em 2026-09-11** (mesma PR #25). Ponte 802.1X — `POST`/`DELETE`
    `/ad/users/:username/network-access` sobre o grupo de `AD_NETWORK_ACCESS_GROUP_DN`,
    idempotente nos dois sentidos.
-6. ⬜ `fake-ldap-server` + testes de integração contra ele. **Atenção**: os testes unitários e
-   de integração já existem (o `ldapts` é inteiramente mockado, 634/634 verdes), mas
-   **nenhuma linha deste módulo jamais falou com um Active Directory real** — é exatamente
-   isso que esta subtarefa existe pra cobrir.
+6. 🚧 `fake-ldap-server` + testes de integração contra ele. **ANTECIPADA — é a subtarefa em
+   andamento, veio para antes de grupos** (ver nota abaixo). Os testes unitários e de
+   integração já existem, mas o `ldapts` é inteiramente mockado — **nenhuma linha deste
+   módulo jamais falou o protocolo LDAP de verdade**, e é exatamente isso que esta subtarefa
+   existe pra cobrir.
 7. ⬜ Frontend — telas de Usuários/Grupos/Computadores AD (mesmo padrão visual das telas
    existentes: `Layout`, `StatCard`, `Badge`, `usePolling`)
 8. ⬜ e2e cobrindo os 3 fluxos do escopo funcional acima
@@ -155,6 +156,38 @@ de verdade, resetar senha de verdade) do que qualquer coisa já implementada.
 > em nenhuma branch**. As variáveis `AD_*` estão documentadas no `.env.example` mas **não
 > configuradas no `.env` real** — sem elas o módulo responde 503 por desenho e o resto do app
 > funciona normalmente.
+
+
+### Reordenação: `fake-ldap-server` (6) vem ANTES de grupos (3) — decisão do usuário, 2026-09-11
+
+A ordem original punha grupos como a próxima subtarefa. O usuário reordenou, e o motivo não é
+purismo de rubrica — é risco:
+
+> "Esse vai ser o primeiro código do módulo que fala com um LDAP de verdade, nunca validado em
+> campo — e não é leitura qualquer, é escrita em grupo de segurança e membership, o mecanismo
+> que vira `Rede-Permitida` na ponte 802.1X depois. Um bug de escopo aqui (base DN errado,
+> filtro mal escapado, um add/delete pegando o objeto errado) não é cosmético — é a mesma
+> categoria de problema que originou este projeto: algo mexendo em quem tem acesso à rede sem
+> controle suficiente."
+
+Duas consequências registradas:
+
+1. **O `fake-ldap-server` não é gasto só da subtarefa de grupos.** Computadores e o resto do
+   módulo se beneficiam dele depois — construir agora é investimento compartilhado; adiar paga
+   o mesmo custo de novo a cada subtarefa. Ele também **valida retroativamente a subtarefa 1
+   (usuários)**, que hoje só existe provada contra `vi.mock('ldapts')`.
+2. **A validação contra um AD real vira um GATE, não uma forma de desenvolver.** Depois que
+   grupos passar pelo fake-ldap-server com a disciplina de mutação de sempre, será feito **um
+   teste de fumaça único, supervisionado pelo usuário ao vivo, numa OU de teste que ELE
+   confirma explicitamente**, cobrindo usuários e grupos juntos — antes do merge, nunca durante
+   o desenvolvimento. **Até lá, nenhuma OU real é apontada por nada.** As variáveis `AD_*`
+   seguem propositalmente ausentes do `.env` real.
+
+**Consequência para a rubrica**: a subtarefa 1 (usuários) tirou 47/50 sob a rubrica antiga com o
+`ldapts` inteiramente mockado. Sob o harness de 4 pontos, o critério "+2 — faz o que foi
+designado, de ponta a ponta, **contra a API/banco reais**" torna isso honestamente difícil de
+conceder sem o fake-ldap-server no caminho. É a primeira vez que a diferença entre as duas
+rubricas tem consequência prática, e não só de forma.
 
 ## Fora de escopo desta onda (registrar, não implementar sem pedido explícito)
 
