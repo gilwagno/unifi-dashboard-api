@@ -388,6 +388,25 @@ describe('ad.service — grupos, protocolo LDAP real (fake-ldap-server)', () => 
     await expect(getGroup('*)(cn=*')).rejects.toBeInstanceOf(AdGroupNotFoundError);
   });
 
+  // ACHADO DA VERIFICAÇÃO (mutante executado, revertido depois): o escape do
+  // filtro de `findGroupEntry` tinha teste (o caso acima), mas o de
+  // `searchGroups` NÃO — trocar `escapeFilter\`...\`` por um template literal
+  // cru em searchGroups deixava a suíte de grupos inteira verde (63/63).
+  // Diferente de `groupName` (barrado por charset na rota), `query` é texto
+  // LIVRE vindo de `?query=`: uma sonda executada contra o parser de filtro
+  // REAL do fake confirmou que, sem o escape, `searchGroups('x)(cn=*')`
+  // devolve TODOS os grupos do diretório (o `(cn=*)` injetado é uma busca de
+  // presença, sempre verdadeira) em vez de nenhum — injeção de filtro LDAP
+  // de verdade, não hipótese. Com o escape ativo, o servidor busca por um cn
+  // LITERAL com esses caracteres e não acha nada.
+  it('searchGroups() escapa a `query` no filtro — payload de injeção não vira "presença" e não vaza a lista inteira', async () => {
+    const { searchGroups } = await importAdService();
+    const todos = await searchGroups();
+    expect(todos.length).toBeGreaterThan(0); // há grupos a vazar, o teste não passa por vacuidade
+
+    await expect(searchGroups('x)(cn=*')).resolves.toEqual([]);
+  });
+
   it('createGroup() sem AD_GROUPS_OU -> AdGroupsOuNotConfiguredError, sem sequer conectar no fake', async () => {
     const service = await importAdService();
     delete process.env.AD_GROUPS_OU;

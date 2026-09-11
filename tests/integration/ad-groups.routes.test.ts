@@ -204,6 +204,27 @@ describe('POST /ad/groups/:groupName/members/:username', () => {
     expect(res.statusCode).toBe(404);
     await app.close();
   });
+
+  // ACHADO DA VERIFICAÇÃO (mutante executado: remover `mutationConfig` das
+  // DUAS rotas de membership deixava a suíte inteira verde — 49/49 — apesar
+  // de POST /ad/groups já ter o teste equivalente). São justamente as rotas
+  // que CONCEDEM/REVOGAM privilégio no AD: sem limite restrito, elas caíam
+  // no limite global (100/min) em vez do de ação (10/min) — exatamente a
+  // mesma classe do achado 0.2 da revisão externa (3 rotas DELETE sem
+  // RATE_LIMIT_CLIENT_ACTION_MAX), agora na superfície mais sensível do
+  // módulo.
+  it('está sob rate limit restrito (RATE_LIMIT_CLIENT_ACTION_MAX)', async () => {
+    const { app, headers } = await authedApp();
+    vi.mocked(addGroupMember).mockResolvedValue(undefined);
+
+    const { env } = await import('../../src/config/env.js');
+    let last;
+    for (let i = 0; i < env.RATE_LIMIT_CLIENT_ACTION_MAX + 1; i += 1) {
+      last = await app.inject({ method: 'POST', url: '/ad/groups/Financeiro/members/jsilva', headers });
+    }
+    expect(last?.statusCode).toBe(429);
+    await app.close();
+  });
 });
 
 describe('DELETE /ad/groups/:groupName/members/:username', () => {
@@ -223,6 +244,18 @@ describe('DELETE /ad/groups/:groupName/members/:username', () => {
     const { app } = await authedApp();
     const res = await app.inject({ method: 'DELETE', url: '/ad/groups/Financeiro/members/jsilva' });
     expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+  it('está sob rate limit restrito (RATE_LIMIT_CLIENT_ACTION_MAX) — revogar privilégio é mutação como qualquer outra', async () => {
+    const { app, headers } = await authedApp();
+    vi.mocked(removeGroupMember).mockResolvedValue(undefined);
+
+    const { env } = await import('../../src/config/env.js');
+    let last;
+    for (let i = 0; i < env.RATE_LIMIT_CLIENT_ACTION_MAX + 1; i += 1) {
+      last = await app.inject({ method: 'DELETE', url: '/ad/groups/Financeiro/members/jsilva', headers });
+    }
+    expect(last?.statusCode).toBe(429);
     await app.close();
   });
 });
