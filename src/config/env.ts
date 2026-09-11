@@ -80,6 +80,19 @@ const envSchema = z.object({
   // POST/DELETE /ad/users/:username/network-access, não pelo resto do
   // módulo (CRUD de usuário/grupo/computador funciona sem ele).
   AD_NETWORK_ACCESS_GROUP_DN: z.string().min(1).optional(),
+  // Caminho para um arquivo PEM com uma CA adicional a confiar na conexão
+  // LDAPS deste módulo (além das CAs do sistema operacional) — cenário real
+  // de AD corporativo com PKI interna própria, cujo certificado do DC não é
+  // assinado por nenhuma CA pública. NÃO é um interruptor de verificação:
+  // não existe (e nunca existiu, de propósito) um jeito de desligar a
+  // verificação de certificado desta conexão — só de ESTENDER quem é
+  // confiável. Sem esta variável, a verificação usa só as CAs padrão do
+  // Node (o comportamento correto contra um DC com certificado emitido por
+  // uma CA pública/AD CS registrada no sistema). Os testes de integração
+  // (`tests/integration/ad-fake-ldap.test.ts`) usam isto para apontar para
+  // o certificado autoassinado do `e2e/fake-ldap-server` — a verificação
+  // continua acontecendo de verdade, só que contra essa CA de teste.
+  AD_TLS_CA_FILE: z.string().min(1).optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
