@@ -393,6 +393,34 @@ describe('AD_TLS_CA_FILE — a verificação de certificado é real, não um int
     const { searchUsers } = await importAdService();
     await expect(searchUsers()).resolves.not.toHaveLength(0);
   });
+
+  // MUTANTE QUE ISTO MATA: trocar `z.string().min(1).optional()` por
+  // `z.string().optional()` em src/config/env.ts (achado da reverificacao:
+  // esse mutante SOBREVIVIA com a suite inteira verde). Sem o `min(1)`, um
+  // `AD_TLS_CA_FILE=` vazio no `.env` vira `undefined` em SILENCIO: o boot
+  // sobe normalmente e a conexao passa a NAO confiar na CA interna que o
+  // operador achou que tinha configurado. Nao e um furo de seguranca (a
+  // verificacao continua LIGADA contra as CAs do SO — falha fechada, nao
+  // aberta), mas a falha aparece como um erro de certificado incompreensivel
+  // em runtime em vez de um erro de configuracao no boot. Com `min(1)`, o
+  // valor vazio e rejeitado alto e cedo.
+  it('AD_TLS_CA_FILE vazio e um erro de configuracao no boot, nunca um "sem CA extra" silencioso', async () => {
+    vi.resetModules();
+    process.env.AD_TLS_CA_FILE = '';
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`process.exit(${code})`);
+    }) as never);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await expect(import('../../src/config/env.js')).rejects.toThrow('process.exit(1)');
+      expect(errorSpy.mock.calls.flat().some((c) => JSON.stringify(c).includes('AD_TLS_CA_FILE'))).toBe(true);
+    } finally {
+      exitSpy.mockRestore();
+      errorSpy.mockRestore();
+      delete process.env.AD_TLS_CA_FILE;
+      vi.resetModules();
+    }
+  });
 });
 
 describe('fake-ldap-server — semântica de erro do ModifyRequest (RFC 4511 §4.6)', () => {

@@ -100,6 +100,10 @@ Achados de uma revisão externa do repositório, mesmo espírito da "Subtarefa 1
   AD_BIND_PASSWORD
   AD_USERS_OU
   AD_NETWORK_ACCESS_GROUP_DN
+  AD_TLS_CA_FILE            (opcional; PEM de uma CA adicional a confiar na
+                             conexao LDAPS — so ESTENDE a lista de CAs, nunca
+                             desliga a verificacao de certificado; nao existe
+                             variavel para desliga-la)
   ```
 - **Log de auditoria** (uma vez resolvida a subtarefa 0.1) — toda rota de escrita deste
   módulo passa por ele, sem exceção.
