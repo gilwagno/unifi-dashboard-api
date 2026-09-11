@@ -35,6 +35,7 @@ async function importAdService() {
   process.env.AD_BIND_DN = fakeLdap.bindDn;
   process.env.AD_BIND_PASSWORD = fakeLdap.bindPassword;
   process.env.AD_USERS_OU = fakeLdap.usersOu;
+  process.env.AD_GROUPS_OU = fakeLdap.groupsOu;
   process.env.AD_NETWORK_ACCESS_GROUP_DN = fakeLdap.networkAccessGroupDn;
   // A verificação de certificado continua LIGADA (não existe — e nunca
   // existiu, de propósito — uma variável para desligá-la, ver o comentário
@@ -63,6 +64,7 @@ afterEach(() => {
   delete process.env.AD_BIND_DN;
   delete process.env.AD_BIND_PASSWORD;
   delete process.env.AD_USERS_OU;
+  delete process.env.AD_GROUPS_OU;
   delete process.env.AD_NETWORK_ACCESS_GROUP_DN;
   delete process.env.AD_TLS_CA_FILE;
 });
@@ -75,6 +77,14 @@ afterEach(() => {
 // seguintes tentariam validar um certificado novo contra a CA do certificado
 // ANTERIOR e o handshake TLS falharia de verdade (exatamente o
 // comportamento que este arquivo existe para provar, só que no lugar errado).
+// Lê um atributo (multivalorado, armazenado como Buffer[] no diretório em
+// memória do fake) como strings — usado só para inspecionar o DN CRU de uma
+// entrada pelo valor de outro atributo (ver o teste de escape de DN de
+// createGroup mais abaixo).
+function getAttrStringsForTest(entry: { attrs: Map<string, Buffer[]> }, name: string): string[] {
+  return (entry.attrs.get(name.toLowerCase()) ?? []).map((b) => b.toString('utf8'));
+}
+
 async function restartFakeLdap(): Promise<void> {
   await fakeLdap.stop();
   fakeLdap = await startFakeLdapServer();
@@ -311,6 +321,182 @@ describe('ad.service — protocolo LDAP real (fake-ldap-server)', () => {
     vi.resetModules();
     const fresh = await import('../../src/services/ad.service.js');
     await expect(fresh.searchUsers()).rejects.toBeInstanceOf(fresh.AdRequestError);
+  });
+});
+
+// Onda 3, subtarefa 3 (grupos/privilégios) — mesmo princípio da subtarefa 6:
+// prova que ad.service.ts fala o PROTOCOLO LDAP real para grupos, não só o
+// que um `vi.mock('ldapts')` sabe interpretar (ver tests/unit/
+// ad-groups.service.test.ts para a contraparte mockada). O diretório do
+// fake já semeia um grupo "Financeiro" FORA de AD_GROUPS_OU (em
+// "CN=Users", ver seedDirectory em server.mjs) de propósito, para provar
+// que buscar/listar/add-remove-membro não dependem de onde o grupo foi
+// criado.
+describe('ad.service — grupos, protocolo LDAP real (fake-ldap-server)', () => {
+  beforeEach(restartFakeLdap);
+
+  it('searchGroups() sem query lista os grupos semeados (Rede-Permitida + Financeiro), ignorando usuários', async () => {
+    const { searchGroups } = await importAdService();
+    const groups = await searchGroups();
+    expect(groups.map((g) => g.cn).sort()).toEqual(['Financeiro', 'Rede-Permitida']);
+  });
+
+  it('searchGroups(query) filtra por substring em cn/description contra o servidor real', async () => {
+    const { searchGroups } = await importAdService();
+    const byCn = await searchGroups('financ');
+    expect(byCn.map((g) => g.cn)).toEqual(['Financeiro']);
+
+    const byDescription = await searchGroups('equipe do financeiro');
+    expect(byDescription.map((g) => g.cn)).toEqual(['Financeiro']);
+  });
+
+  it('getGroup() devolve o grupo semeado FORA de AD_GROUPS_OU (achado: busca é por AD_BASE_DN, não pela OU de criação)', async () => {
+    const { getGroup } = await importAdService();
+    const financeiro = await getGroup('Financeiro');
+    expect(financeiro.description).toBe('Equipe do financeiro');
+    expect(financeiro.dn.toLowerCase()).not.toContain(fakeLdap.groupsOu.toLowerCase());
+    expect(financeiro.members.map((m) => m.toLowerCase())).toContain(`cn=jsilva,${fakeLdap.usersOu}`.toLowerCase());
+  });
+
+  it('getGroup() de quem não existe -> AdGroupNotFoundError (resultCode 32 real)', async () => {
+    const { getGroup, AdGroupNotFoundError } = await importAdService();
+    await expect(getGroup('NaoExiste')).rejects.toBeInstanceOf(AdGroupNotFoundError);
+  });
+
+  // MUTANTE QUE ISTO MATA (rodado de verdade, revertido depois): trocar
+  // `escapeFilter\`...\`` por um template literal cru em `findGroupEntry`
+  // (ad.service.ts). Confirmado com uma sonda isolada (client `ldapts`
+  // real, sem passar por ad.service.ts) que o filtro resultante do `name`
+  // hostil abaixo — "(&(objectClass=group)(cn=*)(cn=*))", um `(cn=*)`
+  // INJETADO a mais fechando o filtro cedo — CASA de verdade com os 2
+  // grupos semeados (`cn=*` é uma busca de presença, sempre verdadeira
+  // pra um grupo) contra o parser de filtro REAL do fake-ldap-server. Sem
+  // o escape, `findGroupEntry` devolveria o PRIMEIRO grupo que bater (não
+  // o pretendido) em vez de lançar AdGroupNotFoundError — o mesmo tipo de
+  // "cn errado resubmetido"/"objeto errado atingido" que este projeto já
+  // tratou como grave outras vezes (extractAdminField, achado 8b). Um
+  // mock de diretório em memória com matchesFilter por REGEX (ver
+  // tests/unit/ad-groups.service.test.ts) NÃO detecta este mutante — só o
+  // parser de filtro REAL prova a proteção.
+  it('getGroup() escapa o `name` no filtro contra o parser de filtro REAL — um `name` hostil não vaza outro grupo nem finge presença', async () => {
+    const { getGroup, AdGroupNotFoundError } = await importAdService();
+    // Tenta fechar o filtro "(cn=" cedo e injetar "(cn=*)" (presença,
+    // sempre verdadeira) — se escapeFilter estiver ativo, os caracteres
+    // especiais (parênteses, asterisco) saem codificados (\28 \29 \2a) e o
+    // servidor busca por um cn LITERAL igual a essa string toda, que não
+    // existe.
+    await expect(getGroup('*)(cn=*')).rejects.toBeInstanceOf(AdGroupNotFoundError);
+  });
+
+  it('createGroup() sem AD_GROUPS_OU -> AdGroupsOuNotConfiguredError, sem sequer conectar no fake', async () => {
+    const service = await importAdService();
+    delete process.env.AD_GROUPS_OU;
+    vi.resetModules();
+    const fresh = await import('../../src/services/ad.service.js');
+    await expect(fresh.createGroup({ name: 'Nunca Vai Existir' })).rejects.toBeInstanceOf(fresh.AdGroupsOuNotConfiguredError);
+    void service;
+  });
+
+  it('createGroup() cria via add() real, sob AD_GROUPS_OU, e a releitura reflete o objeto criado', async () => {
+    const { createGroup, getGroup } = await importAdService();
+    const created = await createGroup({ name: 'Suporte', description: 'Equipe de suporte' });
+    expect(created.cn).toBe('Suporte');
+    expect(created.dn.toLowerCase().endsWith(`,${fakeLdap.groupsOu.toLowerCase()}`)).toBe(true);
+
+    const reread = await getGroup('Suporte');
+    expect(reread.description).toBe('Equipe de suporte');
+  });
+
+  it('createGroup() com nome contendo vírgula: o DN sai escapado de verdade contra o servidor real (mesmo achado bloqueante da PR #25, agora em grupo)', async () => {
+    // Comparar só se o DN final TERMINA em fakeLdap.groupsOu não distingue
+    // escapado de não escapado (ambas as formas terminam no mesmo sufixo —
+    // a vírgula nua continua ANTES da OU, nunca desloca o final da string).
+    // A prova real é o DN CRU que chegou ao `add()` do servidor: com
+    // `DN.addPairRDN` (RFC 4514), a vírgula sai como `\,` (escapada); sem o
+    // escape, o servidor recebe uma vírgula NUA, que um AD real leria como
+    // separador de RDN. Inspeciona o DN cru gravado no diretório do fake
+    // (nunca normalizado — normalizeDn só mexe em espaço/caixa, preserva a
+    // barra invertida).
+    const { createGroup, getGroup } = await importAdService();
+    const created = await createGroup({ name: 'a,b' });
+    expect(created.cn).toBe('a,b');
+
+    const rawEntry = Array.from(fakeLdap.directory.values()).find((e) => getAttrStringsForTest(e, 'cn').includes('a,b'));
+    expect(rawEntry?.dn).toBe(`CN=a\\,b,${fakeLdap.groupsOu}`);
+
+    const reread = await getGroup('a,b');
+    expect(reread.cn).toBe('a,b');
+  });
+
+  it('addGroupMember()/removeGroupMember() alteram `member` de verdade no grupo real, e os dois são idempotentes (resultCode 20/16 reais)', async () => {
+    const { addGroupMember, removeGroupMember, getGroup } = await importAdService();
+
+    let financeiro = await getGroup('Financeiro');
+    expect(financeiro.members.map((m) => m.toLowerCase())).toContain(`cn=jsilva,${fakeLdap.usersOu}`.toLowerCase());
+
+    // ptravado ainda não é membro — adiciona de verdade.
+    await addGroupMember('Financeiro', 'ptravado');
+    financeiro = await getGroup('Financeiro');
+    expect(financeiro.members.map((m) => m.toLowerCase())).toContain(`cn=ptravado,${fakeLdap.usersOu}`.toLowerCase());
+
+    // Idempotente: o servidor real recusa um 2º `add` do MESMO valor
+    // (resultCode 20, TypeOrValueExistsError) — addGroupMember precisa
+    // engolir isso e não lançar.
+    await expect(addGroupMember('Financeiro', 'ptravado')).resolves.toBeUndefined();
+
+    await removeGroupMember('Financeiro', 'ptravado');
+    financeiro = await getGroup('Financeiro');
+    expect(financeiro.members.map((m) => m.toLowerCase())).not.toContain(`cn=ptravado,${fakeLdap.usersOu}`.toLowerCase());
+
+    // Idempotente no sentido inverso: o servidor real recusa um `delete` de
+    // valor que não existe mais (resultCode 16, NoSuchAttributeError).
+    await expect(removeGroupMember('Financeiro', 'ptravado')).resolves.toBeUndefined();
+  });
+
+  it('addGroupMember() de usuário inexistente -> AdUserNotFoundError real, membership do grupo não muda', async () => {
+    const { addGroupMember, getGroup, AdUserNotFoundError } = await importAdService();
+    const before = await getGroup('Financeiro');
+    await expect(addGroupMember('Financeiro', 'ninguem')).rejects.toBeInstanceOf(AdUserNotFoundError);
+    const after = await getGroup('Financeiro');
+    expect(after.members).toEqual(before.members);
+  });
+
+  it('addGroupMember()/removeGroupMember() de grupo inexistente -> AdGroupNotFoundError real', async () => {
+    const { addGroupMember, removeGroupMember, AdGroupNotFoundError } = await importAdService();
+    await expect(addGroupMember('NaoExiste', 'jsilva')).rejects.toBeInstanceOf(AdGroupNotFoundError);
+    await expect(removeGroupMember('NaoExiste', 'jsilva')).rejects.toBeInstanceOf(AdGroupNotFoundError);
+  });
+});
+
+// Pré-requisito bloqueante da subtarefa de grupos (resolvido na PR #33):
+// prova que o bind-por-conexão também é exigido para as operações de grupo,
+// não só para as de usuário já cobertas no describe correspondente mais
+// abaixo neste arquivo.
+describe('ad.service — grupos exigem bind prévio (mesma garantia RFC 4511 §4.2.1, exercitada pelo caminho de grupo)', () => {
+  beforeEach(restartFakeLdap);
+
+  it('search de grupo antes de bind -> OperationsError, não os grupos semeados', async () => {
+    const client = new Client({ url: fakeLdap.url, tlsOptions: { ca: fakeLdap.caCert } });
+    try {
+      await expect(client.search(fakeLdap.baseDn, { scope: 'sub', filter: '(objectClass=group)' })).rejects.toBeInstanceOf(
+        OperationsError,
+      );
+    } finally {
+      await client.unbind().catch(() => undefined);
+    }
+  });
+
+  it('modify de `member` de grupo antes de bind -> OperationsError, membership não muda', async () => {
+    const client = new Client({ url: fakeLdap.url, tlsOptions: { ca: fakeLdap.caCert } });
+    const change = new Change({
+      operation: 'add',
+      modification: new Attribute({ type: 'member', values: [`CN=ptravado,${fakeLdap.usersOu}`] }),
+    });
+    try {
+      await expect(client.modify('CN=Financeiro,CN=Users,' + fakeLdap.baseDn, change)).rejects.toBeInstanceOf(OperationsError);
+    } finally {
+      await client.unbind().catch(() => undefined);
+    }
   });
 });
 

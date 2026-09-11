@@ -123,6 +123,23 @@ export class AdNetworkAccessGroupNotConfiguredError extends Error {
   }
 }
 
+export class AdGroupNotFoundError extends Error {
+  constructor(name: string) {
+    super(`Grupo "${name}" não encontrado no Active Directory`);
+    this.name = 'AdGroupNotFoundError';
+  }
+}
+
+// Lançado só por `createGroup` — diferente de AdNotConfiguredError (o resto
+// do módulo de grupos, busca/listagem e add/remove de membro, funciona sem
+// AD_GROUPS_OU: ver o comentário da env var em src/config/env.ts).
+export class AdGroupsOuNotConfiguredError extends Error {
+  constructor() {
+    super('Criação de grupo não configurada: defina AD_GROUPS_OU no .env (a OU onde grupos novos são criados).');
+    this.name = 'AdGroupsOuNotConfiguredError';
+  }
+}
+
 function isAdConfigured(): boolean {
   return Boolean(env.AD_URL && env.AD_BASE_DN && env.AD_BIND_DN && env.AD_BIND_PASSWORD && env.AD_USERS_OU);
 }
@@ -254,7 +271,8 @@ async function withClient<T>(fn: (client: Client) => Promise<T>): Promise<T> {
     if (
       err instanceof AdNotConfiguredError ||
       err instanceof AdUserNotFoundError ||
-      err instanceof AdPasswordAmbiguousError
+      err instanceof AdPasswordAmbiguousError ||
+      err instanceof AdGroupNotFoundError
     )
       throw err;
     const message = err instanceof Error ? err.message : String(err);
@@ -606,40 +624,45 @@ export async function setUserWorkstations(username: string, workstations: string
   });
 }
 
-// --- Ponte 802.1X (item "Ponte 802.1X" do escopo funcional) ---
+// --- Membership de grupo — mecanismo comum a "Grupos/privilégios" e à
+// ponte 802.1X (item "Ponte 802.1X" do escopo funcional): no AD, privilégio
+// É pertencer a um grupo. `applyGroupMembership` é o ÚNICO ponto do módulo
+// que despacha um `add`/`delete` de `member` — extraído nesta subtarefa
+// (grupos) a partir do que já existia em grantNetworkAccess/
+// revokeNetworkAccess, para que a garantia de idempotência abaixo proteja
+// os DOIS caminhos (rede 802.1X e grupo genérico) de uma vez só, em vez de
+// duplicada em dois lugares que podiam divergir com o tempo.
 //
-// Endpoint de conveniência: habilitar/revogar acesso à rede é só
-// adicionar/remover o usuário do grupo configurado (AD_NETWORK_ACCESS_GROUP_DN)
-// — o NPS no Windows Server valida contra membership nesse grupo (infra
-// fora do código, documentada em docs/ad-module-plan.md). Modelado como
-// chamada específica (não "lembrar de tirar da lista genérica de grupos")
-// de propósito: revogar acesso de alguém não pode depender de alguém
-// lembrar de editar o grupo certo manualmente.
-// ACHADO da revisão crítica: a ponte 802.1X não era idempotente — conceder
-// acesso a quem já tem (o AD recusa com TypeOrValueExistsError/
-// AlreadyExistsError) ou revogar de quem já não tem (NoSuchAttributeError)
-// virava um 502 genérico. Numa ação de SEGURANÇA (é literalmente "esta
-// pessoa tem ou não tem acesso à rede agora"), um operador vendo 502 ao
-// revogar acesso durante um incidente pode concluir, errado, que a pessoa
-// AINDA tem acesso — o pior tipo de ambiguidade nesta função específica.
-// Tratar o estado final desejado como sucesso (idempotente) é mais seguro
-// do que expor a distinção "já estava assim" vs "acabei de aplicar".
+// ACHADO da revisão crítica da PR #25 (preservado, agora generalizado): a
+// ponte 802.1X não era idempotente — conceder acesso a quem já tem (o AD
+// recusa com TypeOrValueExistsError/AlreadyExistsError) ou revogar de quem
+// já não tem (NoSuchAttributeError) virava um 502 genérico. Numa ação de
+// SEGURANÇA (é literalmente "esta pessoa tem ou não tem este privilégio
+// agora"), um operador vendo 502 ao revogar acesso durante um incidente
+// pode concluir, errado, que a pessoa AINDA tem acesso — o pior tipo de
+// ambiguidade nesta função específica. Tratar o estado final desejado como
+// sucesso (idempotente) é mais seguro do que expor a distinção "já estava
+// assim" vs "acabei de aplicar". Vale igualmente para um grupo de
+// privilégio qualquer (achado desta subtarefa): um operador adicionando
+// alguém a um grupo administrativo que a pessoa já integra, ou removendo de
+// um que ela já não integra, não deveria ver um erro genérico.
+async function applyGroupMembership(client: Client, groupDn: string, memberDn: string, operation: 'add' | 'delete'): Promise<void> {
+  try {
+    await client.modify(groupDn, new Change({ operation, modification: new Attribute({ type: 'member', values: [memberDn] }) }));
+  } catch (err) {
+    if (operation === 'add' && (err instanceof TypeOrValueExistsError || err instanceof AlreadyExistsError)) return;
+    if (operation === 'delete' && err instanceof NoSuchAttributeError) return;
+    throw err;
+  }
+}
+
 export async function grantNetworkAccess(username: string): Promise<void> {
   if (!env.AD_NETWORK_ACCESS_GROUP_DN) throw new AdNetworkAccessGroupNotConfiguredError();
 
   return withClient(async (client) => {
     const entry = await findUserEntry(client, username);
     const dn = asString(entry.distinguishedName) ?? (entry.dn as unknown as string);
-
-    try {
-      await client.modify(
-        env.AD_NETWORK_ACCESS_GROUP_DN!,
-        new Change({ operation: 'add', modification: new Attribute({ type: 'member', values: [dn] }) }),
-      );
-    } catch (err) {
-      if (err instanceof TypeOrValueExistsError || err instanceof AlreadyExistsError) return;
-      throw err;
-    }
+    await applyGroupMembership(client, env.AD_NETWORK_ACCESS_GROUP_DN!, dn, 'add');
   });
 }
 
@@ -649,16 +672,158 @@ export async function revokeNetworkAccess(username: string): Promise<void> {
   return withClient(async (client) => {
     const entry = await findUserEntry(client, username);
     const dn = asString(entry.distinguishedName) ?? (entry.dn as unknown as string);
+    await applyGroupMembership(client, env.AD_NETWORK_ACCESS_GROUP_DN!, dn, 'delete');
+  });
+}
 
-    try {
-      await client.modify(
-        env.AD_NETWORK_ACCESS_GROUP_DN!,
-        new Change({ operation: 'delete', modification: new Attribute({ type: 'member', values: [dn] }) }),
-      );
-    } catch (err) {
-      if (err instanceof NoSuchAttributeError) return;
-      throw err;
-    }
+// --- Grupos / privilégios (item "Grupos / privilégios" do escopo
+// funcional — subtarefa 3, ver docs/ad-module-plan.md) ---
+//
+// Mesma disciplina do bloco de usuários: nunca concatenação crua de DN/
+// filtro (achado bloqueante da PR #25 — um grupo é AINDA mais sensível que
+// um usuário, é o próprio mecanismo de privilégio do AD), busca sempre
+// paginada, `member` exposto como lista de DNs (não resolvido para
+// sAMAccountName — resolver cada membro custaria uma busca por membro, sem
+// pedido explícito para isso no escopo funcional).
+
+export interface AdGroup {
+  dn: string;
+  cn: string;
+  description: string | null;
+  members: string[];
+}
+
+const GROUP_SEARCH_ATTRIBUTES = ['distinguishedName', 'cn', 'description', 'member'];
+
+function toAdGroup(entry: Record<string, string | string[] | Buffer | Buffer[]>, dn: string): AdGroup {
+  const memberValue = entry.member;
+  const members = memberValue === undefined ? [] : Array.isArray(memberValue) ? memberValue.map((m) => asString(m) ?? '') : [asString(memberValue) ?? ''];
+
+  return {
+    dn,
+    cn: asString(entry.cn) ?? '',
+    description: asString(entry.description),
+    members: members.filter((m) => m.length > 0),
+  };
+}
+
+// Busca um grupo pelo `cn` (RDN convencional de grupo no AD) dentro de uma
+// conexão JÁ aberta — mesmo papel de `findUserEntry`: nunca constrói um DN
+// "adivinhado" a partir do nome, sempre resolve via busca real primeiro.
+// Escopo é AD_BASE_DN (a raiz do domínio), não AD_GROUPS_OU — grupos de
+// segurança no AD real frequentemente vivem fora de qualquer OU dedicada
+// (ex.: o container padrão "CN=Users", onde a própria
+// AD_NETWORK_ACCESS_GROUP_DN de exemplo deste projeto vive), e restringir a
+// busca a AD_GROUPS_OU faria "buscar/listar" (que não deveria depender de
+// onde o grupo foi CRIADO) não encontrar um grupo pré-existente do domínio.
+async function findGroupEntry(client: Client, name: string): Promise<Record<string, string | string[] | Buffer | Buffer[]>> {
+  const { searchEntries } = await client.search(env.AD_BASE_DN!, {
+    scope: 'sub',
+    filter: escapeFilter`(&(objectClass=group)(cn=${name}))`,
+    attributes: GROUP_SEARCH_ATTRIBUTES,
+  });
+
+  const entry = searchEntries[0];
+  if (!entry) throw new AdGroupNotFoundError(name);
+  return entry as unknown as Record<string, string | string[] | Buffer | Buffer[]>;
+}
+
+export async function searchGroups(query?: string): Promise<AdGroup[]> {
+  return withClient(async (client) => {
+    const filter = query
+      ? escapeFilter`(&(objectClass=group)(|(cn=*${query}*)(description=*${query}*)))`
+      : '(objectClass=group)';
+
+    // `paged: true` — mesma razão de searchUsers: uma base com mais grupos
+    // que o MaxPageSize do DC (1000 por padrão) recusaria com
+    // SizeLimitExceededError sem isto.
+    const { searchEntries } = await client.search(env.AD_BASE_DN!, {
+      scope: 'sub',
+      filter,
+      attributes: GROUP_SEARCH_ATTRIBUTES,
+      paged: true,
+    });
+
+    return searchEntries.map((entry) =>
+      toAdGroup(entry as unknown as Record<string, string | string[] | Buffer | Buffer[]>, entry.dn),
+    );
+  });
+}
+
+export async function getGroup(name: string): Promise<AdGroup> {
+  return withClient(async (client) => {
+    const entry = await findGroupEntry(client, name);
+    return toAdGroup(entry, asString(entry.distinguishedName) ?? (entry.dn as unknown as string));
+  });
+}
+
+export interface CreateAdGroupInput {
+  name: string;
+  description?: string;
+}
+
+// DN derivado de AD_GROUPS_OU, escapado via `DN.addPairRDN` — mesma técnica
+// (e mesmo motivo, ver `buildUserDn` acima) de `buildUserDn`: nunca
+// concatenação crua. Um `name` como "x,OU=Servidores" (que a rota já barra
+// por Zod, mas o serviço precisa continuar seguro por conta própria —
+// defesa em profundidade, mesmo raciocínio da PR #25) não pode produzir um
+// DN válido apontando para fora de AD_GROUPS_OU.
+function buildGroupDn(name: string): string {
+  return `${new DN().addPairRDN('CN', name).toString()},${env.AD_GROUPS_OU}`;
+}
+
+// Grupo de segurança global — groupType -2147483646 é o valor documentado
+// publicamente pela Microsoft para "security group, global scope" (o tipo
+// mais comum para privilégio de aplicação/rede, o mesmo tipo do grupo de
+// exemplo AD_NETWORK_ACCESS_GROUP_DN). Criado em UMA única operação (`add`)
+// — diferente de `createUser`, não há um segredo (senha) cuja perda exigiria
+// o cuidado de AdPasswordAmbiguousError: se o `add` falhar, nada foi criado,
+// e se falhar a releitura pós-criação, o chamador só perde a confirmação
+// de campos (o grupo já existe de qualquer forma, recuperável por uma busca
+// normal) — não a mesma classe de dado irrecuperável.
+export async function createGroup(input: CreateAdGroupInput): Promise<AdGroup> {
+  if (!env.AD_GROUPS_OU) throw new AdGroupsOuNotConfiguredError();
+  const dn = buildGroupDn(input.name);
+
+  return withClient(async (client) => {
+    await client.add(dn, {
+      objectClass: ['top', 'group'],
+      cn: input.name,
+      groupType: '-2147483646',
+      ...(input.description ? { description: input.description } : {}),
+    });
+
+    const entry = await findGroupEntry(client, input.name);
+    return toAdGroup(entry, asString(entry.distinguishedName) ?? dn);
+  });
+}
+
+// Adiciona/remove um USUÁRIO (identificado por sAMAccountName, mesma chave
+// usada no resto do módulo) de um GRUPO (identificado por cn) — reaproveita
+// `findUserEntry` (resolve o DN do membro sem adivinhar) + `findGroupEntry`
+// (resolve o DN do grupo sem adivinhar) + `applyGroupMembership` (a mesma
+// garantia de idempotência da ponte 802.1X, ver comentário acima). Se o
+// USUÁRIO não existe, propaga AdUserNotFoundError (falha alto e claro —
+// diferente de "já não é membro", que é sucesso; "a pessoa não existe" não
+// é um estado de membership válido para tornar idempotente). Se o GRUPO não
+// existe, propaga AdGroupNotFoundError.
+export async function addGroupMember(groupName: string, username: string): Promise<void> {
+  return withClient(async (client) => {
+    const userEntry = await findUserEntry(client, username);
+    const userDn = asString(userEntry.distinguishedName) ?? (userEntry.dn as unknown as string);
+    const groupEntry = await findGroupEntry(client, groupName);
+    const groupDn = asString(groupEntry.distinguishedName) ?? (groupEntry.dn as unknown as string);
+    await applyGroupMembership(client, groupDn, userDn, 'add');
+  });
+}
+
+export async function removeGroupMember(groupName: string, username: string): Promise<void> {
+  return withClient(async (client) => {
+    const userEntry = await findUserEntry(client, username);
+    const userDn = asString(userEntry.distinguishedName) ?? (userEntry.dn as unknown as string);
+    const groupEntry = await findGroupEntry(client, groupName);
+    const groupDn = asString(groupEntry.distinguishedName) ?? (groupEntry.dn as unknown as string);
+    await applyGroupMembership(client, groupDn, userDn, 'delete');
   });
 }
 
@@ -674,4 +839,9 @@ export const adService = {
   setUserWorkstations,
   grantNetworkAccess,
   revokeNetworkAccess,
+  searchGroups,
+  getGroup,
+  createGroup,
+  addGroupMember,
+  removeGroupMember,
 };

@@ -18,6 +18,8 @@ import securityRoutes from './routes/security.routes.js';
 import sitesRoutes from './routes/sites.routes.js';
 import sshRoutes from './routes/ssh.routes.js';
 import {
+  AdGroupNotFoundError,
+  AdGroupsOuNotConfiguredError,
   AdNetworkAccessGroupNotConfiguredError,
   AdNotConfiguredError,
   AdPasswordAmbiguousError,
@@ -83,11 +85,15 @@ export async function buildApp(): Promise<FastifyInstance> {
       return reply.code(400).send({ error: 'Dados inválidos', details: error.flatten() });
     }
 
-    if (error instanceof AdNotConfiguredError || error instanceof AdNetworkAccessGroupNotConfiguredError) {
+    if (
+      error instanceof AdNotConfiguredError ||
+      error instanceof AdNetworkAccessGroupNotConfiguredError ||
+      error instanceof AdGroupsOuNotConfiguredError
+    ) {
       return reply.code(503).send({ error: 'Funcionalidade indisponível', details: error.message });
     }
 
-    if (error instanceof AdUserNotFoundError) {
+    if (error instanceof AdUserNotFoundError || error instanceof AdGroupNotFoundError) {
       return reply.code(404).send({ error: error.message });
     }
 

@@ -391,6 +391,20 @@ function seedDirectory(config) {
   setAttr(group, 'member', []);
   put(group);
 
+  // Grupo de privilégio "comum" (subtarefa 3 — grupos/privilégios), semeado
+  // FORA de config.groupsOu (no container padrão "CN=Users", como um AD
+  // real frequentemente tem grupos pré-existentes ali) — de propósito, para
+  // provar que buscar/listar/add-remove-membro não dependem de onde o grupo
+  // foi CRIADO (ver o comentário de `findGroupEntry` em ad.service.ts:
+  // escopo de busca é AD_BASE_DN, não AD_GROUPS_OU).
+  const financeiro = makeEntry(`CN=Financeiro,CN=Users,${config.baseDn}`);
+  setAttr(financeiro, 'objectClass', ['top', 'group']);
+  setAttr(financeiro, 'cn', ['Financeiro']);
+  setAttr(financeiro, 'description', ['Equipe do financeiro']);
+  const jsilvaDn = `CN=jsilva,${config.usersOu}`;
+  setAttr(financeiro, 'member', [jsilvaDn]);
+  put(financeiro);
+
   return directory;
 }
 
@@ -767,6 +781,10 @@ function handleDelete(socket, state, messageId, dn) {
  * @param {number} [options.port] porta fixa; default 0 (o SO escolhe uma livre)
  * @param {string} [options.baseDn]
  * @param {string} [options.usersOu]
+ * @param {string} [options.groupsOu] OU pra grupos NOVOS (subtarefa 3 —
+ *   grupos/privilégios). Só usada por quem chama `client.add` sob esta OU;
+ *   o fake não precisa que o container exista de fato (ver handleAdd, sem
+ *   checagem de integridade pai/filho), então nenhum objeto é semeado aqui.
  * @param {string} [options.networkAccessGroupDn]
  * @param {string} [options.bindDn]
  * @param {string} [options.bindPassword]
@@ -776,6 +794,7 @@ export async function startFakeLdapServer(options = {}) {
   const config = {
     baseDn,
     usersOu: options.usersOu ?? `OU=Funcionarios,${baseDn}`,
+    groupsOu: options.groupsOu ?? `OU=Grupos,${baseDn}`,
     networkAccessGroupDn: options.networkAccessGroupDn ?? `CN=Rede-Permitida,CN=Users,${baseDn}`,
     bindDn: options.bindDn ?? `CN=svc-dashboard,CN=Users,${baseDn}`,
     bindPassword: options.bindPassword ?? 'S3nha-Fake-Ldap-2026',
