@@ -1,5 +1,57 @@
 # Gauntlet Loop — unifi-dashboard-api
 
+## ⏸️ PONTO DE PARADA — sessão de 2026-09-11 (leia isto antes de qualquer coisa)
+
+Estado exato no fim da sessão. Tudo commitado e com push; nenhuma árvore com arquivo pendente.
+
+```
+master          75adf92   sincronizado com origin
+feat/ad-groups  317ecfe   PR #34 ABERTA, não mergeada
+```
+
+### O que esta sessão fez
+
+1. **PR #33 mergeada** (`0c640c5`) — `fake-ldap-server` passou a rastrear estado de bind por
+   conexão. Fechou o ⛔ que bloqueava grupos. Aprovada **4/4**, primeira nota máxima do harness.
+2. **PR #34 aberta** — grupos do AD (buscar/listar/criar, add/remove membro). Aprovada **4/4**
+   pelo par formal; 2 achados sérios corrigidos (injeção de filtro LDAP em `searchGroups`, rate
+   limit ausente nas rotas de membro).
+3. **Teste de fumaça supervisionado contra o AD real** (`evokaudio.local`) — 14 passos, ambiente
+   limpo ao fim, produção intocada. **Achou um BUG DE PRODUÇÃO** que os 746 testes verdes não
+   pegavam. Seção própria abaixo ("TESTE DE FUMAÇA CONTRA O AD REAL").
+4. **Correção do bug commitada na branch da #34** (`317ecfe`) — idempotência por releitura de
+   estado, não por resultCode. Suíte **748/748**, `tsc --noEmit` limpo. **NOTA: esta correção
+   foi terminada pelo orquestrador porque o executor caiu no limite de sessão no meio — ela
+   NÃO passou por revisão cega de Verificador. É o item 1 da retomada.**
+
+### Retomar por aqui, nesta ordem
+
+1. **Verificador (Opus, às cegas) na correção da idempotência** — única peça da #34 sem revisão
+   cega. Mutantes já executados pelo orquestrador: remover a releitura → 3 testes morrem; fake
+   voltar a responder 16 → 1 morre.
+2. **`nps.msc`** (pendente COM O USUÁRIO) — confirmar se `wifi-colaboradores` aparece como
+   condição "Grupos de Windows" numa Network Policy de 802.1X. Hoje é **inferência forte, não
+   confirmação** — nenhuma variável de produção deve apontar para esse DN antes disso.
+3. **Decidir o ⛔ do aninhamento de grupos** — bloqueia fechar a subtarefa 5 (ponte 802.1X) para
+   produção. Duas opções registradas na seção do teste de fumaça; nenhuma escolhida.
+4. **Mergear a PR #34**, e então o **levantamento dos pontos do `fake-ldap-server` modelados por
+   RFC e nunca confrontados com um DC real** — obrigatório ANTES de computadores (subtarefa 4),
+   que é a próxima peça nova e senão herda o mesmo padrão que causou o bug desta sessão.
+5. **Percentuais dos painéis das Brothers** (pendente COM O USUÁRIO, independente de tudo acima)
+   — `tools/brother-mib-probe.mjs --cruzar` está pronto, prioridade DCP-L3560CDW (`.80`), os 4
+   toners separados. **Não imprimir nada entre ler o painel e rodar o cruzamento**, senão o
+   contador anda e a correlação perde o valor.
+
+### Pendência de segurança registrada
+
+O `.env` real está com a **senha do administrador do domínio em texto plano** (fora do Git, mas
+em disco), e esse valor também passou pela conversa da sessão. **Trocar quando houver calma.**
+A conta usada no teste de fumaça é `gilwagno.silva` — conta de ADMIN do domínio, não uma conta de
+serviço escopada; foi decisão explícita do usuário depois de o risco ser levantado.
+
+---
+
+
 > Visão consolidada de tudo (implementado + planejado) em `ROADMAP.md` — comece por lá pra
 > conferência rápida. Este arquivo é o histórico detalhado, onda por onda.
 
