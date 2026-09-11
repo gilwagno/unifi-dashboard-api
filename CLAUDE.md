@@ -1300,3 +1300,31 @@ verificação prática da continuidade do histórico SNMP. **Nota não atribuíd
 preliminar do revisor era 46/50 pra PR como o autor entregou (o achado 1 derruba a alegação de
 que a divergência medidor×selo estava fechada), subindo com as 3 correções dele, mas sem o
 frontend e o e2e revisados isso não é uma nota, é um palpite parcial.
+
+## Achado transversal: nenhum teste do BACKEND é typechecked (2026-09-11) — aberto
+
+Mesmo espírito dos achados 0.x: pequeno, genuíno, e afeta toda onda futura. **Não bloqueia
+nada hoje**, por isso não virou subtarefa bloqueante — mas precisa estar escrito, porque a
+consequência é silenciosa por natureza.
+
+`tsconfig.json` (raiz) tem `"include": ["src/**/*.ts"]`. Ou seja: `tests/**` e `e2e/**` estão
+**fora** do programa do TypeScript. Consequência prática: **`npx tsc --noEmit` limpo não diz
+nada sobre os arquivos de teste do backend** — um fixture com campo obrigatório faltando, um
+mock com assinatura errada, um `as` mentindo sobre o tipo real: nada disso aparece. O `vitest`
+roda via esbuild, que apaga os tipos sem checá-los, então também não pega.
+
+Foi assim que os fixtures de `PrinterSupply` em `tests/integration/printers-consumables.test.ts`
+ficaram sem o campo obrigatório `levelSource` (introduzido na PR #30) sem ninguém perceber —
+achado real da revisão daquela PR, não hipótese.
+
+**Não confundir com o achado equivalente do FRONTEND** (item 20 da Onda 2, `tsc --noEmit` não
+checar nada por causa do solution file): são problemas diferentes, e o do frontend tem solução
+diferente. Lá, `frontend/tsconfig.app.json` tem `"include": ["src"]`, e os testes moram dentro
+de `frontend/src/` — então **os testes do frontend SÃO typechecked** por `npx tsc -b`. O buraco
+é só do backend.
+
+Correção provável quando for tratado: um `tsconfig.test.json` próprio estendendo o da raiz, com
+`include` cobrindo `tests/**` e `e2e/**` e `noEmit: true`, rodado junto do `tsc --noEmit`
+atual — em vez de simplesmente alargar o `include` da raiz, que passaria a arrastar os testes
+para o `build` de produção. **Não implementado; não supor que já está feito sem conferir o
+`tsconfig.json` real.**
