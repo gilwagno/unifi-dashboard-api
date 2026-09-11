@@ -65,6 +65,131 @@ erros do módulo.
 
 Suíte após o merge: **backend 690/690** (44 arquivos), `tsc --noEmit` limpo.
 
+### ⛔ TESTE DE FUMAÇA CONTRA O AD REAL (2026-09-11) — 1 BUG DE PRODUÇÃO ENCONTRADO, 2 BLOQUEANTES ABERTOS
+
+Primeiro contato do módulo de AD com um Active Directory de verdade (`evokaudio.local`,
+`EA-SRV-AD01`, Windows Server 2016), supervisionado pelo usuário passo a passo, cada operação
+confirmada antes da seguinte. **14 passos executados, ambiente de teste limpo ao fim
+(`OU=Teste-Dashboard` vazia), AD de produção confirmadamente intocado** (`wifi-colaboradores`
+seguiu com 20 membros e `whenChanged` inalterado).
+
+Passos 1-6 validaram código já em `master` (PR #25): bind LDAPS, `searchUsers`, `createUser`,
+`resetPassword`, `setUserEnabled` nos DOIS sentidos. Passos 7-11 validaram a PR #34 (grupos):
+`createGroup`, `addGroupMember`, `removeGroupMember`, cada um confirmado por LEITURA INDEPENDENTE
+do diretório, nunca pelo retorno da função.
+
+#### BUG DE PRODUÇÃO: a idempotência da revogação nunca funcionou contra um AD real
+
+Sonda executada mediu os resultCodes REAIS:
+
+| Operação | AD real devolve | `catch` do código | Resultado |
+|---|---|---|---|
+| `add` de quem JÁ é membro | **68** `AlreadyExists` | `TypeOrValueExists` **ou `AlreadyExists`** | funciona |
+| `delete` de quem JÁ NÃO é | **53** `UnwillingToPerform` (problem 5003) | só `NoSuchAttribute` (16) | **QUEBRA** |
+
+Metade da garantia funcionava — e a metade quebrada era a da REVOGAÇÃO, exatamente o cenário que o
+comentário do próprio código diz existir para evitar: *num incidente, um erro ao revogar faz o
+operador concluir, errado, que a pessoa ainda tem acesso.* O lado do `add` só está certo porque
+alguém captou `AlreadyExistsError` junto do `TypeOrValueExistsError` — **estava metade certo por
+sorte, não por verificação**. Bug herdado da PR #25 (mergeada em 2026-09-11), não introduzido pela
+#34; corrigido na #34 por ser ela que centraliza os dois caminhos em `applyGroupMembership`.
+
+**Correção decidida (NÃO redecidir)**: não capturar `UnwillingToPerform` — o 53 é genérico e o AD
+também o usa para recusas legítimas (restrição de schema, membro obrigatório, grupo protegido);
+capturá-lo trocaria falso negativo por **falso positivo**, que é pior. A correção é **verificar o
+ESTADO FINAL por releitura**, sem depender de código de erro — mesmo princípio da troca de senha da
+HP (verifica por relogin) e dos passos 9/11 deste próprio teste.
+
+#### A distinção que este achado cria — e que inverte o caso do `objectCategory`
+
+| | fake mais **ESTRITO** que o real | fake **DIFERENTE** do real |
+|---|---|---|
+| Exemplo | `objectCategory` (subtarefa 6) | idempotência do delete (aqui) |
+| Efeito | expõe dependência implícita | **mascara bug de produção** |
+| Custo se ninguém notar | zero — só ajuda | revogação que falha num incidente |
+
+**Fake fiel na estrutura mas inventado no detalhe é fonte de falsa confiança**: o fake respondia 16
+(modelado pela RFC), e por isso **746 testes ficavam verdes provando um comportamento que nunca
+existiu no AD real**. Consequência prática a registrar: **o teste de fumaça supervisionado não foi
+burocracia de processo — foi o único mecanismo que pegou isso**, num código já mergeado.
+
+#### PRECEDENTE DE PROCESSO (vale para toda a Onda 3 e para o que vier depois)
+
+**Nenhum comportamento de erro de protocolo do `fake-ldap-server` — resultCode, mensagem, condição
+de recusa — vale como verificado enquanto não for confrontado contra um DC real pelo menos uma
+vez.** A RFC descreve o que é PERMITIDO; a implementação escolhe dentro disso. Modelar pela RFC é o
+ponto de partida certo, não é evidência. **O levantamento dos pontos do fake modelados por RFC e
+nunca confrontados deve ser feito ANTES de computadores** (próxima peça nova, que senão herda o
+mesmo padrão). Pedido explicitamente pelo usuário.
+
+Nota lateral confirmada: o resultCode **1 (operationsError)** escolhido na PR #33 para operação sem
+bind prévio **bate com o AD real** — uma busca sem bind contra `EA-SRV-AD01` devolveu exatamente
+isso. Esse ponto específico do fake está confrontado.
+
+#### ⛔ BLOQUEANTE da subtarefa 5 (ponte 802.1X): aninhamento de grupos quebra a revogação
+
+O domínio JÁ TEM o grupo de acesso à rede:
+**`CN=wifi-colaboradores,OU=TI,OU=EvokAudio,DC=evokaudio,DC=local`** (grupo de segurança global,
+20 membros, criado 22/07/2026). Evidência forte de que é o grupo do NPS: `CN=Servidores RAS e IAS`
+(como o NPS se registra no AD) contém `EA-SRV-AD01`, e foi alterado 15 minutos ANTES de o
+`wifi-colaboradores` ser criado. **Ainda assim isso é INFERÊNCIA, não confirmação** — mesma
+disciplina já aplicada à MIB privada das impressoras: obrigatório abrir o `nps.msc` e ver a
+condição "Grupos de Windows" na Network Policy antes de qualquer variável de produção apontar para
+esse DN. **PENDENTE COM O USUÁRIO.**
+
+O problema de design: os 20 membros incluem **grupos departamentais inteiros** (`G-Comercial`,
+`G-TI`, `G-Financeiro`...) além de usuários nominais. `addGroupMember`/`removeGroupMember` operam
+sobre membership DIRETA. Cenário concreto: alguém do `G-Comercial` herda acesso por aninhamento; o
+operador aperta "revogar" no dashboard; `removeGroupMember` roda, **retorna sucesso** — e a pessoa
+continua conectada, porque nunca foi membro direto. **É exatamente o cenário que este projeto
+existe para evitar** (o incidente de acesso indevido que originou a Onda 3). Não é nota de rodapé:
+**bloqueia fechar a subtarefa 5 para produção**, mesmo tratamento dado ao bind anônimo.
+
+Opções a decidir (nenhuma escolhida ainda): (a) reaproveitar `wifi-colaboradores` com o dashboard
+DETECTANDO e avisando quando o acesso vem de grupo aninhado — "revogar" vira ação diferente ou
+aviso explícito de que não basta; (b) grupo novo próprio do dashboard + mudar a Network Policy do
+NPS para exigir membership num dos dois — mais setup, revogação sempre determinística.
+
+#### Achado menor registrado, NÃO corrigido: `searchGroups()` sem filtro devolve o domínio inteiro
+
+68 grupos neste domínio, incluindo `Admins. do domínio`, `Administradores de esquema` e todo o
+`CN=Builtin`. Não é vazamento (quem chama já está autenticado) e é consequência da decisão correta
+de buscar a partir do `AD_BASE_DN` (restringir ao `AD_GROUPS_OU` esconderia os `G-Departamento`
+legítimos). Mas **não há paginação nem limite** — mesma limitação já registrada no `long-range` do
+histórico de banda, mesma decisão (documentar, não paginar agora). **A nota está citada na
+subtarefa 7 (frontend de AD) do `docs/ad-module-plan.md`**, por pedido do usuário, para não se
+perder como registro geral: o frontend deve mandar `query` por padrão em vez de listar tudo.
+
+#### Configuração descoberta/validada (e o que ainda NÃO vale para produção)
+
+```
+AD_URL=ldaps://EA-SRV-AD01.evokaudio.local:636   <- NOME, nunca IP
+AD_BASE_DN=DC=evokaudio,DC=local
+AD_TLS_CA_FILE=./.certs/evokaudio-ca.pem         <- CA interna; .certs/ entrou no .gitignore
+```
+
+**`AD_URL` com IP NÃO funciona**: o certificado do DC é emitido para `EA-SRV-AD01.evokaudio.local`
+e o TLS falha com `ERR_TLS_CERT_ALTNAME_INVALID`. Antes disso falhou com
+`UNABLE_TO_VERIFY_LEAF_SIGNATURE` (CA interna desconhecida). **Os dois erros validam a eliminação
+da flag de TLS (PR #32) com um caso real**: se `AD_TLS_REJECT_UNAUTHORIZED` ainda existisse, a
+saída fácil sob fricção seria ligá-la "só para destravar agora", e ela ficaria ligada para sempre;
+como só existe `AD_TLS_CA_FILE` (que apenas ESTENDE a lista de CAs), a fricção forçou a correção
+certa. **Validação de uma decisão de design por caso real vale mais que qualquer teste sintético.**
+
+`AD_USERS_OU`/`AD_GROUPS_OU` apontam hoje para `OU=Teste-Dashboard` (OU descartável criada por LDAP
+nesta sessão, com releitura confirmando — melhor prova que conferir no `dsa.msc`, porque resultCode
+0 só diz que o comando foi aceito, não que o objeto existe). `AD_NETWORK_ACCESS_GROUP_DN` aponta
+para um `Rede-Permitida` de TESTE, já excluído — **nome igual ao de produção por coincidência de
+escopo do teste, nunca o mesmo objeto**. Em produção essa variável deve apontar para o grupo real,
+depois da confirmação no `nps.msc`.
+
+#### Ressalva de honestidade sobre o passo 4 (`resetPassword`)
+
+Ele prova que o AD **aceitou** a troca, **não** que a senha nova funciona: `unicodePwd` nunca é
+legível via LDAP, e com `pwdLastSet=0` (troca obrigatória no próximo logon) um bind de verificação
+seria inconclusivo mesmo se tentado. Limite conhecido, não lacuna a corrigir. O
+`AdPasswordAmbiguousError` **não** foi exercitado ao vivo — segue coberto só por teste.
+
 ### Pré-requisito de bind por conexão (era ⛔ bloqueante de GRUPOS) — RESOLVIDO e MERGEADO em 2026-09-11 (PR #33, squash `0c640c5`)
 
 **O gate de grupos está liberado.** O `e2e/fake-ldap-server` agora rastreia estado de bind POR

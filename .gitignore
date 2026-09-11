@@ -35,3 +35,6 @@ e2e/.*.png
 # Retrato local da sonda de MIB privada Brother (tools/brother-mib-probe.mjs) —
 # dado de equipamento real, capturado por operador; nao versionar.
 tools/.brother-mib-snapshot.json
+
+# Certificados de CA interna (especificos do ambiente, nao versionar)
+.certs/

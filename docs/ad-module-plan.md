@@ -158,13 +158,43 @@ de verdade, resetar senha de verdade) do que qualquer coisa já implementada.
    existe pra cobrir.
 7. ⬜ Frontend — telas de Usuários/Grupos/Computadores AD (mesmo padrão visual das telas
    existentes: `Layout`, `StatCard`, `Badge`, `usePolling`)
+   - **A tela de grupos DEVE mandar `query` por padrão, nunca listar tudo.** Medido contra o
+     AD real em 2026-09-11: `searchGroups()` sem filtro devolveu **68 grupos**, o domínio
+     inteiro, incluindo `Admins. do domínio`, `Administradores de esquema` e todo o
+     `CN=Builtin`. Não há paginação nem limite no backend (decisão registrada: documentar, não
+     paginar agora — mesma do `long-range` do histórico de banda). Registrado aqui, e não só no
+     `CLAUDE.md`, a pedido explícito do usuário, porque é o lugar onde o par que fizer esta
+     subtarefa vai olhar.
+   - **A tela precisa DISTINGUIR membership direta de herdada por aninhamento.** Ver o
+     bloqueante da subtarefa 5 no `CLAUDE.md` (teste de fumaça de 2026-09-11): revogar alguém
+     que herdou acesso via grupo aninhado retorna sucesso sem revogar nada.
 8. ⬜ e2e cobrindo os 3 fluxos do escopo funcional acima
 
 > **Estado real em 2026-09-11** (conferido contra `git log`, não só contra este documento):
+> **DESATUALIZADO — ver a atualização de 2026-09-11 logo abaixo.** Texto original:
 > subtarefas 0, 1, 2 e 5 mergeadas em `master`; 3, 4, 6, 7 e 8 **não iniciadas, nenhum código
 > em nenhuma branch**. As variáveis `AD_*` estão documentadas no `.env.example` mas **não
 > configuradas no `.env` real** — sem elas o módulo responde 503 por desenho e o resto do app
 > funciona normalmente.
+
+> **ATUALIZAÇÃO 2026-09-11 (fim do dia)** — o que mudou desde o parágrafo acima:
+> - **6 (`fake-ldap-server`) CONCLUÍDA** — PR #32 (3/4) + PR #33 (4/4, bind por conexão).
+> - **3 (grupos) implementada e aprovada 4/4, PR #34 ABERTA, ainda NÃO mergeada.**
+> - **As `AD_*` AGORA ESTÃO configuradas no `.env` real**, apontando para o AD de produção
+>   `evokaudio.local` com `AD_USERS_OU`/`AD_GROUPS_OU` numa `OU=Teste-Dashboard` descartável.
+>   O `AD_NETWORK_ACCESS_GROUP_DN` aponta para um objeto de TESTE já excluído — **não vale para
+>   produção**, ver o bloqueante abaixo.
+> - **Teste de fumaça supervisionado contra o AD real executado (14 passos).** Achou um BUG DE
+>   PRODUÇÃO na idempotência da revogação, herdado da PR #25 já mergeada — correção em
+>   andamento na branch da PR #34. Detalhe completo no `CLAUDE.md`.
+> - **⛔ A subtarefa 5 (ponte 802.1X), marcada como concluída acima, foi REABERTA para efeito de
+>   produção**: o grupo real (`wifi-colaboradores`) tem grupos departamentais aninhados, e
+>   revogar acesso de quem herdou membership retorna sucesso sem revogar nada. Decisão de
+>   arquitetura pendente com o usuário.
+> - **Antes de começar 4 (computadores)**: fazer o levantamento dos pontos do `fake-ldap-server`
+>   modelados por RFC e nunca confrontados contra um DC real. É o padrão que causou o bug acima.
+> - Pendente com o usuário: confirmar no `nps.msc` se `wifi-colaboradores` é mesmo a condição da
+>   Network Policy de 802.1X.
 
 
 ### Reordenação: `fake-ldap-server` (6) vem ANTES de grupos (3) — decisão do usuário, 2026-09-11
