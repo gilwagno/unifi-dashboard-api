@@ -1252,79 +1252,98 @@ coisas ao mesmo tempo e mascarava a lacuna real.
 mutação escrita em mensagem de commit não substitui rodar o mutante — se o crítico não reexecutou,
 trate como não verificado.
 
-## PR #30 (impressoras) — revisão crítica INTERROMPIDA no meio, achados parciais (2026-09-11)
+## PR #30 (impressoras) — revisão crítica CONCLUÍDA, 47/50, aprovada (2026-09-11)
 
-Branch `fix/printers-toner-level-vendor-mib`, PR #30 aberta e **não mergeada**. A revisão
-crítica (Opus) foi interrompida pelo usuário antes de terminar. Registro do estado real para
-que nenhuma sessão futura trate isso como "revisado e aprovado" — **não está**.
+Branch `fix/printers-toner-level-vendor-mib`, commits `97b1d19`/`eb3379a`/`811f053`/`3466367`/
+`c05b15e` + `28ad06c` (as correções da revisão). **Aprovada para merge; PR ainda aberta nesta
+data.** A revisão chegou a ser interrompida no meio por pedido do usuário e depois retomada até
+o fim — decisão explícita dele de não fechar sem revisar frontend e e2e, que se mostrou certa:
+**3 dos 6 achados estavam justamente no frontend**, e os três sobreviveram aos mutantes com a
+suíte de frontend verde.
 
-**Nada ficou quebrado no disco**: nenhum mutante sobrou aplicado, suíte 578/578 verde e
-typechecks limpos no momento da parada. Nada commitado. `printers.db` de produção intocado
-(mtime `2026-09-10 17:25:50.132265100` conferido antes e depois). Nenhuma chamada de rede real
-contra impressora ou controller em nenhum momento.
+**Como a PR foi entregue estaria em 46/50** — a alegação do autor de que `resolveSupplyStatus`
+tinha fechado a divergência medidor×selo NÃO se sustentava: o ramo existia, mas nada o defendia.
+Com os 6 achados corrigidos (código + teste que mata o mutante), fecha em **47/50**.
 
-**3 achados reais, confirmados por mutação executada, já CORRIGIDOS na worktree do revisor
-(não commitados):**
-1. **SÉRIO — o carro-chefe da PR não tinha teste nenhum do lado da rota.** Apagar o ramo
-   `levelSource === 'vendor-private'` de `resolveSupplyStatus` deixava a suíte 563/563 VERDE.
-   É exatamente o ramo que impede o sintoma que originou a PR: medidor em "100%" e o selo, na
-   MESMA tela, dizendo "Desconhecido". Corrigido com 6 testes; o mutante passa a morrer com 4.
-2. **REAL — assimetria de normalização do serial do cartucho.** O lado PADRÃO já descartava
-   padding de caractere de controle (endurecimento da subtarefa 19), mas o lado da MIB privada
-   fazia só `.trim()` — e `String.prototype.trim` **não remove `\x00`**. Um padding NUL na
-   coluna privada faria os dois seriais nunca casarem, o cruzamento falhar **em silêncio**, e o
-   toner cheio voltar a aparecer como o 0% falso. A correção inteira da PR desligada sem erro
-   em lugar nenhum. Corrigido com `normalizeSupplySerial()` + 3 testes.
-3. **MENOR — guarda de serial vazio/só-padding sem teste que a mate**, inalcançável pelo
-   caminho de `collectAllReadings`. Corrigido com 3 testes diretos em
-   `buildVendorPercentBySerial`.
+**Os 6 achados, cada um com o mutante que o confirma:**
+1. **SÉRIO — o carro-chefe da PR não tinha teste do lado da rota.** Apagar o ramo
+   `levelSource === 'vendor-private'` de `resolveSupplyStatus` deixava a suíte **563/563 verde**.
+   É o ramo que impede o sintoma que originou a PR (medidor "100%" e selo "Desconhecido" na
+   MESMA tela) e que alimenta o "precisa de atenção" do painel de frota. Corrigido: 6 testes; o
+   mutante agora morre com 4, e o inverso (condição sempre-verdadeira) morre com 1.
+2. **SÉRIO — assimetria de normalização do serial do cartucho.** O lado PADRÃO já descartava
+   padding de caractere de controle (endurecimento da subtarefa 19); o lado da MIB privada fazia
+   só `.trim()`, e **`String.prototype.trim` não remove `\x00`**. Padding NUL de um lado só →
+   os dois seriais nunca casam → o cruzamento falha **em silêncio** → o toner cheio volta ao 0%
+   falso. A correção inteira da PR desligada sem erro em lugar nenhum. Corrigido com
+   `normalizeSupplySerial()` + 3 testes.
+3. Guarda de serial vazio/só-padding inalcançável por `collectAllReadings` — corrigida com 3
+   testes DIRETOS em `buildVendorPercentBySerial`.
+4. **Frontend** — trocar `supply.status === 'low'` por `false` apagava o **único sinal visual de
+   alerta** da lista (anel + texto vermelhos) sem uma linha vermelha na suíte.
+5. **Frontend** — trocar `setError(` por `setNotice(` no caminho de falha da 2ª escrita não
+   quebrava nada: o teste checava só o TEXTO, então a promessa explícita do autor ("PARCIAL,
+   **nunca** sucesso") não estava travada e uma falha metade-aplicada apareceria no balão neutro
+   de sucesso. Fechado com `role="alert"`/`role="status"`. O e2e U3 tem a mesma lacuna (assere
+   texto, não o papel do balão) — fechado no nível unitário, que é o lugar certo.
+6. **Frontend** — a guarda `source !== 'unknown'` era satisfeita pela cláusula seguinte no
+   fixture, sem rede de segurança própria.
 
-**2 divergências registradas, NÃO corrigidas:**
-- O comentário de `resolveSupplyStatus` afirma que "só há substituição quando a leitura padrão
-  é comprovadamente lixo" — na prática a MIB privada ganha **incondicionalmente** sempre que o
-  serial casa, mesmo com a leitura padrão sadia. Divergência código×documentação, sem
-  consequência prática provada.
-- `collectOnBoot` (commit `eb3379a`) **inverte a decisão da subtarefa 15** (pollers
-  deliberadamente sem coleta imediata no boot por causa da chamada de rede). A inversão está
-  justificada no comentário do serviço e na mensagem de commit, mas **este arquivo nunca foi
-  atualizado** — quem ler só o `CLAUDE.md` vai achar que a decisão antiga ainda vale.
+**Mutante deixado SEM correção, de propósito**: remover o `\b` de `/\bADF\b/i` sobrevive, mas é
+**equivalente na prática** (nenhum nome de suprimento das 5 impressoras reais contém "adf"
+incidental). Registrado em vez de coberto — teste artificial só pra matar mutante sem valor real
+é dívida técnica disfarçada de cobertura.
 
-**Achado de metodologia, pré-existente e independente desta PR**: o `tsconfig.json` da raiz tem
-`include: ["src/**/*.ts"]` — **nenhum arquivo de `tests/` é typechecked**. "`tsc --noEmit`
-limpo" não diz nada sobre os testes do backend. Foi assim que fixtures de `PrinterSupply`
-ficaram sem o campo obrigatório `levelSource` novo sem ninguém perceber.
+**Boa prática a destacar se esta metodologia for documentada pra outra pessoa**: no achado 4, a
+primeira versão do teste escrito pelo próprio revisor NÃO matava o mutante (passava pela cor, não
+pelo realce). Ele percebeu sozinho e refez. Escrever o teste não é o fim do trabalho — rodar o
+mutante contra o teste novo é.
 
-**O que NUNCA foi revisado**: mutação no frontend, o commit `811f053` (layout do card), os 2
-specs de e2e de `c05b15e` (nunca rodados pelo revisor), o `.gitignore` de `3466367`, e a
-verificação prática da continuidade do histórico SNMP. **Nota não atribuída** — a estimativa
-preliminar do revisor era 46/50 pra PR como o autor entregou (o achado 1 derruba a alegação de
-que a divergência medidor×selo estava fechada), subindo com as 3 correções dele, mas sem o
-frontend e o e2e revisados isso não é uma nota, é um palpite parcial.
+**3 comentários que mentiam, corrigidos sem mudar comportamento**: `resolveSupplyStatus` e o
+campo `levelSource` afirmavam que a substituição "só acontece quando a leitura padrão é lixo
+comprovado" — o código **nunca avalia a qualidade da leitura padrão**, basta o serial casar. O
+comportamento foi mantido (não existe critério objetivo de "é lixo": o 0% das HPs se apresenta
+como leitura *válida*, com `unit=19`/`maxCapacity=100` — foi exatamente isso que gerou o bug), e
+os textos passaram a descrever a regra real. Os outros dois: o docblock de
+`printer-snmp.service.ts` ainda dizia "sem coleta imediata no boot", e o `playwright.config.ts`
+dizia "o backend não chama nada no boot".
 
-## Achado transversal: nenhum teste do BACKEND é typechecked (2026-09-11) — aberto
+Suítes: **backend 578/578** (41 arquivos, +15 testes), **frontend 85/85** (+3), **e2e 15/15**
+rodado 2x sem flake, `tsc --noEmit` e `tsc -b` limpos, `npm run build` OK. O e2e foi testado
+contra falso positivo: com `isPrintPathSupply` desabilitado, o U1 **falha** — não é spec
+decorativo. Ressalva de escopo registrada: U1/U4/U5 interceptam `/consumables` com `page.route`,
+então verificam a UI, **não** a correção de backend da MIB privada de ponta a ponta.
 
-Mesmo espírito dos achados 0.x: pequeno, genuíno, e afeta toda onda futura. **Não bloqueia
-nada hoje**, por isso não virou subtarefa bloqueante — mas precisa estar escrito, porque a
-consequência é silenciosa por natureza.
+### `collectOnBoot` — inversão CONSCIENTE da decisão da subtarefa 15, não regressão
 
-`tsconfig.json` (raiz) tem `"include": ["src/**/*.ts"]`. Ou seja: `tests/**` e `e2e/**` estão
-**fora** do programa do TypeScript. Consequência prática: **`npx tsc --noEmit` limpo não diz
-nada sobre os arquivos de teste do backend** — um fixture com campo obrigatório faltando, um
-mock com assinatura errada, um `as` mentindo sobre o tipo real: nada disso aparece. O `vitest`
-roda via esbuild, que apaga os tipos sem checá-los, então também não pega.
+A subtarefa 15 deixou os pollers de coleta deliberadamente sem leitura imediata no boot, para não
+gerar tráfego de rede antes de o app terminar de subir. A PR #30 inverte isso **apenas para o
+poller SNMP de impressoras**, e a restrição original foi preservada, não revogada:
+`collectOnBoot()` é chamada por `src/server.ts` **depois** do `listen` resolver, nunca no import
+do módulo — importar o serviço num teste ou script continua sem gerar chamada de rede nenhuma — e
+não é aguardada (`collectAllReadings` trata e loga cada falha por impressora e nunca rejeita,
+então uma impressora desligada não atrasa nem derruba o boot). O que mudou desde a subtarefa 15 é
+o custo do lado oposto, medido ao vivo: `lastReadings` é memória de processo e é a **única** fonte
+de `/consumables`, então todo restart deixava a tela afirmando "nunca coletado" por até 15 minutos
+para uma impressora ligada e respondendo — não ausência de dado, mas uma afirmação errada; sob
+`tsx watch` isso era permanente ("tem hora que aparece e tem hora que some"). A assimetria com o
+poller de banda (que segue sem coleta no boot) é deliberada: lá o buffer se reconstrói em 5
+minutos e há `bandwidth_samples` no SQLite cobrindo o longo prazo, então um restart só atrasa,
+não mente.
 
-Foi assim que os fixtures de `PrinterSupply` em `tests/integration/printers-consumables.test.ts`
-ficaram sem o campo obrigatório `levelSource` (introduzido na PR #30) sem ninguém perceber —
-achado real da revisão daquela PR, não hipótese.
+### Achado transversal: o mtime do `printers.db` NÃO é prova de isolamento
 
-**Não confundir com o achado equivalente do FRONTEND** (item 20 da Onda 2, `tsc --noEmit` não
-checar nada por causa do solution file): são problemas diferentes, e o do frontend tem solução
-diferente. Lá, `frontend/tsconfig.app.json` tem `"include": ["src"]`, e os testes moram dentro
-de `frontend/src/` — então **os testes do frontend SÃO typechecked** por `npx tsc -b`. O buraco
-é só do backend.
+Mesma categoria do achado do `tsconfig` registrado na seção anterior — **um sinal que parece
+confiável e não é**. Várias sessões deste projeto usaram "o mtime do `printers.db` não mudou"
+como prova de que nada tocou o banco de produção. **Isso deixou de valer**: com o dev server de
+pé, o arquivo muda sozinho a cada ciclo de poll (15 min, gravando `printer_snmp_history`) e agora
+também logo após todo restart, por causa do `collectOnBoot` acima. Confirmado ao vivo em
+2026-09-11: o mtime pulou de `2026-09-10 17:25:50` para `2026-09-11 08:38:28` **enquanto uma
+revisão crítica rodava numa worktree isolada** — a revisão não tinha nenhuma relação com a
+mudança, foi o dev server que o usuário tinha pedido para subir.
 
-Correção provável quando for tratado: um `tsconfig.test.json` próprio estendendo o da raiz, com
-`include` cobrindo `tests/**` e `e2e/**` e `noEmit: true`, rodado junto do `tsc --noEmit`
-atual — em vez de simplesmente alargar o `include` da raiz, que passaria a arrastar os testes
-para o `build` de produção. **Não implementado; não supor que já está feito sem conferir o
-`tsconfig.json` real.**
+**O sinal confiável é o isolamento por env var**, não o mtime: a suíte de backend força
+`PRINTERS_DB_FILE ??= ':memory:'` (`tests/setup.ts`) e o e2e usa
+`PRINTERS_DB_FILE=./e2e/.printers-e2e.db`. Conferir ESSAS duas coisas é o que prova isolamento.
+Se uma sessão futura precisar mesmo do mtime como evidência, derrube o dev server antes — senão o
+sinal é ruído.
