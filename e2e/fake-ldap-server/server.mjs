@@ -62,6 +62,7 @@ const { BerReader, BerWriter } = asn1ber;
 // NoSuchObjectError, código 20 -> TypeOrValueExistsError).
 const RESULT = {
   success: 0,
+  operationsError: 1,
   noSuchAttribute: 16,
   attributeOrValueExists: 20,
   noSuchObject: 32,
@@ -394,9 +395,19 @@ function seedDirectory(config) {
 }
 
 // --- Núcleo: uma conexão -------------------------------------------------
-
+//
+// PRÉ-REQUISITO BLOQUEANTE da subtarefa de grupos (ver a seção correspondente
+// no topo da Onda 3 do CLAUDE.md): um Active Directory real recusa qualquer
+// operação (search/add/modify/delete) enviada antes de um bind bem-sucedido
+// NAQUELA conexão. Até esta correção, este fake aceitava tudo — um "buraco
+// da classe PROTEÇÃO SEM TRAVA" que já apareceu 3x neste projeto (ver o
+// mesmo bloco do CLAUDE.md). `connState` é criado UMA VEZ por socket TCP
+// (fechado sobre ele no listener de `data`) e nunca compartilhado entre
+// conexões — autenticação numa conexão não pode vazar autorização para
+// outra, exatamente como um AD real.
 function handleConnection(socket, state) {
   let buf = Buffer.alloc(0);
+  const connState = { authenticated: false };
 
   socket.on('data', (chunk) => {
     buf = Buffer.concat([buf, chunk]);
@@ -413,7 +424,7 @@ function handleConnection(socket, state) {
       const msgBuf = buf.subarray(0, total);
       buf = buf.subarray(total);
       try {
-        handleMessage(socket, state, msgBuf);
+        handleMessage(socket, state, connState, msgBuf);
       } catch (err) {
         state.log(`erro processando mensagem: ${err.stack ?? err.message}`);
         socket.destroy();
@@ -428,7 +439,30 @@ function handleConnection(socket, state) {
   });
 }
 
-function handleMessage(socket, state, msgBuf) {
+// Operações que exigem bind prévio bem-sucedido NESTA conexão. BindRequest
+// nunca passa por aqui (é tratado à parte, sempre permitido — é o próprio
+// mecanismo de autenticação) e UnbindRequest também não (é só um sinal de
+// fechamento, sem resposta, RFC 4511 §4.3).
+//
+// Código de resultado escolhido: 1 (operationsError), não 53
+// (unwillingToPerform). RFC 4511 §4.2.1 define operationsError exatamente
+// como "a requisição não é permitida no estado atual do protocolo" — é
+// literalmente o caso de uma SearchRequest/AddRequest/etc. chegando antes de
+// qualquer Bind ter sido aceito nesta conexão. unwillingToPerform (53) fica
+// reservado neste fake para "operação reconhecida mas fora do subconjunto de
+// protocolo suportado" (ver o `default` de handleMessage, inalterado) — usar
+// o mesmo código para os dois casos misturaria "não implementado" com "não
+// autenticado", duas causas bem diferentes para quem depura contra este
+// fake.
+function requireBind(socket, connState, messageId, responseOpTag) {
+  if (connState.authenticated) return true;
+  socket.write(
+    encodeResult(messageId, responseOpTag, RESULT.operationsError, 'Operação requer bind prévio bem-sucedido (fake-ldap-server)'),
+  );
+  return false;
+}
+
+function handleMessage(socket, state, connState, msgBuf) {
   const reader = new BerReader(msgBuf);
   reader.readSequence(SEQUENCE); // LDAPMessage
   const messageId = reader.readInt();
@@ -437,21 +471,32 @@ function handleMessage(socket, state, msgBuf) {
 
   switch (opTag) {
     case OP.BindRequest:
-      handleBind(socket, state, messageId, reader);
+      handleBind(socket, state, connState, messageId, reader);
       return;
     case OP.UnbindRequest:
+      // RFC 4511 §4.3: Unbind não tem resposta e encerra a conexão — mas
+      // também precisa devolver o estado desta conexão a não-autenticado
+      // antes de fechar (não porque algo reutilize `connState` depois do
+      // `socket.end()`, mas para que a garantia "unbind volta ao estado não
+      // autenticado" seja verdadeira por construção, não só por acidente de
+      // o socket morrer logo em seguida).
+      connState.authenticated = false;
       socket.end();
       return;
     case OP.SearchRequest:
+      if (!requireBind(socket, connState, messageId, OP.SearchResultDone)) return;
       handleSearch(socket, state, messageId, reader, opEnd);
       return;
     case OP.AddRequest:
+      if (!requireBind(socket, connState, messageId, OP.AddResponse)) return;
       handleAdd(socket, state, messageId, reader);
       return;
     case OP.ModifyRequest:
+      if (!requireBind(socket, connState, messageId, OP.ModifyResponse)) return;
       handleModify(socket, state, messageId, reader);
       return;
     case OP.DelRequest: {
+      if (!requireBind(socket, connState, messageId, OP.DelResponse)) return;
       // DelRequest ::= [APPLICATION 10] LDAPDN — PRIMITIVO (não é uma
       // SEQUENCE: o próprio ldapts escreve os bytes do DN direto como
       // conteúdo do tag, ver DeleteRequest.writeMessage). O conteúdo já
@@ -472,13 +517,30 @@ function handleMessage(socket, state, msgBuf) {
 //   authentication AuthenticationChoice } — só bind SIMPLES (tag 0x80) é
 // suportado, que é o único que ad.service.ts usa (`client.bind(dn, senha)`
 // sem `mechanism`, ver node_modules/ldapts/src/messages/BindRequest.ts).
-function handleBind(socket, state, messageId, reader) {
+//
+// Anonymous bind (RFC 4511 §5.1.2: DN vazio e/ou senha vazia) NÃO é
+// suportado por este fake — cai no mesmo ramo de credenciais inválidas
+// abaixo (DN vazio nunca bate `state.config.bindDn`, senha vazia nunca bate
+// `state.config.bindPassword`). Decisão deliberada, não omissão: o único
+// client real deste projeto (`ad.service.ts`) sempre faz
+// `client.bind(dn, senha)` com as duas credenciais configuradas — nunca bind
+// anônimo — então simular esse caminho geraria comportamento sem nenhum
+// consumidor real para validar contra, e um bind anônimo "aceito" por
+// engano teria sido exatamente o tipo de PROTEÇÃO SEM TRAVA que esta
+// subtarefa existe para fechar.
+//
+// Toda tentativa de bind — mesmo com sucesso — RESETA `connState.
+// authenticated` antes de reavaliar: uma credencial errada NUNCA pode deixar
+// a conexão autenticada (nem por reter um estado `true` de um bind anterior
+// bem-sucedido na mesma conexão — um client pode, em teoria, tentar rebind).
+function handleBind(socket, state, connState, messageId, reader) {
   reader.readInt(); // version
   const dn = reader.readString(OCTET_STRING);
   const authTag = reader.peek();
   const password = authTag === CONTEXT_SIMPLE_AUTH ? reader.readString(CONTEXT_SIMPLE_AUTH) : null;
 
   const ok = password !== null && normalizeDn(dn) === normalizeDn(state.config.bindDn) && password === state.config.bindPassword;
+  connState.authenticated = ok;
 
   socket.write(
     encodeResult(messageId, OP.BindResponse, ok ? RESULT.success : RESULT.invalidCredentials, ok ? '' : 'Credenciais inválidas (fake-ldap-server)'),
