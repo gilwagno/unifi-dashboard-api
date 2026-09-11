@@ -29,6 +29,7 @@ vi.mock('../lib/api', async (importOriginal) => {
         collectedAt: null,
         pageCount: null,
         lowThresholdPct: null,
+        source: 'live' as const,
         supplies: [],
       })),
       setClientAlias: vi.fn(),
@@ -169,6 +170,7 @@ describe('Printers page', () => {
       collectedAt: '2026-08-31T12:00:00.000Z',
       pageCount: 1234,
       lowThresholdPct: null,
+      source: 'live' as const,
       supplies: [
         { name: 'Black Toner', serialNumber: null, levelPercent: 42, status: 'ok' },
         { name: 'Waste Toner Box', serialNumber: null, levelPercent: null, status: 'unknown' },
@@ -216,6 +218,47 @@ describe('Printers page', () => {
   // impressão de "a maioria está bem". As duas de 100% eram rolos do ADF
   // (alimentador de documentos do scanner, não afeta impressão nenhuma). O
   // medidor compacto não deve misturar peça de scanner com toner de verdade.
+  // O backend passou a servir a última leitura PERSISTIDA quando o buffer em
+  // memória do poller está vazio (o caso normal logo depois de todo restart).
+  // Exibir esse dado sem dizer que ele não é o estado corrente seria trocar
+  // uma afirmação falsa ("nunca coletado") por outra ("isto é agora").
+  it('marca "do histórico" quando a leitura veio do disco, e NÃO marca quando é ao vivo', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    vi.mocked(api.getPrinterConsumables).mockResolvedValue({
+      printerId: 'p1',
+      collectedAt: '2026-09-11T11:54:06.370Z',
+      pageCount: 4821,
+      lowThresholdPct: 15,
+      source: 'history' as const,
+      supplies: [{ name: 'Black Toner', serialNumber: null, levelPercent: 8, status: 'low' }],
+    });
+    const user = userEvent.setup();
+    renderPrinters();
+    await user.click(await screen.findByRole('button', { name: /Ver consumíveis/ }));
+
+    expect(await screen.findByText('do histórico')).toBeInTheDocument();
+  });
+
+  it('não marca "do histórico" quando a leitura é ao vivo', async () => {
+    vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
+    vi.mocked(api.getPrinterConsumables).mockResolvedValue({
+      printerId: 'p1',
+      collectedAt: '2026-09-11T12:15:16.831Z',
+      pageCount: 4615,
+      lowThresholdPct: 15,
+      source: 'live' as const,
+      supplies: [{ name: 'Black Toner', serialNumber: null, levelPercent: 70, status: 'ok' }],
+    });
+    const user = userEvent.setup();
+    renderPrinters();
+    await user.click(await screen.findByRole('button', { name: /Ver consumíveis/ }));
+
+    // "Páginas impressas" aparece duas vezes na tela (o StatCard da frota e o
+    // detalhe do card) — ancora no valor do detalhe, que é único.
+    expect(await screen.findByText('4615')).toBeInTheDocument();
+    expect(screen.queryByText('do histórico')).not.toBeInTheDocument();
+  });
+
   it('não mostra peças do ADF no medidor compacto da linha, mesmo com percentual conhecido — só no detalhe expandido', async () => {
     vi.mocked(api.listPrinters).mockResolvedValue([PRINTER_INTEGRATION]);
     vi.mocked(api.getPrinterConsumables).mockResolvedValue({
@@ -223,6 +266,7 @@ describe('Printers page', () => {
       collectedAt: '2026-09-10T16:44:02.000Z',
       pageCount: 59934,
       lowThresholdPct: 15,
+      source: 'live' as const,
       supplies: [
         { name: 'Black Toner', serialNumber: 'CRUM-210729A5BB3', levelPercent: 0, status: 'low' },
         { name: 'Transfer Roller', serialNumber: null, levelPercent: null, status: 'not-measured' },
@@ -261,6 +305,7 @@ describe('Printers page', () => {
       collectedAt: '2026-09-10T16:44:02.000Z',
       pageCount: 59934,
       lowThresholdPct: 15,
+      source: 'live' as const,
       supplies: [
         // Os dois nomes caem no MESMO preenchimento neutro
         // (`NEUTRAL_SUPPLY_FILL`) de propósito: se um fosse "Black Toner", a
@@ -308,6 +353,7 @@ describe('Printers page', () => {
       collectedAt: null,
       pageCount: null,
       lowThresholdPct: null,
+      source: 'live' as const,
       supplies: [],
     });
 
@@ -322,6 +368,7 @@ describe('Printers page', () => {
       collectedAt: '2026-09-10T16:48:24.000Z',
       pageCount: 500,
       lowThresholdPct: null,
+      source: 'live' as const,
       supplies: [{ name: 'Black Toner', serialNumber: null, levelPercent: 55, status: 'ok' }],
     });
 
@@ -343,6 +390,7 @@ describe('Printers page', () => {
         collectedAt: '2026-08-31T12:00:00.000Z',
         pageCount: 500,
         lowThresholdPct: null,
+        source: 'live' as const,
         supplies: [{ name: 'Black Toner', serialNumber: null, levelPercent: 90, status: 'ok' }],
       });
 
@@ -374,6 +422,7 @@ describe('Printers page', () => {
               collectedAt: '2026-08-31T12:00:00.000Z',
               pageCount: 500,
               lowThresholdPct: null,
+              source: 'live' as const,
               supplies: [{ name: 'Black Toner', serialNumber: null, levelPercent: 90, status: 'ok' }],
             }
           : {
@@ -383,6 +432,7 @@ describe('Printers page', () => {
               collectedAt: '2026-08-31T12:00:00.000Z',
               pageCount: 500,
               lowThresholdPct: 20,
+              source: 'live' as const,
               supplies: [{ name: 'Toner Preto', serialNumber: null, levelPercent: 5, status: 'low' }],
             },
       );
@@ -416,6 +466,7 @@ describe('Printers page', () => {
       collectedAt: '2026-08-31T12:00:00.000Z',
       pageCount: 1234,
       lowThresholdPct: null,
+      source: 'live' as const,
       supplies: [
         { name: 'Black Toner', serialNumber: 'CRUM-210729A5BB3', levelPercent: 55, status: 'ok' },
         { name: 'Drum Unit', serialNumber: null, levelPercent: 80, status: 'ok' },

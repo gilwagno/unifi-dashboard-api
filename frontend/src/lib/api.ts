@@ -286,6 +286,18 @@ export interface PrinterConsumablesResponse {
   collectedAt: string | null;
   pageCount: number | null;
   lowThresholdPct: number | null;
+  // De onde veio esta resposta (backend, GET /printers/:id/consumables):
+  // 'live' = buffer em memória do poller; 'history' = última leitura
+  // PERSISTIDA, servida porque o buffer está vazio (o caso normal logo
+  // depois de todo restart do backend); 'none' = nunca coletada em lugar
+  // nenhum.
+  //
+  // Tratar isto na tela NÃO é opcional: o backend passou a servir dado do
+  // histórico justamente para parar de afirmar "nunca coletado" com leitura
+  // no disco — se a UI exibir o dado velho sem dizer que é velho, ela troca
+  // uma afirmação falsa por outra, que é exatamente o que o campo existe
+  // para impedir.
+  source: 'live' | 'history' | 'none';
   supplies: PrinterConsumableSupply[];
 }
 

@@ -1510,6 +1510,19 @@ export function Printers() {
                           <Calendar className="h-3.5 w-3.5 text-slate-400" strokeWidth={2} />
                           <span className="text-[11px] text-slate-400">Coletado em</span>
                           <span className="text-[11.5px] font-semibold text-slate-700">{formatCollectedAt(c.collectedAt)}</span>
+                          {/* O backend serve a última leitura PERSISTIDA quando o buffer
+                              em memória do poller está vazio (o caso normal logo depois
+                              de um restart). Exibir esse dado sem dizer que ele não é o
+                              estado corrente seria trocar uma afirmação falsa por outra —
+                              ver `source` em PrinterConsumablesResponse. */}
+                          {c.source === 'history' && (
+                            <span
+                              className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700"
+                              title="Leitura recuperada do histórico: o poller ainda não coletou desde que o servidor subiu."
+                            >
+                              do histórico
+                            </span>
+                          )}
                         </div>
                         <div className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5">
                           <Hash className="h-3.5 w-3.5 text-slate-400" strokeWidth={2} />
