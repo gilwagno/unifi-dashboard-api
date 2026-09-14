@@ -36,6 +36,32 @@ const envSchema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
   RATE_LIMIT_CLIENT_ACTION_MAX: z.coerce.number().int().positive().default(10),
   RATE_LIMIT_DEVICE_RESTART_MAX: z.coerce.number().int().positive().default(5),
+  // Limite DEDICADO da porta de entrada. Sem ele, `/auth/login` caía no
+  // limite global (100/min) — ou seja, a rota que um atacante ataca de fora,
+  // com usuário conhecido e único, era DEZ VEZES menos protegida que
+  // `/clients/block`, que só quem já está autenticado alcança. Inversão de
+  // risco, corrigida aqui.
+  RATE_LIMIT_LOGIN_MAX: z.coerce.number().int().positive().default(5),
+  // Confiar (ou não) no `X-Forwarded-For` para descobrir o IP do cliente.
+  //
+  // O DEFAULT É `false` DE PROPÓSITO, e a direção importa:
+  //   - `false` sem proxy: correto — o IP é o do socket.
+  //   - `false` COM proxy (ex.: Cloudflare Tunnel, no roadmap deste
+  //     projeto): todo mundo aparece com o MESMO IP, o do proxy. O limite
+  //     por IP vira um limite GLOBAL: 5 tentativas erradas de qualquer
+  //     pessoa trancam o login de todos.
+  //   - `true` COM proxy: correto.
+  //   - `true` SEM proxy: FALHA ABERTA. Qualquer um manda
+  //     `X-Forwarded-For: <aleatório>` a cada requisição e o rate limit
+  //     nunca dispara — a proteção some sem deixar rastro.
+  //
+  // O último caso é o pior dos quatro, e é por isso que o default é o
+  // seguro: ligar isto é uma decisão consciente de quem sabe que há um
+  // proxy confiável na frente, não um padrão herdado por descuido.
+  TRUST_PROXY: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
 
   // Arquivo do banco SQLite do módulo de manutenção de impressoras (ver
   // src/db/printers.db.ts) — primeira persistência em disco do projeto

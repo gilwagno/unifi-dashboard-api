@@ -13,7 +13,20 @@ const refreshSchema = z.object({
 });
 
 export default async function authRoutes(app: FastifyInstance) {
-  app.post('/auth/login', async (request, reply) => {
+  // Limite DEDICADO, mais restrito que o global. `/auth/login` é a única
+  // rota deste app que um atacante alcança SEM credencial, o usuário é
+  // conhecido e único (`ADMIN_USER`), e o custo de errar é uma tentativa de
+  // senha. Até aqui ela caía no limite global de 100/min — dez vezes mais
+  // folgada que `/clients/block`, que exige estar autenticado.
+  //
+  // O contador é POR IP, e de onde vem esse IP depende de `TRUST_PROXY`
+  // (ver src/config/env.ts). Atrás de um proxy sem essa variável ligada,
+  // todos compartilham o IP do proxy e este limite vira global.
+  const loginConfig = {
+    config: { rateLimit: { max: env.RATE_LIMIT_LOGIN_MAX, timeWindow: env.RATE_LIMIT_WINDOW } },
+  };
+
+  app.post('/auth/login', loginConfig, async (request, reply) => {
     const parsed = loginSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'username e password são obrigatórios' });
