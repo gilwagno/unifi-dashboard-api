@@ -894,6 +894,154 @@ describe('fake-ldap-server — exige bind prévio por conexão (RFC 4511 §4.2.1
   });
 });
 
+// --- Computadores (subtarefa 4) ------------------------------------------
+//
+// Contra o PROTOCOLO REAL desde o primeiro teste, nunca só com
+// `vi.mock('ldapts')` — regra explícita desta subtarefa: validar computadores
+// só no mock repetiria o padrão que já deixou passar um bug de produção
+// nesta mesma onda (a idempotência da revogação).
+describe('ad.service — computadores, protocolo LDAP real (fake-ldap-server)', () => {
+  beforeEach(restartFakeLdap);
+
+  it('searchComputers() sem query lista os 4 computadores semeados, inclusive o DC', async () => {
+    const { searchComputers } = await importAdService();
+    const computers = await searchComputers();
+
+    expect(computers.map((c) => c.name).sort()).toEqual(['EA-PC-SEMUAC', 'EA-PC-TESTE01', 'EA-PC-TESTE02', 'EA-SRV-FAKE01']);
+  });
+
+  it('o `$` do sAMAccountName NÃO vaza para `name`, e vem no campo próprio', async () => {
+    const { getComputer } = await importAdService();
+    const pc = await getComputer('EA-PC-TESTE01');
+
+    expect(pc.name).toBe('EA-PC-TESTE01');
+    expect(pc.sAMAccountName).toBe('EA-PC-TESTE01$');
+  });
+
+  it('busca pelo nome COM `$` acha o mesmo objeto que sem `$`', async () => {
+    const { getComputer } = await importAdService();
+    const semCifrao = await getComputer('EA-PC-TESTE01');
+    const comCifrao = await getComputer('EA-PC-TESTE01$');
+
+    expect(comCifrao.dn).toBe(semCifrao.dn);
+  });
+
+  it('lê os atributos de inventário que a tela precisa', async () => {
+    const { getComputer } = await importAdService();
+    const pc = await getComputer('EA-PC-TESTE01');
+
+    expect(pc.dnsHostName).toBe('ea-pc-teste01.fakeldap.test');
+    expect(pc.operatingSystem).toBe('Windows 11 Pro');
+    expect(pc.operatingSystemVersion).toBe('10.0 (26200)');
+    expect(pc.description).toBe('Estação de teste');
+  });
+
+  it('computador semeado DESABILITADO sai com enabled: false, sem nenhuma mutação antes', async () => {
+    const { getComputer } = await importAdService();
+    expect((await getComputer('EA-PC-TESTE02')).enabled).toBe(false);
+  });
+
+  // O ponto do teste não é o booleano — é que a listagem NÃO esconde o DC.
+  // Esconder seria mentir sobre o que existe no domínio; o que a interface
+  // precisa é do sinal para avisar ANTES de alguém desabilitar a conta que
+  // sustenta o domínio inteiro.
+  it('distingue CONTROLADOR DE DOMÍNIO de estação, e não esconde o DC da listagem', async () => {
+    const { searchComputers, getComputer } = await importAdService();
+
+    expect((await getComputer('EA-SRV-FAKE01')).isDomainController).toBe(true);
+    expect((await getComputer('EA-PC-TESTE01')).isDomainController).toBe(false);
+
+    const nomes = (await searchComputers()).map((c) => c.name);
+    expect(nomes).toContain('EA-SRV-FAKE01');
+  });
+
+  it('setComputerEnabled desabilita e reabilita DE VERDADE no diretório, ida e volta', async () => {
+    const { getComputer, setComputerEnabled } = await importAdService();
+
+    expect((await getComputer('EA-PC-TESTE01')).enabled).toBe(true);
+    await setComputerEnabled('EA-PC-TESTE01', false);
+    expect((await getComputer('EA-PC-TESTE01')).enabled).toBe(false);
+    await setComputerEnabled('EA-PC-TESTE01', true);
+    expect((await getComputer('EA-PC-TESTE01')).enabled).toBe(true);
+  });
+
+  // Regressão do achado já corrigido em `setUserEnabled`: escrever um UAC
+  // montado do zero apagaria os outros bits do objeto. Num computador o bit
+  // que se perderia é o que o distingue de um controlador de domínio — por
+  // isso o teste confere o bit de trust DEPOIS da escrita, não só `enabled`.
+  it('desabilitar PRESERVA os outros bits do userAccountControl (não sobrescreve o objeto)', async () => {
+    const { getComputer, setComputerEnabled } = await importAdService();
+
+    await setComputerEnabled('EA-SRV-FAKE01', false);
+    const dc = await getComputer('EA-SRV-FAKE01');
+
+    expect(dc.enabled).toBe(false);
+    expect(dc.isDomainController).toBe(true);
+  });
+
+  // PROTEÇÃO SEM TRAVA encontrada por mutação nesta subtarefa: trocar a
+  // recusa por `currentUac ?? UF_WORKSTATION_TRUST_ACCOUNT` passava com a
+  // suíte inteira verde (784/784). O efeito real do mutante seria gravar um
+  // UAC inventado por cima do objeto, apagando em silêncio todos os bits que
+  // não conseguimos ler — num computador, inclusive o que o distingue de um
+  // CONTROLADOR DE DOMÍNIO.
+  it('sem userAccountControl legível, a LEITURA devolve null em vez de afirmar "habilitado"', async () => {
+    const { getComputer } = await importAdService();
+    const pc = await getComputer('EA-PC-SEMUAC');
+
+    expect(pc.enabled).toBeNull();
+    expect(pc.isDomainController).toBeNull();
+  });
+
+  it('sem userAccountControl legível, a ESCRITA é RECUSADA (não grava um UAC adivinhado)', async () => {
+    const { setComputerEnabled, AdRequestError } = await importAdService();
+
+    await expect(setComputerEnabled('EA-PC-SEMUAC', false)).rejects.toBeInstanceOf(AdRequestError);
+  });
+
+  it('a recusa acontece ANTES de qualquer escrita — o objeto continua sem userAccountControl', async () => {
+    const { getComputer, setComputerEnabled } = await importAdService();
+
+    await expect(setComputerEnabled('EA-PC-SEMUAC', false)).rejects.toThrow();
+    // Se a escrita tivesse acontecido, o atributo passaria a existir e
+    // `enabled` viraria um booleano — é isso que prova que nada foi gravado.
+    expect((await getComputer('EA-PC-SEMUAC')).enabled).toBeNull();
+  });
+
+  it('getComputer() de quem não existe -> AdComputerNotFoundError (busca real, não DN adivinhado)', async () => {
+    const { getComputer, AdComputerNotFoundError } = await importAdService();
+    await expect(getComputer('EA-PC-NAO-EXISTE')).rejects.toBeInstanceOf(AdComputerNotFoundError);
+  });
+
+  it('setComputerEnabled() de quem não existe falha e NÃO altera nenhum outro computador', async () => {
+    const { getComputer, setComputerEnabled, AdComputerNotFoundError } = await importAdService();
+
+    await expect(setComputerEnabled('EA-PC-NAO-EXISTE', false)).rejects.toBeInstanceOf(AdComputerNotFoundError);
+    expect((await getComputer('EA-PC-TESTE01')).enabled).toBe(true);
+  });
+
+  it('searchComputers(query) filtra por substring em cn/dNSHostName/description', async () => {
+    const { searchComputers } = await importAdService();
+
+    expect((await searchComputers('TESTE01')).map((c) => c.name)).toEqual(['EA-PC-TESTE01']);
+    expect((await searchComputers('srv')).map((c) => c.name)).toEqual(['EA-SRV-FAKE01']);
+    expect((await searchComputers('Estação')).map((c) => c.name)).toEqual(['EA-PC-TESTE01']);
+  });
+
+  // Mesma disciplina do teste de injeção de `searchGroups`: o filtro vai
+  // contra o parser de filtro REAL do fake, então um payload hostil que não
+  // fosse escapado mudaria a ESTRUTURA do filtro e vazaria a lista inteira.
+  it('escapa a query no filtro — payload de injeção não vira "presença" nem vaza a lista', async () => {
+    const { searchComputers } = await importAdService();
+    expect(await searchComputers('*)(objectClass=*')).toEqual([]);
+  });
+
+  it('escapa o nome em getComputer — um nome hostil não casa outro objeto', async () => {
+    const { getComputer, AdComputerNotFoundError } = await importAdService();
+    await expect(getComputer('*')).rejects.toBeInstanceOf(AdComputerNotFoundError);
+  });
+});
+
 // Confirma que o tipo exportado pelo serviço bate com o que o servidor real
 // devolve (sanity check de tipos, não de comportamento).
 void (null as unknown as AdUser);

@@ -330,6 +330,11 @@ function encodeSearchEntry(messageId, entry, requestedAttributes) {
 
 const UF_ACCOUNTDISABLE = 0x0002;
 const UF_NORMAL_ACCOUNT = 0x0200;
+// Bits de conta de COMPUTADOR. Um objeto `computer` no AD carrega um
+// destes em vez de UF_NORMAL_ACCOUNT — e a diferença entre os dois é a
+// diferença entre uma estação qualquer e um CONTROLADOR DE DOMÍNIO.
+const UF_WORKSTATION_TRUST_ACCOUNT = 0x1000;
+const UF_SERVER_TRUST_ACCOUNT = 0x2000;
 
 function seedDirectory(config) {
   const directory = new Map();
@@ -404,6 +409,75 @@ function seedDirectory(config) {
   const jsilvaDn = `CN=jsilva,${config.usersOu}`;
   setAttr(financeiro, 'member', [jsilvaDn]);
   put(financeiro);
+
+  // --- Computadores (subtarefa 4) ---
+  //
+  // Semeados no container padrão `CN=Computers`, que é onde o AD coloca uma
+  // máquina recém-ingressada — e NÃO em config.usersOu. Isso não é detalhe
+  // cosmético: prova que `searchComputers`/`getComputer` buscam a partir do
+  // AD_BASE_DN e não de uma OU configurada, do mesmo jeito que grupos.
+  const makeComputer = ({ cn, dnsHostName, os, osVersion, description, uac, omitUac }) => {
+    const dn = `CN=${cn},CN=Computers,${config.baseDn}`;
+    const entry = makeEntry(dn);
+    setAttr(entry, 'objectClass', ['top', 'person', 'organizationalPerson', 'user', 'computer']);
+    setAttr(entry, 'distinguishedName', [dn]);
+    setAttr(entry, 'cn', [cn]);
+    // O `$` no fim é a forma REAL como o AD grava o sAMAccountName de um
+    // computador — é justamente o que `normalizeComputerName` existe para
+    // conciliar com o nome que o operador digita.
+    setAttr(entry, 'sAMAccountName', [`${cn}$`]);
+    if (dnsHostName) setAttr(entry, 'dNSHostName', [dnsHostName]);
+    if (os) setAttr(entry, 'operatingSystem', [os]);
+    if (osVersion) setAttr(entry, 'operatingSystemVersion', [osVersion]);
+    if (description) setAttr(entry, 'description', [description]);
+    // `omitUac` existe para simular um objeto cujo userAccountControl NÃO
+    // vem legível — o caso real é um bind com permissão de leitura sobre o
+    // objeto mas não sobre esse atributo específico. É o único jeito de
+    // exercitar a recusa de escrita de `setComputerEnabled` contra o
+    // protocolo de verdade.
+    if (!omitUac) setAttr(entry, 'userAccountControl', [String(uac ?? UF_WORKSTATION_TRUST_ACCOUNT)]);
+    put(entry);
+    return entry;
+  };
+
+  makeComputer({
+    cn: 'EA-PC-TESTE01',
+    dnsHostName: 'ea-pc-teste01.fakeldap.test',
+    os: 'Windows 11 Pro',
+    osVersion: '10.0 (26200)',
+    description: 'Estação de teste',
+  });
+
+  // Desabilitado de propósito — exercita `enabled: false` na listagem sem
+  // depender de nenhuma mutação anterior.
+  makeComputer({
+    cn: 'EA-PC-TESTE02',
+    dnsHostName: 'ea-pc-teste02.fakeldap.test',
+    os: 'Windows 10 Pro',
+    uac: UF_WORKSTATION_TRUST_ACCOUNT | UF_ACCOUNTDISABLE,
+  });
+
+  // CONTROLADOR DE DOMÍNIO. Existe aqui porque `objectClass=computer` casa
+  // um DC também, e a listagem NÃO o esconde de propósito (esconder seria
+  // mentir sobre o que há no domínio) — mas `isDomainController` precisa
+  // sair `true` para que a interface possa avisar antes de alguém
+  // desabilitar a conta que sustenta o domínio inteiro.
+  makeComputer({
+    cn: 'EA-SRV-FAKE01',
+    dnsHostName: 'ea-srv-fake01.fakeldap.test',
+    os: 'Windows Server 2016 Standard',
+    uac: UF_SERVER_TRUST_ACCOUNT,
+  });
+
+  // Sem `userAccountControl` legível. Serve a dois propósitos: `enabled` e
+  // `isDomainController` têm que sair `null` (nunca "habilitado" por
+  // padrão — falhar ABERTO num módulo de controle de acesso), e a escrita
+  // tem que ser RECUSADA em vez de gravar um UAC adivinhado por cima.
+  makeComputer({
+    cn: 'EA-PC-SEMUAC',
+    dnsHostName: 'ea-pc-semuac.fakeldap.test',
+    omitUac: true,
+  });
 
   return directory;
 }

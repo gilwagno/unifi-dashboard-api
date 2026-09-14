@@ -8,14 +8,17 @@ import {
   createGroup,
   createUser,
   deleteUser,
+  getComputer,
   getGroup,
   getUser,
   grantNetworkAccess,
   removeGroupMember,
   resetPassword,
   revokeNetworkAccess,
+  searchComputers,
   searchGroups,
   searchUsers,
+  setComputerEnabled,
   setUserEnabled,
   setUserWorkstations,
   unlockUser,
@@ -30,9 +33,9 @@ import {
 // AdRequestError) são mapeados pelo error handler central em src/app.ts —
 // nenhum try/catch aqui, mesmo padrão de ClassicApiNotConfiguredError.
 //
-// Computadores (demais item do escopo funcional do plano) fica para a
-// subtarefa seguinte. Este arquivo cobre "Usuários" + "Ponte 802.1X" +
-// "Grupos / privilégios" (subtarefa 3).
+// Este arquivo cobre os quatro itens do escopo funcional: "Usuários",
+// "Ponte 802.1X", "Grupos / privilégios" (subtarefa 3) e "Computadores"
+// (subtarefa 4).
 
 const usernameParam = z.object({
   username: z.string().trim().min(1, 'username é obrigatório'),
@@ -40,6 +43,24 @@ const usernameParam = z.object({
 
 const searchQuery = z.object({
   query: z.string().trim().min(1).optional(),
+});
+
+// O nome de um computador no AD segue as regras de NetBIOS: até 15
+// caracteres, sem os separadores que o próprio Windows recusa. Validar
+// aqui é defesa em profundidade sobre o `escapeFilter` do serviço — mesmo
+// raciocínio (e mesmo achado de revisão) do charset de `sAMAccountName`.
+// O `$` final é aceito porque é a forma como o AD grava o
+// `sAMAccountName`; o serviço normaliza antes de buscar.
+const computerNameParam = z.object({
+  computerName: z
+    .string()
+    .trim()
+    .min(1, 'computerName é obrigatório')
+    .max(16, 'nome de computador do AD tem limite de 15 caracteres (+ o $ final)')
+    .regex(
+      /^[^,\\\/:;|=+*?<>"\[\]\u0000-\u001f]+$/,
+      'computerName contém caractere não permitido pelo Active Directory',
+    ),
 });
 
 const createUserBody = z.object({
@@ -286,6 +307,36 @@ export default async function adRoutes(app: FastifyInstance) {
   app.delete('/ad/groups/:groupName/members/:username', mutationConfig, async (request, reply) => {
     const { groupName, username } = groupMemberParams.parse(request.params);
     await removeGroupMember(groupName, username);
+    return reply.send({ ok: true });
+  });
+
+  // --- Computadores (subtarefa 4, ver docs/ad-module-plan.md) ---
+  //
+  // `enable`/`disable` ficam no rate limit restrito como toda mutação deste
+  // arquivo — mas vale registrar POR QUE aqui não é só consistência:
+  // desabilitar a conta de um computador quebra o canal seguro dele com o
+  // domínio, e reverter costuma exigir reingressar a máquina. É a mutação
+  // mais destrutiva de todo o módulo de AD.
+  app.get('/ad/computers', async (request) => {
+    const { query } = searchQuery.parse(request.query);
+    const data = await searchComputers(query);
+    return { data };
+  });
+
+  app.get('/ad/computers/:computerName', async (request) => {
+    const { computerName } = computerNameParam.parse(request.params);
+    return getComputer(computerName);
+  });
+
+  app.post('/ad/computers/:computerName/enable', mutationConfig, async (request, reply) => {
+    const { computerName } = computerNameParam.parse(request.params);
+    await setComputerEnabled(computerName, true);
+    return reply.send({ ok: true });
+  });
+
+  app.post('/ad/computers/:computerName/disable', mutationConfig, async (request, reply) => {
+    const { computerName } = computerNameParam.parse(request.params);
+    await setComputerEnabled(computerName, false);
     return reply.send({ ok: true });
   });
 }

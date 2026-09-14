@@ -35,7 +35,23 @@ import { env } from '../config/env.js';
 // justifica a complexidade de gerenciar uma sessão persistente com
 // reconexão.
 
-export class AdNotConfiguredError extends Error {
+// Base comum de TODO erro tipado deste módulo.
+//
+// Existe por um achado da subtarefa 4: `withClient` decidia o que
+// re-lançar por uma LISTA de `instanceof`, uma classe por vez. Um erro
+// tipado novo que ninguém lembrasse de somar àquela lista era silenciosamente
+// reembrulhado em `AdRequestError` — a rota perdia o 404/409 e devolvia erro
+// genérico. Foi exatamente o que aconteceu com `AdComputerNotFoundError`:
+// três testes de integração falharam antes de a lista ser a suspeita.
+//
+// Com uma base comum a regra vira estrutural: quem herda daqui atravessa o
+// `withClient` intacto, e uma subtarefa futura não precisa lembrar de nada.
+// Também conserta um caso que a lista nunca cobriu — `AdRequestError`
+// lançado DENTRO do callback (a recusa de escrita com UAC ilegível) era
+// reembrulhado em outro `AdRequestError`, aninhando a mensagem.
+export class AdError extends Error {}
+
+export class AdNotConfiguredError extends AdError {
   constructor() {
     super(
       'Active Directory não configurado: defina AD_URL, AD_BASE_DN, AD_BIND_DN, ' +
@@ -45,7 +61,7 @@ export class AdNotConfiguredError extends Error {
   }
 }
 
-export class AdRequestError extends Error {
+export class AdRequestError extends AdError {
   constructor(
     message: string,
     public readonly cause?: unknown,
@@ -55,7 +71,7 @@ export class AdRequestError extends Error {
   }
 }
 
-export class AdUserNotFoundError extends Error {
+export class AdUserNotFoundError extends AdError {
   constructor(username: string) {
     super(`Usuário "${username}" não encontrado no Active Directory`);
     this.name = 'AdUserNotFoundError';
@@ -74,7 +90,7 @@ export class AdUserNotFoundError extends Error {
 // `PrinterSwsPasswordVerificationError` (printer-hp-sws.service.ts) — o
 // texto do REPORT do crítico cita esse precedente explicitamente. Nunca vai
 // pro log (só no corpo da resposta HTTP, ver ad.routes.ts).
-export class AdPasswordAmbiguousError extends Error {
+export class AdPasswordAmbiguousError extends AdError {
   constructor(
     username: string,
     public readonly attemptedPassword: string,
@@ -113,7 +129,7 @@ export class AdPasswordAmbiguousError extends Error {
 // é chamada sem AD_NETWORK_ACCESS_GROUP_DN configurado — diferente de
 // AdNotConfiguredError, o resto do módulo (CRUD de usuário) funciona
 // normalmente sem essa variável.
-export class AdNetworkAccessGroupNotConfiguredError extends Error {
+export class AdNetworkAccessGroupNotConfiguredError extends AdError {
   constructor() {
     super(
       'Ponte 802.1X não configurada: defina AD_NETWORK_ACCESS_GROUP_DN no .env ' +
@@ -123,17 +139,24 @@ export class AdNetworkAccessGroupNotConfiguredError extends Error {
   }
 }
 
-export class AdGroupNotFoundError extends Error {
+export class AdGroupNotFoundError extends AdError {
   constructor(name: string) {
     super(`Grupo "${name}" não encontrado no Active Directory`);
     this.name = 'AdGroupNotFoundError';
   }
 }
 
+export class AdComputerNotFoundError extends AdError {
+  constructor(name: string) {
+    super(`Computador "${name}" não encontrado no Active Directory`);
+    this.name = 'AdComputerNotFoundError';
+  }
+}
+
 // Lançado só por `createGroup` — diferente de AdNotConfiguredError (o resto
 // do módulo de grupos, busca/listagem e add/remove de membro, funciona sem
 // AD_GROUPS_OU: ver o comentário da env var em src/config/env.ts).
-export class AdGroupsOuNotConfiguredError extends Error {
+export class AdGroupsOuNotConfiguredError extends AdError {
   constructor() {
     super('Criação de grupo não configurada: defina AD_GROUPS_OU no .env (a OU onde grupos novos são criados).');
     this.name = 'AdGroupsOuNotConfiguredError';
@@ -151,6 +174,10 @@ function isAdConfigured(): boolean {
 const UF_ACCOUNTDISABLE = 0x0002;
 const UF_NORMAL_ACCOUNT = 0x0200; // 512
 const UF_PASSWD_NOTREQD = 0x0020;
+// Conta de computador ingressado no domínio. Usado só para DISTINGUIR uma
+// estação de um CONTROLADOR DE DOMÍNIO (que é UF_SERVER_TRUST_ACCOUNT,
+// 0x2000) — este módulo nunca escreve este bit.
+const UF_WORKSTATION_TRUST_ACCOUNT = 0x1000;
 
 function asString(value: string | string[] | Buffer | Buffer[] | undefined): string | null {
   if (value === undefined) return null;
@@ -268,13 +295,9 @@ async function withClient<T>(fn: (client: Client) => Promise<T>): Promise<T> {
     await client.bind(env.AD_BIND_DN!, env.AD_BIND_PASSWORD!);
     return await fn(client);
   } catch (err) {
-    if (
-      err instanceof AdNotConfiguredError ||
-      err instanceof AdUserNotFoundError ||
-      err instanceof AdPasswordAmbiguousError ||
-      err instanceof AdGroupNotFoundError
-    )
-      throw err;
+    // Qualquer erro tipado deste módulo passa intacto — ver o comentário de
+    // `AdError`. Só erro CRU da lib/rede é que vira AdRequestError aqui.
+    if (err instanceof AdError) throw err;
     const message = err instanceof Error ? err.message : String(err);
     throw new AdRequestError(`Falha na operação com o Active Directory: ${message}`, err);
   } finally {
@@ -909,6 +932,168 @@ export async function removeGroupMember(groupName: string, username: string): Pr
   });
 }
 
+// --- Computadores (item "Computadores" do escopo funcional — subtarefa 4,
+// ver docs/ad-module-plan.md) ---
+//
+// Mesma disciplina dos blocos anteriores: nunca concatenação crua de DN ou
+// filtro, `enabled` é `boolean | null` (nunca assume "habilitado" quando o
+// atributo não veio legível), e a escrita recusa se não conseguiu LER o
+// estado atual antes — ver o comentário de `setComputerEnabled`.
+//
+// DUAS PECULIARIDADES do objeto `computer` no AD, que não existem em
+// usuário/grupo e que o resto deste arquivo não cobria:
+//
+//  1. O `sAMAccountName` de um computador termina em `$` (`EA-PC-TI01$`),
+//     mas o `cn` NÃO (`EA-PC-TI01`). Quem chama a API digita o nome como
+//     aparece na tela — sem `$`. Por isso `findComputerEntry` casa nos
+//     DOIS: aceitar só uma das formas faria metade das buscas legítimas
+//     devolver 404.
+//
+//  2. `objectClass=computer` casa TAMBÉM controladores de domínio (são
+//     computadores, com UF_SERVER_TRUST_ACCOUNT em vez de
+//     UF_WORKSTATION_TRUST_ACCOUNT). Eles NÃO são escondidos da listagem —
+//     omitir um DC de um inventário seria mentir sobre o que existe no
+//     domínio — mas `isDomainController` é exposto para que a interface
+//     possa avisar antes de alguém desabilitar um. Desabilitar a conta de
+//     um DC derruba o domínio.
+
+export interface AdComputer {
+  dn: string;
+  // Nome como aparece no ADUC e na tela — sem o `$` do sAMAccountName.
+  name: string;
+  sAMAccountName: string;
+  dnsHostName: string | null;
+  operatingSystem: string | null;
+  operatingSystemVersion: string | null;
+  description: string | null;
+  // `null` quando userAccountControl não veio na leitura — mesma regra (e
+  // mesma razão) de `AdUser.enabled`: nunca falhar ABERTO afirmando
+  // "habilitado" sobre um objeto cujo estado não foi possível ler.
+  enabled: boolean | null;
+  // `null` pela mesma razão: sem UAC legível não dá para afirmar nem
+  // negar. Um `false` aqui seria uma afirmação, não uma lacuna.
+  isDomainController: boolean | null;
+}
+
+const COMPUTER_SEARCH_ATTRIBUTES = [
+  'distinguishedName',
+  'cn',
+  'sAMAccountName',
+  'dNSHostName',
+  'operatingSystem',
+  'operatingSystemVersion',
+  'description',
+  'userAccountControl',
+];
+
+function toAdComputer(entry: Record<string, string | string[] | Buffer | Buffer[]>, dn: string): AdComputer {
+  const uac = asNumber(entry.userAccountControl);
+  const sam = asString(entry.sAMAccountName) ?? '';
+
+  return {
+    dn,
+    // Preferimos o `cn`; o fallback tira o `$` para não vazar a forma
+    // interna do AD para a tela quando o `cn` não vier.
+    name: asString(entry.cn) ?? sam.replace(/\$$/, ''),
+    sAMAccountName: sam,
+    // O AD grafa este atributo como `dNSHostName` e o `ldapts` devolve a
+    // chave exatamente como o servidor a escreveu — lemos as duas grafias
+    // em vez de apostar numa.
+    dnsHostName: asString(entry.dNSHostName) ?? asString(entry.dnsHostName),
+    operatingSystem: asString(entry.operatingSystem),
+    operatingSystemVersion: asString(entry.operatingSystemVersion),
+    description: asString(entry.description),
+    enabled: uac === null ? null : (uac & UF_ACCOUNTDISABLE) === 0,
+    isDomainController: uac === null ? null : (uac & UF_WORKSTATION_TRUST_ACCOUNT) === 0,
+  };
+}
+
+// Normaliza o nome recebido pela API para a forma do `cn` (sem `$`).
+function normalizeComputerName(name: string): string {
+  return name.endsWith('$') ? name.slice(0, -1) : name;
+}
+
+async function findComputerEntry(
+  client: Client,
+  name: string,
+): Promise<Record<string, string | string[] | Buffer | Buffer[]>> {
+  const cn = normalizeComputerName(name);
+  const sam = `${cn}$`;
+  const { searchEntries } = await client.search(env.AD_BASE_DN!, {
+    scope: 'sub',
+    filter: escapeFilter`(&(objectClass=computer)(|(cn=${cn})(sAMAccountName=${sam})))`,
+    attributes: COMPUTER_SEARCH_ATTRIBUTES,
+  });
+
+  const entry = searchEntries[0];
+  if (!entry) throw new AdComputerNotFoundError(name);
+  return entry as unknown as Record<string, string | string[] | Buffer | Buffer[]>;
+}
+
+export async function searchComputers(query?: string): Promise<AdComputer[]> {
+  return withClient(async (client) => {
+    const filter = query
+      ? escapeFilter`(&(objectClass=computer)(|(cn=*${query}*)(dNSHostName=*${query}*)(description=*${query}*)))`
+      : '(objectClass=computer)';
+
+    // `paged: true` pela mesma razão de searchUsers/searchGroups: um
+    // domínio com mais computadores que o MaxPageSize do DC (1000 por
+    // padrão) recusaria a busca inteira com SizeLimitExceededError.
+    const { searchEntries } = await client.search(env.AD_BASE_DN!, {
+      scope: 'sub',
+      filter,
+      attributes: COMPUTER_SEARCH_ATTRIBUTES,
+      paged: true,
+    });
+
+    return searchEntries.map((entry) =>
+      toAdComputer(entry as unknown as Record<string, string | string[] | Buffer | Buffer[]>, entry.dn),
+    );
+  });
+}
+
+export async function getComputer(name: string): Promise<AdComputer> {
+  return withClient(async (client) => {
+    const entry = await findComputerEntry(client, name);
+    return toAdComputer(entry, asString(entry.distinguishedName) ?? (entry.dn as unknown as string));
+  });
+}
+
+// Habilita/desabilita a CONTA do computador no domínio.
+//
+// NÃO é o mesmo que desligar a máquina: desabilitar a conta quebra o canal
+// seguro entre o computador e o domínio — quem já está logado continua,
+// mas logons novos com credencial de domínio param, e reverter costuma
+// exigir reingressar a máquina no domínio. É destrutivo na prática, e por
+// isso a rota que expõe isto fica no rate limit restrito.
+//
+// A recusa quando `userAccountControl` não é legível é o MESMO achado já
+// corrigido em `setUserEnabled`: gravar um UAC adivinhado apagaria em
+// silêncio os outros bits já setados no objeto. Aqui o risco é MAIOR que
+// em usuário — um dos bits que se perderia é justamente o que distingue
+// uma estação de um controlador de domínio.
+export async function setComputerEnabled(name: string, enabled: boolean): Promise<void> {
+  return withClient(async (client) => {
+    const entry = await findComputerEntry(client, name);
+    const dn = asString(entry.distinguishedName) ?? (entry.dn as unknown as string);
+    const currentUac = asNumber(entry.userAccountControl);
+    if (currentUac === null) {
+      throw new AdRequestError(
+        `Não foi possível ler userAccountControl de "${name}" antes de ${enabled ? 'habilitar' : 'desabilitar'} — recusando a escrita para não sobrescrever bits desconhecidos.`,
+      );
+    }
+    const nextUac = enabled ? currentUac & ~UF_ACCOUNTDISABLE : currentUac | UF_ACCOUNTDISABLE;
+
+    await client.modify(
+      dn,
+      new Change({
+        operation: 'replace',
+        modification: new Attribute({ type: 'userAccountControl', values: [String(nextUac)] }),
+      }),
+    );
+  });
+}
+
 export const adService = {
   searchUsers,
   getUser,
@@ -926,4 +1111,7 @@ export const adService = {
   createGroup,
   addGroupMember,
   removeGroupMember,
+  searchComputers,
+  getComputer,
+  setComputerEnabled,
 };
