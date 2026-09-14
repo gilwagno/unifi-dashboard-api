@@ -100,17 +100,18 @@ async function restartFakeLdap(): Promise<void> {
 describe('ad.service — protocolo LDAP real (fake-ldap-server)', () => {
   beforeEach(restartFakeLdap);
 
-  it('searchUsers() sem query lista os 3 usuários semeados', async () => {
+  it('searchUsers() sem query lista os usuários semeados', async () => {
     const { searchUsers } = await importAdService();
     const users = await searchUsers();
-    expect(users.map((u) => u.sAMAccountName).sort()).toEqual(['jsilva', 'mreis', 'ptravado']);
+    expect(users.map((u) => u.sAMAccountName).sort()).toEqual(['jsilva', 'mreis', 'ptravado', 'semuac', 'sjoao']);
   });
 
   it('searchUsers(query) usa filtro OR de substring (cn/sAMAccountName/mail) — o servidor real decide o match, não um mock', async () => {
     const { searchUsers } = await importAdService();
+    // 'silva' casa jsilva (cn/sAMAccountName) e sjoao (cn "Silva\, Joao") —
+    // o segundo foi semeado depois, para cobrir DN com vírgula escapada.
     const users = await searchUsers('silva');
-    expect(users).toHaveLength(1);
-    expect(users[0]?.sAMAccountName).toBe('jsilva');
+    expect(users.map((u) => u.sAMAccountName).sort()).toEqual(['jsilva', 'sjoao']);
 
     // Casa por substring de e-mail também (mesmo filtro OR) — prova que o
     // `parseFilter`/`matchesFilter` do fake trata os 3 ramos do OR, não só
@@ -894,6 +895,50 @@ describe('fake-ldap-server — exige bind prévio por conexão (RFC 4511 §4.2.1
   });
 });
 
+// ACHADO de revisão cega: a recusa de escrita de `setUserEnabled` quando o
+// `userAccountControl` não é legível NÃO TINHA UM ÚNICO TESTE — o mutante
+// que a apagava passava com a suíte inteira verde (795/795). É a gêmea da
+// guarda de `setComputerEnabled` (essa sim coberta desde a subtarefa 4), e
+// vinha da PR #25 sem defesa alguma desde então.
+//
+// Sem a guarda, `null | 2` = `2`: o serviço GRAVA `userAccountControl=2` por
+// cima da conta, apagando em silêncio todos os bits que não conseguiu ler
+// (DONT_EXPIRE_PASSWORD, SMARTCARD_REQUIRED, o tipo da conta…). Numa conta
+// de usuário isso é uma reconfiguração silenciosa de credencial.
+describe('ad.service — setUserEnabled recusa escrever sem poder ler o estado', () => {
+  beforeEach(restartFakeLdap);
+
+  it('usuário sem userAccountControl legível: LEITURA devolve enabled null', async () => {
+    const { getUser } = await importAdService();
+    expect((await getUser('semuac')).enabled).toBeNull();
+  });
+
+  it('ESCRITA é recusada, não grava um UAC adivinhado', async () => {
+    const { setUserEnabled, AdRequestError } = await importAdService();
+    await expect(setUserEnabled('semuac', false)).rejects.toBeInstanceOf(AdRequestError);
+  });
+
+  it('a recusa acontece ANTES da escrita — o objeto continua sem o atributo', async () => {
+    const { getUser, setUserEnabled } = await importAdService();
+
+    await expect(setUserEnabled('semuac', false)).rejects.toThrow();
+    // Se tivesse gravado, o atributo passaria a existir e `enabled` viraria
+    // booleano — é isso que prova que nada foi escrito.
+    expect((await getUser('semuac')).enabled).toBeNull();
+  });
+
+  it('a mensagem chega inteira, sem ser reembrulhada num erro genérico', async () => {
+    const { setUserEnabled } = await importAdService();
+    try {
+      await setUserEnabled('semuac', true);
+      expect.unreachable('deveria ter lançado');
+    } catch (err) {
+      expect((err as Error).message).toContain('userAccountControl');
+      expect((err as Error).message).not.toContain('Falha na operação com o Active Directory');
+    }
+  });
+});
+
 // --- Membership DIRETA vs HERDADA por aninhamento (subtarefa 7) ----------
 //
 // Medido contra o AD real em 2026-09-14: o grupo de acesso à rede tinha 20
@@ -918,8 +963,16 @@ describe('ad.service — getGroup resolve membros (direto vs aninhado)', () => {
     const { getGroup } = await importAdService();
     const g = await getGroup('Acesso-Aninhado');
 
-    const fantasma = (g.memberDetails ?? []).find((m) => m.dn.includes('Fantasma'));
+    const fantasma = (g.memberDetails ?? []).find((m) => m.dn.includes('NaoExiste'));
     expect(fantasma?.type).toBe('unknown');
+
+    // E o membro cujo DN tem vírgula ESCAPADA mas QUE EXISTE precisa
+    // resolver como 'user' — o fake não desfazia o escape do filtro, então
+    // ele aparecia como "não resolvido" mesmo estando no diretório. Um AD
+    // real desfaz (RFC 4515 §3); o fake, e não o código, é que estava
+    // errado. Sem esta asserção, a correção do fake não tem trava.
+    const comVirgula = (g.memberDetails ?? []).find((m) => m.name === 'Silva, Joao');
+    expect(comVirgula?.type).toBe('user');
   });
 
   it('resolve todos os membros e preserva a ordem de `member`', async () => {
@@ -928,6 +981,47 @@ describe('ad.service — getGroup resolve membros (direto vs aninhado)', () => {
 
     expect(g.memberDetails).toHaveLength(g.members.length);
     expect((g.memberDetails ?? []).map((m) => m.dn)).toEqual(g.members);
+  });
+
+  // ACHADO de revisão cega: todo o tratamento de escape de DN era código NÃO
+  // DEFENDIDO — trocar a função inteira pelo `split(',')` ingênuo (o que o
+  // próprio comentário dela diz estar errado) passava com a suíte verde,
+  // porque nenhum DN do fake tinha escape. `CN=Silva\, Joao` é a forma como
+  // o AD grava um nome brasileiro comum: sem isto, a tela mostraria "Silva"
+  // e o resto do nome sumiria.
+  it('membro com VÍRGULA ESCAPADA no DN não é cortado ao meio', async () => {
+    const { getGroup } = await importAdService();
+    const g = await getGroup('Acesso-Aninhado');
+
+    const nomes = (g.memberDetails ?? []).map((m) => m.name);
+    // Resolvido: o nome vem do atributo `cn`, já limpo.
+    expect(nomes).toContain('Silva, Joao');
+    // NÃO resolvido: o nome é derivado do DN e o escape tem que ser
+    // desfeito — senão sai "Souza" e o resto do nome some da tela.
+    expect(nomes).toContain('Souza, Maria');
+    expect(nomes).not.toContain('Souza');
+  });
+
+  // Grupo CRIADO pelo serviço (não semeado) precisa ser resolvível como
+  // membro — depende de o diretório derivar `distinguishedName` sozinho no
+  // `add`, como um AD real faz. O mutante que removia essa derivação
+  // sobrevivia: nada criava um grupo e depois o resolvia.
+  it('grupo criado pelo serviço é resolvível como membro aninhado', async () => {
+    const { createGroup, addGroupMember, getGroup } = await importAdService();
+
+    await createGroup({ name: 'Grupo-Novo-Teste' });
+    // O serviço só adiciona USUÁRIO a grupo; para o caso aninhado, o membro
+    // é escrito direto no diretório do fake, como um administrador faria
+    // pelo ADUC.
+    const alvo = fakeLdap.directory.get(`cn=acesso-aninhado,cn=users,${fakeLdap.baseDn}`.toLowerCase());
+    const novoDn = `CN=Grupo-Novo-Teste,${fakeLdap.groupsOu}`;
+    alvo?.attrs.set('member', [...(alvo.attrs.get('member') ?? []), Buffer.from(novoDn, 'utf8')]);
+
+    const g = await getGroup('Acesso-Aninhado');
+    const criado = (g.memberDetails ?? []).find((m) => m.name === 'Grupo-Novo-Teste');
+
+    expect(criado?.type).toBe('group');
+    void addGroupMember;
   });
 
   it('grupo sem membros devolve lista vazia, sem disparar busca nenhuma', async () => {

@@ -69,10 +69,20 @@ test.describe('Active Directory', () => {
     await page.getByRole('button', { name: 'Buscar' }).click();
     await page.getByRole('button', { name: 'Ver membros' }).click();
 
-    // Os dois tipos aparecem com rótulos DIFERENTES — é isso que impede o
-    // operador de achar que revogou quem entrou por herança.
-    await expect(page.getByText('Membro direto')).toBeVisible();
-    await expect(page.getByText('Grupo · acesso herdado')).toBeVisible();
+    // Os tipos aparecem com rótulos DIFERENTES — é isso que impede o
+    // operador de achar que revogou quem entrou por herança. A asserção é
+    // por CONTAGEM, não por "existe pelo menos um": se todos os membros
+    // fossem rotulados igual, um `toBeVisible()` continuaria passando.
+    // `exact: true` importa: o `getByText` do Playwright faz match de
+    // SUBSTRING e CASE-INSENSITIVE por padrão, então o rodapé
+    // ("1 não resolvido(s)") era contado junto com o selo e a contagem dava
+    // 2. O selo é que está sendo verificado aqui, não o resumo.
+    await expect(page.getByText('Membro direto', { exact: true })).toHaveCount(2);
+    await expect(page.getByText('Grupo · acesso herdado', { exact: true })).toHaveCount(1);
+    await expect(page.getByText('Não resolvido', { exact: true })).toHaveCount(1);
+
+    // E o nome com vírgula ESCAPADA no DN chega inteiro na tela.
+    await expect(page.getByText('Souza, Maria')).toBeVisible();
 
     await expect(page.getByRole('alert')).toContainText('não revoga esse acesso herdado');
   });
@@ -83,7 +93,7 @@ test.describe('Active Directory', () => {
     await page.getByRole('button', { name: 'Buscar' }).click();
     await page.getByRole('button', { name: 'Ver membros' }).click();
 
-    await expect(page.getByText('Membro direto')).toBeVisible();
+    await expect(page.getByText('Membro direto', { exact: true })).toBeVisible();
     // Alerta em tudo vira ruído e ninguém lê no caso que importa.
     await expect(page.getByRole('alert')).toHaveCount(0);
   });

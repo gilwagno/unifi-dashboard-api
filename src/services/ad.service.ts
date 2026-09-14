@@ -938,16 +938,30 @@ async function resolveGroupMembers(client: Client, memberDns: string[]): Promise
 // escape com barra invertida (`CN=Silva\, João,OU=...` é UM componente, não
 // dois) — dividir por vírgula crua partiria nomes brasileiros no meio.
 function rdnValue(dn: string): string {
-  // A mascara PRECISA preservar o COMPRIMENTO do original: o indice achado
-  // aqui e usado para cortar `dn`, nao `semEscape`. Trocar 2 caracteres por
+  // A máscara PRECISA preservar o COMPRIMENTO do original: o índice achado
+  // aqui é usado para cortar `dn`, não `semEscape`. Trocar 2 caracteres por
   // 1 desalinharia tudo depois do primeiro escape.
   const semEscape = dn.replace(/\\./g, '\u0000\u0000');
   const corte = semEscape.indexOf(',');
   const primeiro = corte === -1 ? dn : dn.slice(0, corte);
   const igual = primeiro.indexOf('=');
   const valor = igual === -1 ? primeiro : primeiro.slice(igual + 1);
-  return valor.replace(/\\(.)/g, '$1');
+  return unescapeRdnValue(valor);
 }
+
+// Desfaz o escape de um valor de RDN (RFC 4514 §2.4). São DUAS formas, e
+// tratar só a primeira era um bug: `\,` (barra + caractere) E `\2C` (barra
+// + par hexadecimal). Um AD grava vírgula em CN das duas maneiras dependendo
+// da ferramenta que criou o objeto — `CN=Silva\2C João` é tão válido quanto
+// `CN=Silva\, João`, e a versão anterior devolvia "Silva2C João" na tela.
+function unescapeRdnValue(valor: string): string {
+  return valor.replace(/\\([0-9a-fA-F]{2}|.)/g, (_todo, capturado: string) =>
+    capturado.length === 2 && /^[0-9a-fA-F]{2}$/.test(capturado)
+      ? String.fromCharCode(Number.parseInt(capturado, 16))
+      : capturado,
+  );
+}
+
 
 export async function getGroup(name: string): Promise<AdGroup> {
   return withClient(async (client) => {

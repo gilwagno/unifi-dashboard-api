@@ -194,6 +194,19 @@ function matchesFilter(entry, filter) {
 // Filter ::= CHOICE { and[0], or[1], not[2], equalityMatch[3] SEQUENCE,
 //   substrings[4] SEQUENCE, present[7] OCTET STRING, ... } — ver
 // node_modules/ldapts/src/filters/{And,Or,Not,Equality,Substring,Presence}Filter.ts
+// INFIDELIDADE encontrada na subtarefa 7: um AssertionValue de filtro LDAP
+// chega ESCAPADO (RFC 4515 §3): os caracteres especiais `* ( ) \ NUL` viajam
+// como `\XX` hexadecimal. O `escapeFilter` do `ldapts` produz exatamente
+// isso — e este fake comparava a forma escapada contra o valor CRU guardado
+// no diretório, então qualquer valor contendo uma barra invertida NUNCA
+// casava. Efeito concreto: um membro de grupo cujo DN tem vírgula escapada
+// (`CN=Silva\, Joao,...`, um nome brasileiro comum) aparecia como "não
+// resolvido" mesmo existindo no diretório. Contra um AD real casaria — de
+// novo o fake errado, não o código.
+function unescapeFilterValue(valor) {
+  return valor.replace(/\\([0-9a-fA-F]{2})/g, (_todo, hex) => String.fromCharCode(Number.parseInt(hex, 16)));
+}
+
 function parseFilter(reader) {
   const tag = reader.peek();
   switch (tag) {
@@ -213,7 +226,7 @@ function parseFilter(reader) {
     case FILTER.equalityMatch: {
       reader.readSequence(tag);
       const attr = reader.readString(OCTET_STRING);
-      const value = reader.readString(OCTET_STRING);
+      const value = unescapeFilterValue(reader.readString(OCTET_STRING));
       return { type: 'equal', attr, value };
     }
     case FILTER.substrings: {
@@ -226,7 +239,7 @@ function parseFilter(reader) {
       const any = [];
       while (reader.offset < subEnd) {
         const subTag = reader.peek();
-        const value = reader.readString(subTag);
+        const value = unescapeFilterValue(reader.readString(subTag));
         if (subTag === 0x80) initial = value;
         else if (subTag === 0x81) any.push(value);
         else if (subTag === 0x82) final = value;
@@ -346,7 +359,7 @@ function seedDirectory(config) {
 
   const put = (entry) => directory.set(normalizeDn(entry.dn), entry);
 
-  const makeUser = ({ sam, displayName, mail, department, title, uac, lockoutTime, workstations }) => {
+  const makeUser = ({ sam, displayName, mail, department, title, uac, lockoutTime, workstations, omitUac }) => {
     const dn = `CN=${sam},${config.usersOu}`;
     const entry = makeEntry(dn);
     setAttr(entry, 'objectClass', ['top', 'person', 'organizationalPerson', 'user']);
@@ -358,7 +371,12 @@ function seedDirectory(config) {
     if (mail) setAttr(entry, 'mail', [mail]);
     if (department) setAttr(entry, 'department', [department]);
     if (title) setAttr(entry, 'title', [title]);
-    setAttr(entry, 'userAccountControl', [String(uac ?? UF_NORMAL_ACCOUNT)]);
+    // `omitUac`: simula um bind que enxerga o objeto mas NÃO o atributo
+    // userAccountControl (ACL). Existe para exercitar a recusa de escrita de
+    // `setUserEnabled` — sem um usuário assim, aquela guarda não tinha um
+    // único teste, e o mutante que a apagava passava com a suíte inteira
+    // verde. Mesmo papel do `omitUac` de `makeComputer`.
+    if (!omitUac) setAttr(entry, 'userAccountControl', [String(uac ?? UF_NORMAL_ACCOUNT)]);
     setAttr(entry, 'lockoutTime', [String(lockoutTime ?? 0)]);
     if (workstations?.length) setAttr(entry, 'userWorkstations', [workstations.join(',')]);
     put(entry);
@@ -391,6 +409,13 @@ function seedDirectory(config) {
     sam: 'ptravado',
     displayName: 'Pedro Travado',
     lockoutTime: Date.now(),
+  });
+
+  // Sem `userAccountControl` legível — ver `omitUac` acima.
+  makeUser({
+    sam: 'semuac',
+    displayName: 'Usuario Sem UAC',
+    omitUac: true,
   });
 
   // Grupo da ponte 802.1X (docs/ad-module-plan.md) — começa sem membros;
@@ -435,10 +460,33 @@ function seedDirectory(config) {
   setAttr(aninhado, 'objectClass', ['top', 'group']);
   setAttr(aninhado, 'distinguishedName', [`CN=Acesso-Aninhado,CN=Users,${config.baseDn}`]);
   setAttr(aninhado, 'cn', ['Acesso-Aninhado']);
+  // O 4º membro tem VÍRGULA ESCAPADA no CN (`Silva\, Joao`) — a forma como
+  // o AD grava um nome brasileiro comum. Sem ele, todo o tratamento de
+  // escape de `rdnValue` era código não defendido: o mutante que trocava a
+  // função inteira pelo `split(',')` ingênuo sobrevivia.
+  const nomeComVirgulaDn = `CN=Silva\\, Joao,${config.usersOu}`;
+  const nomeComVirgula = makeEntry(nomeComVirgulaDn);
+  setAttr(nomeComVirgula, 'objectClass', ['top', 'person', 'organizationalPerson', 'user']);
+  setAttr(nomeComVirgula, 'objectCategory', ['person']);
+  setAttr(nomeComVirgula, 'distinguishedName', [nomeComVirgulaDn]);
+  // O atributo `cn` guarda o valor LIMPO; só o DN carrega o escape. É assim
+  // num AD real, e a diferença importa: quem lê o `cn` vê "Silva, Joao";
+  // quem precisa derivar o nome A PARTIR do DN tem que desfazer o escape.
+  setAttr(nomeComVirgula, 'cn', ['Silva, Joao']);
+  setAttr(nomeComVirgula, 'sAMAccountName', ['sjoao']);
+  setAttr(nomeComVirgula, 'userAccountControl', [String(UF_NORMAL_ACCOUNT)]);
+  setAttr(nomeComVirgula, 'lockoutTime', ['0']);
+  put(nomeComVirgula);
+
   setAttr(aninhado, 'member', [
     jsilvaDn,
     `CN=Financeiro,CN=Users,${config.baseDn}`,
-    `CN=Fantasma,OU=NaoExiste,${config.baseDn}`,
+    // DN que NÃO resolve E tem vírgula escapada: é o único caminho em que o
+    // nome precisa ser derivado do próprio DN (`rdnValue`), porque não há
+    // objeto de onde ler o `cn`. Sem isto, todo o tratamento de escape era
+    // código não defendido.
+    `CN=Souza\\, Maria,OU=NaoExiste,${config.baseDn}`,
+    nomeComVirgulaDn,
   ]);
   put(aninhado);
 

@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -112,6 +112,71 @@ describe('ActiveDirectory — usuários', () => {
   });
 });
 
+describe('ActiveDirectory — corrida de resposta atrasada', () => {
+  // Esta classe de bug já foi corrigida em 4 páginas deste repo (item 17 da
+  // Onda 2) e foi REINTRODUZIDA aqui. Numa tela de controle de acesso o
+  // sintoma é pior que cosmético: a conta que você acabou de desabilitar
+  // reaparece "Ativa" porque um poll de 60s que já estava em voo respondeu
+  // depois — e o operador acredita na tela.
+  it('resposta ANTIGA que chega depois NÃO sobrescreve a lista nova', async () => {
+    let resolverAntiga: (v: { data: AdUser[] }) => void = () => {};
+    const antiga = new Promise<{ data: AdUser[] }>((r) => {
+      resolverAntiga = r;
+    });
+
+    vi.mocked(api.listAdUsers)
+      .mockReturnValueOnce(antiga)
+      .mockResolvedValue({ data: [{ ...USUARIO, displayName: 'NOVO FILTRADO' }] });
+
+    renderPage();
+
+    // Digitar refaz a busca: a 2ª chamada resolve na hora e pinta a tela.
+    await userEvent.type(screen.getByLabelText(/Buscar por nome, login ou e-mail/), 'novo');
+    expect(await screen.findByText('NOVO FILTRADO')).toBeInTheDocument();
+
+    // Só AGORA a primeira responde, com o retrato antigo.
+    resolverAntiga({ data: [{ ...USUARIO, displayName: 'ANTIGO' }] });
+
+    // Ver o comentário do flush no teste de computadores abaixo.
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText('ANTIGO')).not.toBeInTheDocument();
+    expect(screen.getByText('NOVO FILTRADO')).toBeInTheDocument();
+  });
+
+  it('o mesmo vale para computadores', async () => {
+    let resolverAntiga: (v: { data: AdComputer[] }) => void = () => {};
+    const antiga = new Promise<{ data: AdComputer[] }>((r) => {
+      resolverAntiga = r;
+    });
+
+    vi.mocked(api.listAdComputers)
+      .mockReturnValueOnce(antiga)
+      .mockResolvedValue({ data: [{ ...COMPUTADOR, name: 'PC-NOVO' }] });
+
+    renderPage();
+    await userEvent.click(screen.getByRole('button', { name: /Computadores/ }));
+    await userEvent.type(screen.getByLabelText(/Buscar por nome, DNS ou descrição/), 'novo');
+    expect(await screen.findByText('PC-NOVO')).toBeInTheDocument();
+
+    resolverAntiga({ data: [{ ...COMPUTADOR, name: 'PC-ANTIGO' }] });
+
+    // Deixa a resposta antiga PROPAGAR antes de afirmar. Sem este flush o
+    // teste passaria mesmo sem a guarda — ele afirmaria a ausência de
+    // 'PC-ANTIGO' antes de a promise sequer ter tido chance de escrever no
+    // estado, e viraria mais um "teste cujo nome é mais forte que a
+    // asserção".
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText('PC-ANTIGO')).not.toBeInTheDocument();
+    expect(screen.getByText('PC-NOVO')).toBeInTheDocument();
+  });
+});
+
 describe('ActiveDirectory — grupos', () => {
   // Restrição não-negociável: `searchGroups()` sem filtro devolve o domínio
   // inteiro (68 grupos no domínio real, incluindo `Admins. do domínio` e
@@ -211,6 +276,28 @@ describe('ActiveDirectory — grupos', () => {
 
     expect(await screen.findByText('Membro direto')).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  // `memberDetails` ausente significa "não resolvido", não "sem membros". A
+  // tela colapsava os dois e AFIRMAVA "não tem membros diretos" sobre um
+  // grupo cheio — sem aviso de aninhamento nenhum, que é exatamente o
+  // silêncio que esta tela existe para impedir.
+  it('grupo com membros mas SEM resolução não afirma "não tem membros"', async () => {
+    const grupo: AdGroup = { dn: 'CN=Acesso,DC=t', cn: 'Acesso', description: null, members: [] };
+    vi.mocked(api.listAdGroups).mockResolvedValue({ data: [grupo] });
+    vi.mocked(api.getAdGroup).mockResolvedValue({
+      ...grupo,
+      members: ['CN=a,DC=t', 'CN=b,DC=t'],
+      memberDetails: undefined,
+    });
+    renderPage();
+    await userEvent.click(screen.getByRole('button', { name: /Grupos/ }));
+    await userEvent.type(screen.getByLabelText('Buscar grupo'), 'acesso');
+    await userEvent.click(screen.getByRole('button', { name: 'Buscar' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Ver membros' }));
+
+    expect(screen.queryByText('Este grupo não tem membros diretos.')).not.toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent(/não foi possível resolver quem são/i);
   });
 
   it('membro NÃO RESOLVIDO aparece como tal, nunca como pessoa comum', async () => {

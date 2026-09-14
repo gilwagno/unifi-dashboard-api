@@ -1,5 +1,5 @@
 import { AlertTriangle, KeyRound, Lock, Monitor, Search, ShieldAlert, Users as UsersIcon } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Badge } from '../components/Badge';
 import { Layout } from '../components/Layout';
 import { StatCard } from '../components/StatCard';
@@ -66,19 +66,29 @@ function AbaUsuarios() {
   const [erro, setErro] = useState<string | null>(null);
   const [aviso, setAviso] = useState<string | null>(null);
   const [ocupado, setOcupado] = useState<string | null>(null);
+  // Contador monotônico de requisição — MESMA correção já aplicada em
+  // Clients/Devices/Networks/Printers (item 17 da Onda 2). Sem ele, uma
+  // resposta antiga ainda em voo sobrescreve a tela: o usuário digita um
+  // filtro e a lista sem filtro chega DEPOIS e volta tudo; ou desabilita uma
+  // conta e um poll de 60s que já estava a caminho a mostra "Ativa" de novo.
+  // Numa tela de controle de acesso, o segundo caso é pior que feio: afirma
+  // que a conta está ativa quando ela acabou de ser desabilitada.
+  const requisicaoRef = useRef(0);
 
   const carregar = useCallback(
     async (silencioso = false) => {
       if (!silencioso) setCarregando(true);
+      const meu = ++requisicaoRef.current;
       try {
         const { data } = await api.listAdUsers(busca.trim() || undefined);
+        if (meu !== requisicaoRef.current) return;
         setUsuarios(data);
         setErro(null);
       } catch (err) {
-        if (silencioso) return;
+        if (silencioso || meu !== requisicaoRef.current) return;
         setErro(err instanceof ApiError ? err.message : 'Falha ao consultar o Active Directory');
       } finally {
-        if (!silencioso) setCarregando(false);
+        if (!silencioso && meu === requisicaoRef.current) setCarregando(false);
       }
     },
     [busca],
@@ -329,6 +339,12 @@ function AbaGrupos() {
 // bug de produção seguiria existindo na prática mesmo com o backend
 // corrigido — o operador continuaria achando que revogou.
 function DetalheGrupo({ grupo }: { grupo: AdGroup }) {
+  // `memberDetails` ausente é "NÃO RESOLVIDO", não "sem membros" — o tipo
+  // distingue os dois de propósito (a listagem não resolve; só o detalhe
+  // resolve). Colapsar os dois faria a tela AFIRMAR "não tem membros
+  // diretos" sobre um grupo cheio, sem aviso de aninhamento nenhum: a
+  // mesma ambiguidade-virando-afirmação que o resto desta tela combate.
+  const naoResolvido = grupo.memberDetails === undefined && grupo.members.length > 0;
   const membros = grupo.memberDetails ?? [];
   const aninhados = membros.filter((m) => m.type === 'group');
   const diretos = membros.filter((m) => m.type === 'user');
@@ -354,7 +370,12 @@ function DetalheGrupo({ grupo }: { grupo: AdGroup }) {
         </div>
       )}
 
-      {membros.length === 0 ? (
+      {naoResolvido ? (
+        <p role="alert" className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          Este grupo tem {grupo.members.length} membro(s), mas não foi possível resolver quem são — então{' '}
+          <strong>não dá para saber se há acesso herdado por aninhamento</strong>. Abra o grupo novamente.
+        </p>
+      ) : membros.length === 0 ? (
         <p className="text-sm text-slate-500">Este grupo não tem membros diretos.</p>
       ) : (
         <ul className="divide-y divide-slate-100">
@@ -370,8 +391,10 @@ function DetalheGrupo({ grupo }: { grupo: AdGroup }) {
       )}
 
       <p className="mt-3 text-xs text-slate-500">
-        {diretos.length} membro(s) direto(s) · {aninhados.length} grupo(s) aninhado(s)
-        {naoResolvidos.length > 0 && ` · ${naoResolvidos.length} não resolvido(s)`}
+        {naoResolvido
+          ? `${grupo.members.length} membro(s), não resolvidos`
+          : `${diretos.length} membro(s) direto(s) · ${aninhados.length} grupo(s) aninhado(s)`}
+        {!naoResolvido && naoResolvidos.length > 0 && ` · ${naoResolvidos.length} não resolvido(s)`}
       </p>
     </section>
   );
@@ -386,19 +409,23 @@ function AbaComputadores() {
   const [erro, setErro] = useState<string | null>(null);
   const [aviso, setAviso] = useState<string | null>(null);
   const [ocupado, setOcupado] = useState<string | null>(null);
+  // Ver o comentário do mesmo `requisicaoRef` em AbaUsuarios.
+  const requisicaoRef = useRef(0);
 
   const carregar = useCallback(
     async (silencioso = false) => {
       if (!silencioso) setCarregando(true);
+      const meu = ++requisicaoRef.current;
       try {
         const { data } = await api.listAdComputers(busca.trim() || undefined);
+        if (meu !== requisicaoRef.current) return;
         setComputadores(data);
         setErro(null);
       } catch (err) {
-        if (silencioso) return;
+        if (silencioso || meu !== requisicaoRef.current) return;
         setErro(err instanceof ApiError ? err.message : 'Falha ao consultar o Active Directory');
       } finally {
-        if (!silencioso) setCarregando(false);
+        if (!silencioso && meu === requisicaoRef.current) setCarregando(false);
       }
     },
     [busca],
