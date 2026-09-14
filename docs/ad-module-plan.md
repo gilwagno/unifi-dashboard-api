@@ -140,13 +140,13 @@ de verdade, resetar senha de verdade) do que qualquer coisa já implementada.
    logon-workstations) + erros tipados.
 2. ✅ **CONCLUÍDA em 2026-09-11** (mesma PR #25). `ad.routes.ts` — 12 rotas `/ad/users*`, com
    rate limit restrito em toda mutação e auditoria pelo hook global de `app.ts`.
-3. ⬜ `ad.service.ts`/`ad.routes.ts` — grupos (criar, listar, add/remove membro).
+3. ✅ **CONCLUÍDA em 2026-09-14** (PR #34). `ad.service.ts`/`ad.routes.ts` — grupos.
    **Vem DEPOIS da subtarefa 6** — ver a nota de reordenação abaixo. O pré-requisito
    bloqueante (o `fake-ldap-server` rastrear estado de bind por conexão) foi **RESOLVIDO em
    2026-09-11**, PR #33 — está liberada para começar. Gate que resta antes do **MERGE** (não
    antes de começar): teste de fumaça supervisionado contra um AD real, numa OU de teste que o
    usuário confirme explicitamente.
-4. ⬜ `ad.service.ts`/`ad.routes.ts` — computadores (listar, habilitar/desabilitar)
+4. ✅ **CONCLUÍDA em 2026-09-14** (PR #35). Computadores (listar, habilitar/desabilitar).
 5. ✅ **CONCLUÍDA em 2026-09-11** (mesma PR #25). Ponte 802.1X — `POST`/`DELETE`
    `/ad/users/:username/network-access` sobre o grupo de `AD_NETWORK_ACCESS_GROUP_DN`,
    idempotente nos dois sentidos.
@@ -156,7 +156,7 @@ de verdade, resetar senha de verdade) do que qualquer coisa já implementada.
    integração já existem, mas o `ldapts` é inteiramente mockado — **nenhuma linha deste
    módulo jamais falou o protocolo LDAP de verdade**, e é exatamente isso que esta subtarefa
    existe pra cobrir.
-7. ⬜ Frontend — telas de Usuários/Grupos/Computadores AD (mesmo padrão visual das telas
+7. ✅ **CONCLUÍDA em 2026-09-14** (PR #35). Frontend — telas de Usuários/Grupos/Computadores AD (mesmo padrão visual das telas
    existentes: `Layout`, `StatCard`, `Badge`, `usePolling`)
    - **A tela de grupos DEVE mandar `query` por padrão, nunca listar tudo.** Medido contra o
      AD real em 2026-09-11: `searchGroups()` sem filtro devolveu **68 grupos**, o domínio
@@ -168,7 +168,7 @@ de verdade, resetar senha de verdade) do que qualquer coisa já implementada.
    - **A tela precisa DISTINGUIR membership direta de herdada por aninhamento.** Ver o
      bloqueante da subtarefa 5 no `CLAUDE.md` (teste de fumaça de 2026-09-11): revogar alguém
      que herdou acesso via grupo aninhado retorna sucesso sem revogar nada.
-8. ⬜ e2e cobrindo os 3 fluxos do escopo funcional acima
+8. ✅ **CONCLUÍDA em 2026-09-14.** e2e cobrindo os 3 fluxos do escopo funcional acima
 
 > **Estado real em 2026-09-11** (conferido contra `git log`, não só contra este documento):
 > **DESATUALIZADO — ver a atualização de 2026-09-11 logo abaixo.** Texto original:

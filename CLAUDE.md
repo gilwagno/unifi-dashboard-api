@@ -1,116 +1,129 @@
 # Gauntlet Loop — unifi-dashboard-api
 
-## ⏸️ PONTO DE PARADA — sessão de 2026-09-14 (leia isto antes de qualquer coisa)
+## ✅ ONDA 3 (Active Directory + ponte 802.1X) — CONCLUÍDA em 2026-09-14
 
-Estado exato no fim da sessão. Tudo commitado e com push; nenhuma árvore com arquivo pendente,
-nenhuma PR aberta.
-
-```
-master   3194ca9   sincronizado com origin
-```
-
-### O que esta sessão fez
-
-1. **ROADMAP.md sincronizado** (`cac77a3`) — estava parado antes das PRs #32/#33/#34 e do teste
-   de fumaça, ainda afirmando que grupos e `fake-ldap-server` não tinham começado.
-2. **Revisão cega da correção de idempotência — DUAS rodadas.** Era a única peça da PR #34 sem
-   Verificador às cegas (o executor caiu no limite de sessão e o orquestrador terminou sozinho).
-   - **1ª rodada: REPROVADO, 3/4.** Três achados sérios. O principal: a releitura que o código
-     chamava de "ÚLTIMA PALAVRA sobre o estado final" passava com a suíte **inteira verde**
-     (748/748) mesmo devolvendo resposta cega, sem nunca olhar o diretório — reconfirmado pelo
-     orquestrador de forma independente, e pior do que o Verificador reportou (ele mediu só nos
-     arquivos de AD). Mais: a releitura do lado ADD era **inalcançável** (o AD real devolve 68,
-     o catch por classe tratava antes), e o teste que levava o nome dela nunca passava por ela.
-   - **Corrigido em `cd81cf7`**: `readMembership` com TRÊS estados (`member`/`not-member`/
-     `undetermined`), releitura ANTES do catch por classe, detecção de range retrieval. Achado
-     no PRÓPRIO harness corrigido junto: o mock do `ldapts` ignorava `baseDN`/`scope` e casava
-     pelo FILTRO — uma busca de escopo `base` não manda filtro, então a releitura lia uma
-     entrada ARBITRÁRIA do diretório. Todo teste unitário de idempotência afirmava coisa nenhuma.
-   - **2ª rodada: APROVADO, 4/4.** Ainda achou dois itens, corrigidos em `b5e7ed9`: o ramo
-     `undetermined` era indefeso (apagá-lo deixava a suíte verde) e **um comentário que mentia** —
-     afirmava que ACL sobre o atributo `member` caía em `undetermined`, quando na verdade cai em
-     `not-member` e a revogação relataria sucesso sem revogar. Sem correção possível dentro da
-     função (as respostas são idênticas no protocolo); registrado como LIMITE, não como segurança.
-3. **PR #34 mergeada** (squash `c1c6704`) — grupos do AD em `master`. **Subtarefa 3 FECHADA.**
-4. **Suíte deixou de ler o `.env` do desenvolvedor** (`3194ca9`) — ver seção própria abaixo.
-5. **Inventário do `fake-ldap-server`** (item 3 da sequência de fechamento) em
-   `docs/fake-ldap-rfc-vs-real.md` — o que é suposição de RFC e o que foi medido contra o DC real.
-
-### ⚠️ Achado: a suíte dependia do `.env` da máquina
-
-`src/config/env.ts` faz `import 'dotenv/config'`, então toda variável do `.env` real vazava para
-dentro dos testes — e como o dotenv não sobrescreve o que já está em `process.env`, nem os
-defaults de `tests/setup.ts` protegiam. Descoberto ao rodar a suíte em `master` logo após o merge
-da #34, com as `AD_*` recém-configuradas: **2 testes falharam no mesmo commit que passava 759/759
-numa worktree** (que não tem `.env`).
-
-A falha foi barulhenta por sorte. **O sentido oposto é o perigoso**: um teste que afirma um
-DEFAULT seguro passaria porque o `.env` local define o valor certo, e quebraria só em produção,
-em CI, ou na máquina de outra pessoa. Mesma família do `tsc --noEmit` do frontend que não checa
-nada e do mtime do `printers.db` que não prova isolamento.
-
-### Retomar por aqui, nesta ordem
-
-1. **Subtarefa 4 — computadores.** Liberada: o inventário do fake (gate) está feito. Usar o
-   `fake-ldap-server` desde o início, **não** validar só com `vi.mock('ldapts')` primeiro — esse
-   padrão já se provou insuficiente uma vez nesta onda.
-2. **Decisão 2 (aninhamento) — PENDENTE COM O USUÁRIO.** Opção (b) proposta: grupo novo próprio
-   do dashboard (`Rede-Permitida-Dashboard`?) + Network Policy do NPS aceitando
-   `wifi-colaboradores` OU o grupo novo; o dashboard nunca mexe no `wifi-colaboradores`.
-   Confirmar antes da subtarefa 5.
-3. ~~`nps.msc`~~ **GATE FECHADO em 2026-09-14** — ver a seção própria logo abaixo. Deixou de ser
-   inferência: a Network Policy foi lida e confirmada.
-4. **Subtarefa 7 (frontend)** — o módulo de AD **não tem NENHUMA tela** hoje. Duas restrições
-   não-negociáveis: a tela de grupos manda `query` por padrão (68 grupos no domínio, inclui
-   `Admins. do domínio`), e precisa DISTINGUIR membership direta de herdada por aninhamento.
-5. **Subtarefa 8 (e2e)** e fechamento da onda.
-6. **Percentuais dos painéis das Brothers** (pendente COM O USUÁRIO, independente de tudo acima).
-
-### ✅ GATE DO `nps.msc` FECHADO (2026-09-14) — e o número do aninhamento, medido
-
-Duas coisas que eram inferência viraram medição nesta data.
-
-**1. A Network Policy do 802.1X, lida no `nps.msc` do `EA-SRV-AD01`** (print conferido):
+Todas as 8 subtarefas mergeadas em `master`. O módulo cobre usuários, grupos, computadores e a
+ponte 802.1X, com telas próprias, e2e, e **validação contra o Active Directory real** —
+`evokaudio.local`, supervisionada passo a passo pelo usuário.
 
 ```
-Política ......... wifi-colaboradores   (Habilitada, Ordem de Processamento 1)
-Condições ........ Grupos do Windows  = EVOKAUDIO\wifi-colaboradores
-                   Tipo de Porta NAS  = Sem Fio - IEEE 802.11
-Configurações .... Conceder Acesso · EAP · Microsoft: EAP protegido (PEAP)
+master   sincronizado com origin   |   backend 801/801 · frontend 107/107 · e2e 22/22
 ```
 
-Bate exatamente com o DN que a sonda LDAP leu. A inferência de 2026-09-11 (o `Servidores RAS e
-IAS` alterado 15 minutos antes da criação do grupo) estava certa — mas agora é a coisa, não o
-indício. **`AD_NETWORK_ACCESS_GROUP_DN` pode apontar para produção**, respeitada a Decisão 2.
-
-**2. O aninhamento, medido por `tools/ad-nesting-probe.mts`** (sonda somente-leitura, 1 nível):
+### Configuração de produção em vigor
 
 ```
-membros diretos ... 20  ->  8 usuários nominais + 12 grupos departamentais
-por herança ....... 61 pessoas
+AD_URL=ldaps://EA-SRV-AD01.evokaudio.local:636        <- NOME, nunca IP
+AD_BASE_DN=DC=evokaudio,DC=local
+AD_USERS_OU=OU=EvokAudio,DC=evokaudio,DC=local        <- 47 usuários alcançáveis
+AD_NETWORK_ACCESS_GROUP_DN=CN=wifi-dashboard,OU=TI,OU=EvokAudio,DC=evokaudio,DC=local
+AD_TLS_CA_FILE=./.certs/evokaudio-ca.pem
 ```
 
-O `wifi-colaboradores` dá acesso a **69 pessoas; o dashboard revogaria 8**. As outras **61 (88%)
-veriam "revogado com sucesso" e seguiriam conectadas.** Os 12 grupos cobrem a empresa inteira:
-Comercial, Produção, Financeiro, Compras, Marketing, Supervisão, Estoque, Garantia, TI,
-Implantação, Coordenação, Administrativo. **Membership direta é a EXCEÇÃO neste domínio** — e o
-desenho original da ponte 802.1X assumia o contrário. (1 nível apenas; se algum `G-Departamento`
-contiver grupos, o número real é maior.)
+### A Decisão 2 (aninhamento de grupos) — fechada, com número
 
-**Consequência para a Decisão 2**: a opção (a) — só detectar e avisar — seria um botão de revogar
-que não funciona em 88% dos casos. Num incidente, um aviso que ninguém lê no susto vira um acesso
-que ninguém cortou. A evidência está do lado da **(b)**.
+O bloqueante da subtarefa 5 foi resolvido pela opção **(b)**: grupo próprio do dashboard.
 
-**E a (b) ficou barata**: no NPS, múltiplos valores na condição `Grupos do Windows` são avaliados
-como **OU**. Não precisa de política nova, nem mexer na ordem de processamento, nem tocar em
-PEAP/EAP — é **adicionar um segundo valor a uma condição que já existe**, reversível, e o caminho
-atual dos 69 continua idêntico enquanto isso.
+**O que decidiu a escolha foi medição, não intuição** (`tools/ad-nesting-probe.mts`):
+`wifi-colaboradores` tem 20 membros diretos — **8 usuários nominais e 12 grupos departamentais**,
+que carregam **61 pessoas por herança**. Ou seja: 69 pessoas com acesso, das quais o dashboard
+revogaria **8**. As outras 61 veriam *"revogado com sucesso"* e continuariam conectadas.
+**Membership direta é a EXCEÇÃO neste domínio** — e o desenho original da ponte assumia o
+contrário.
 
-### Pendência de segurança registrada
+A opção (a) (só detectar e avisar) seria um botão de revogar que não funciona em 88% dos casos.
 
-O `.env` real está com a **senha do administrador do domínio em texto plano** (fora do Git, mas
-em disco). A conta é `gilwagno.silva`, ADMIN do domínio, não uma conta de serviço escopada —
-decisão explícita do usuário depois de o risco ser levantado. **Trocar quando houver calma.**
+**A implementação ficou barata**: no NPS, vários valores na condição `Grupos do Windows` são
+avaliados como **OU**. Não precisou de política nova, nem mexer na ordem de processamento, nem
+tocar em PEAP. O usuário adicionou `wifi-dashboard` como segundo valor na política existente
+(print conferido): `EVOKAUDIO\wifi-colaboradores OR EVOKAUDIO\wifi-dashboard`.
+
+**`wifi-colaboradores` continua existindo, com os 12 grupos aninhados intactos, e é gerenciado
+MANUALMENTE fora do dashboard.** O dashboard só mexe no `wifi-dashboard`, onde toda membership é
+direta por construção — revogação determinística.
+
+### Teste de fumaça supervisionado da ponte (2026-09-14)
+
+4 passos, conta **descartável** (`teste-wifi-dash`), nenhum funcionário real tocado, ambiente
+limpo ao fim. Cada passo confirmado por **releitura independente** — conexão LDAP própria lendo o
+`member` do grupo, sem passar pelo `ad.service.ts`.
+
+| Passo | Releitura independente |
+|---|---|
+| criar conta | grupo com 0 membros (criar usuário não dá acesso) |
+| **grant** | **1 membro**, `CN=teste-wifi-dash,OU=EvokAudio,…`, DN limpo sem escape |
+| **revoke** | **0 membros** |
+| **revoke de novo** | **0 membros, sucesso silencioso** |
+
+**A segunda revogação é o achado que fecha o ciclo desta onda.** O AD respondeu
+`53 UnwillingToPerform` — e o código **deliberadamente não captura esse código** (é genérico
+demais; o AD também o usa para recusas legítimas). O sucesso veio da **releitura de estado**: o
+`modify` falhou, o código releu o grupo, viu que a pessoa já não era membro, e concluiu "estado
+desejado atingido". **A garantia validada contra o comportamento real foi a releitura, não
+adivinhar resultCode** — exatamente a decisão de design que passou por duas rodadas de revisão
+cega nesta sessão.
+
+### ⚠️ Lição mais valiosa da sessão: verificação contra o campo errado
+
+Durante o teste de fumaça, a linha de conveniência da sonda disse `a conta esta no grupo? NAO`
+enquanto a lista crua de membros mostrava a conta lá. O bug era da sonda (comparava o DN contra o
+`displayName`, mas o CN vem do `sAMAccountName`).
+
+**Uma verificação que compara contra o campo errado é indistinguível de uma que funciona, até o
+dia em que os dois valores divergem.** Aqui divergiram no primeiro uso; num usuário cujo
+`displayName` e `sAMAccountName` fossem parecidos, teria passado e mordido depois. **Acreditar no
+dado cru e não no resumo** foi o que evitou "consertar" algo que não estava quebrado.
+
+### Resultado por subtarefa
+
+| # | Subtarefa | Nota | PR |
+|---|---|---|---|
+| 0 | Pré-requisitos (audit log, rate limit, senha HP) | — | #20/#22/#23 |
+| 1-2 | Usuários (serviço + 12 rotas) | 47/50 (rubrica antiga) | #25 |
+| 3 | Grupos | 4/4 | #34 |
+| 4 | Computadores | 4/4 (2 rodadas) | #35 |
+| 5 | Ponte 802.1X | validada ao vivo | #25 + config |
+| 6 | `fake-ldap-server` | 3/4 · 4/4 | #32/#33 |
+| 7 | Frontend (3 abas) | 4/4 | #35 |
+| 8 | e2e (7 specs) | — | #35 |
+
+### Achados sérios corrigidos nesta onda
+
+1. **Idempotência da revogação nunca funcionou contra um AD real** (herdado da #25). Reprovado
+   3/4 na 1ª revisão cega: a releitura passava com a suíte **inteira verde** mesmo respondendo
+   cego. Corrigido com estado de três valores (`member`/`not-member`/`undetermined`).
+2. **RODC classificado como "não é controlador de domínio"** — a derivação era por *ausência* do
+   bit de workstation, e um Read-Only DC carrega esse bit. Falha **aberta** no único sinal de
+   segurança do campo. Derivação passou a ser afirmativa.
+3. **Guarda de UAC ilegível em `setUserEnabled` sem nenhum teste** (herdada da #25) — o mutante
+   sobrevivia com 795/795. Sem ela, o serviço grava `userAccountControl=2` por cima da conta.
+4. **Corrida de resposta atrasada** reintroduzida nas telas novas — mesma classe já corrigida em
+   4 páginas na Onda 2.
+5. **A suíte lia o `.env` do desenvolvedor** — o resultado dependia da máquina de quem rodava.
+6. **`withClient` decidia por uma lista de `instanceof`** — erro tipado novo era reembrulhado em
+   silêncio e a rota perdia o 404. Corrigido na causa (classe base `AdError`).
+
+### Infidelidades do `fake-ldap-server` descobertas e corrigidas
+
+Todas na categoria **"fake diferente do real"**, que *mascara* bug — não "fake mais estrito", que
+só ajuda:
+
+- respondia `16`/`20` no atributo `member`; o AD real responde `53`/`68`;
+- só usuários tinham `distinguishedName` (um AD expõe em todo objeto);
+- o `cn` guardava o valor **escapado** (num AD real só o DN carrega escape);
+- **não desfazia o escape de valor no filtro** (RFC 4515 §3): qualquer valor com barra invertida
+  nunca casava, então `CN=Silva\, Joao` aparecia como "não resolvido" existindo no diretório.
+
+O inventário do que ainda é suposição de RFC está em `docs/fake-ldap-rfc-vs-real.md`.
+
+### Fora de escopo, registrado (não implementar sem pedido novo)
+
+Gestão de pastas/SMB e EAP-TLS — ver `docs/ad-module-plan.md`.
+
+### Ferramentas de sonda criadas (todas SOMENTE LEITURA)
+
+`tools/ad-nesting-probe.mts` · `ad-computers-probe.mts` · `ad-group-probe.mts` ·
+`ad-config-check.mts` · `ad-smoke-802.mts` (esta última escreve, e só na conta descartável).
 
 ---
 
