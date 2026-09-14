@@ -44,6 +44,36 @@ let modifyCallCount: number;
 // depois de a senha JA TER SIDO CONFIRMADA; uma falha ali descartava a unica
 // copia da senha gerada.
 let searchShouldThrowAfterModify: boolean;
+// Controla o que a busca de escopo `base` devolve — é por ela que
+// `applyGroupMembership` relê o `member` do grupo depois de um modify que
+// falhou. Os modos existem porque "não consegui ler os membros" e "não é
+// membro" são afirmações DIFERENTES, e o serviço precisa distinguir:
+//   'empty'  -> a busca base não devolve entrada nenhuma (grupo removido/
+//               renomeado entre o modify e a releitura, referral, ACL);
+//   'ranged' -> o AD devolve a entrada mas com `member;range=0-1499` em vez
+//               de `member` (RANGE RETRIEVAL, acima de ~1500 membros), ou
+//               seja: grupo CHEIO com `entry.member` undefined;
+//   'throw'  -> a própria releitura falha.
+let baseSearchMode: 'normal' | 'empty' | 'ranged' | 'throw';
+// Faz `client.modify` de um DN falhar com um erro CRU (nem
+// TypeOrValueExists, nem AlreadyExists, nem NoSuchAttribute) — é o caso que
+// obriga a releitura a decidir sozinha, sem caminho rápido por classe.
+let modifyShouldThrowRawForDn: string | null;
+// Faz `client.modify` de um DN falhar com uma INSTÂNCIA de erro escolhida
+// pelo teste — usado para exercitar as classes REAIS do `ldapts`
+// (TypeOrValueExists/AlreadyExists/NoSuchAttribute) no ramo em que a
+// releitura não conseguiu determinar o estado e a classe do erro volta a
+// ser a única informação disponível.
+let modifyShouldThrowInstanceForDn: { dn: string; error: Error } | null;
+
+// Erro CRU do modify: não é nenhuma das 3 classes que o caminho rápido
+// reconhece. Força a releitura a ser a única a decidir.
+class RawModifyError extends Error {
+  constructor() {
+    super('modify recusado pelo diretório (simulado, classe desconhecida)');
+    this.name = 'RawModifyError';
+  }
+}
 
 class FakeNoSuchObjectError extends Error {
   code = 32;
@@ -151,6 +181,27 @@ vi.mock('ldapts', async (importOriginal) => {
       if (searchShouldThrowAfterModify && modifyCallCount > 0) {
         throw new Error('conexão derrubada na releitura (simulado)');
       }
+      // ACHADO da revisão: este mock ignorava `baseDN` e `scope`, e casava
+      // pelo FILTRO. Uma busca de escopo `base` não manda filtro nenhum, e
+      // o `matchesFilter` sem filtro casa TUDO — então a releitura do
+      // `member` em `applyGroupMembership` lia uma entrada ARBITRÁRIA do
+      // diretório (a primeira do Map), não o grupo pedido. Todo teste de
+      // idempotência que passasse por aqui estava afirmando coisa nenhuma.
+      if (options.scope === 'base') {
+        if (baseSearchMode === 'throw') throw new Error('releitura falhou (simulado)');
+        if (baseSearchMode === 'empty') return { searchEntries: [], searchReferences: [] };
+        const target = directory.get(baseDN);
+        if (!target) return { searchEntries: [], searchReferences: [] };
+        if (baseSearchMode === 'ranged') {
+          const { member, ...rest } = target.attributes;
+          void member;
+          return {
+            searchEntries: [{ dn: target.dn, ...rest, 'member;range=0-1499': ['CN=Alguem,DC=test,DC=local'] }],
+            searchReferences: [],
+          };
+        }
+        return { searchEntries: [{ dn: target.dn, ...target.attributes }], searchReferences: [] };
+      }
       const entries = [...directory.values()].filter((entry) => matchesFilter(options.filter, entry));
       return {
         searchEntries: entries.map((entry) => ({ dn: entry.dn, ...entry.attributes })),
@@ -166,6 +217,8 @@ vi.mock('ldapts', async (importOriginal) => {
     async modify(dn: string, changes: InstanceType<typeof Change> | InstanceType<typeof Change>[]): Promise<void> {
       modifyCallCount += 1;
       if (modifyShouldThrowForDn === dn) throw new Error('conexão derrubada no meio da escrita (simulado)');
+      if (modifyShouldThrowRawForDn === dn) throw new RawModifyError();
+      if (modifyShouldThrowInstanceForDn?.dn === dn) throw modifyShouldThrowInstanceForDn.error;
       const entry = directory.get(dn);
       if (!entry) throw new FakeNoSuchObjectError();
       const list = Array.isArray(changes) ? changes : [changes];
@@ -245,6 +298,9 @@ beforeEach(() => {
   modifyShouldThrowForDn = null;
   modifyCallCount = 0;
   searchShouldThrowAfterModify = false;
+  baseSearchMode = 'normal';
+  modifyShouldThrowRawForDn = null;
+  modifyShouldThrowInstanceForDn = null;
 });
 
 afterEach(() => {
@@ -559,6 +615,155 @@ describe('ad.service — ponte 802.1X', () => {
 
     const userDn = `CN=Joao Silva,${AD_ENV.AD_USERS_OU}`;
     expect(directory.get(groupDn)!.attributes.member).toEqual([userDn]);
+  });
+
+  // ————————————————————————————————————————————————————————————————
+  // Idempotência de membership por RELEITURA de estado (não por resultCode).
+  //
+  // O bug de produção que originou isto foi achado num teste de fumaça
+  // supervisionado contra um AD REAL: o `catch` por classe de erro cobria o
+  // lado do `add` (68 AlreadyExists) mas NÃO o do `delete` (53
+  // UnwillingToPerform, não 16 NoSuchAttribute), então REVOGAR acesso de
+  // quem já não tinha lançava erro — e num incidente um erro ao revogar faz
+  // o operador concluir, errado, que a pessoa ainda tem acesso.
+  //
+  // Todos os casos abaixo usam um erro CRU no modify (`RawModifyError`), de
+  // propósito: é o único jeito de provar que quem decide é a RELEITURA, e
+  // não uma classe de erro que o caminho rápido reconhece. Com o caminho
+  // rápido na frente da releitura, o ramo do `add` era inalcançável na
+  // prática e ficava indefeso contra regressão.
+  const seedGroup = (members: string[]) => {
+    const groupDn = 'CN=Rede-Permitida,CN=Users,DC=test,DC=local';
+    directory.set(groupDn, { dn: groupDn, attributes: { cn: 'Rede-Permitida', member: members } });
+    return groupDn;
+  };
+  const USER_DN = `CN=Joao Silva,${AD_ENV.AD_USERS_OU}`;
+
+  it('REVOGAR de quem já não é membro: modify falha, a releitura confirma ausência -> SUCESSO', async () => {
+    seedUser();
+    const groupDn = seedGroup(['CN=Outro,DC=test,DC=local']);
+    modifyShouldThrowRawForDn = groupDn;
+
+    const { revokeNetworkAccess } = await importAdService({ ...AD_ENV, AD_NETWORK_ACCESS_GROUP_DN: groupDn });
+    await expect(revokeNetworkAccess('jsilva')).resolves.toBeUndefined();
+  });
+
+  it('REVOGAR de quem AINDA É membro: modify falha e a releitura prova que segue membro -> ERRO, nunca sucesso', async () => {
+    seedUser();
+    const groupDn = seedGroup([USER_DN]);
+    modifyShouldThrowRawForDn = groupDn;
+
+    const { revokeNetworkAccess, AdRequestError } = await importAdService({ ...AD_ENV, AD_NETWORK_ACCESS_GROUP_DN: groupDn });
+    await expect(revokeNetworkAccess('jsilva')).rejects.toThrow(AdRequestError);
+  });
+
+  it('REVOGAR com a releitura SEM ENTRADA: "não consegui ler" não vira "não é membro" -> ERRO', async () => {
+    seedUser();
+    const groupDn = seedGroup([USER_DN]);
+    modifyShouldThrowRawForDn = groupDn;
+    baseSearchMode = 'empty';
+
+    const { revokeNetworkAccess, AdRequestError } = await importAdService({ ...AD_ENV, AD_NETWORK_ACCESS_GROUP_DN: groupDn });
+    await expect(revokeNetworkAccess('jsilva')).rejects.toThrow(AdRequestError);
+  });
+
+  it('REVOGAR com RANGE RETRIEVAL (`member;range=`, grupo cheio sem `member`) -> ERRO, não sucesso silencioso', async () => {
+    seedUser();
+    const groupDn = seedGroup([USER_DN]);
+    modifyShouldThrowRawForDn = groupDn;
+    baseSearchMode = 'ranged';
+
+    const { revokeNetworkAccess, AdRequestError } = await importAdService({ ...AD_ENV, AD_NETWORK_ACCESS_GROUP_DN: groupDn });
+    await expect(revokeNetworkAccess('jsilva')).rejects.toThrow(AdRequestError);
+  });
+
+  it('REVOGAR de grupo genuinamente VAZIO (sem `member` e sem range) -> SUCESSO', async () => {
+    seedUser();
+    const groupDn = 'CN=Rede-Permitida,CN=Users,DC=test,DC=local';
+    directory.set(groupDn, { dn: groupDn, attributes: { cn: 'Rede-Permitida' } });
+    modifyShouldThrowRawForDn = groupDn;
+
+    const { revokeNetworkAccess } = await importAdService({ ...AD_ENV, AD_NETWORK_ACCESS_GROUP_DN: groupDn });
+    await expect(revokeNetworkAccess('jsilva')).resolves.toBeUndefined();
+  });
+
+  it('CONCEDER a quem já é membro: quem decide é a releitura, não a classe do erro -> SUCESSO', async () => {
+    seedUser();
+    const groupDn = seedGroup([USER_DN]);
+    modifyShouldThrowRawForDn = groupDn;
+
+    const { grantNetworkAccess } = await importAdService({ ...AD_ENV, AD_NETWORK_ACCESS_GROUP_DN: groupDn });
+    await expect(grantNetworkAccess('jsilva')).resolves.toBeUndefined();
+  });
+
+  it('CONCEDER a quem NÃO é membro: modify falha e a releitura confirma ausência -> ERRO', async () => {
+    seedUser();
+    const groupDn = seedGroup([]);
+    modifyShouldThrowRawForDn = groupDn;
+
+    const { grantNetworkAccess, AdRequestError } = await importAdService({ ...AD_ENV, AD_NETWORK_ACCESS_GROUP_DN: groupDn });
+    await expect(grantNetworkAccess('jsilva')).rejects.toThrow(AdRequestError);
+  });
+
+  it('releitura que FALHA propaga o erro ORIGINAL do modify, nunca o da releitura', async () => {
+    seedUser();
+    const groupDn = seedGroup([USER_DN]);
+    modifyShouldThrowRawForDn = groupDn;
+    baseSearchMode = 'throw';
+
+    const { revokeNetworkAccess, AdRequestError } = await importAdService({ ...AD_ENV, AD_NETWORK_ACCESS_GROUP_DN: groupDn });
+
+    try {
+      await revokeNetworkAccess('jsilva');
+      expect.unreachable('deveria ter lançado');
+    } catch (err) {
+      expect(err).toBeInstanceOf(AdRequestError);
+      const cause = (err as InstanceType<typeof AdRequestError>).cause as Error;
+      expect(cause.name).toBe('RawModifyError');
+      expect(cause.message).not.toContain('releitura');
+    }
+  });
+
+  // O ramo `undetermined` é o ÚNICO lugar em que a classe do erro volta a
+  // decidir — quando não há estado legível para consultar. Os dois testes
+  // abaixo existem porque sem eles esse ramo ficava indefeso: apagá-lo
+  // inteiro deixava a suíte verde, e ele é o que preserva a idempotência
+  // num diretório cuja releitura não responde.
+  it('sem estado legível, a classe do erro decide: REVOGAR + NoSuchAttribute -> SUCESSO', async () => {
+    seedUser();
+    const groupDn = seedGroup([USER_DN]);
+    const { NoSuchAttributeError } = await import('ldapts');
+    modifyShouldThrowInstanceForDn = { dn: groupDn, error: new NoSuchAttributeError() };
+    baseSearchMode = 'throw';
+
+    const { revokeNetworkAccess } = await importAdService({ ...AD_ENV, AD_NETWORK_ACCESS_GROUP_DN: groupDn });
+    await expect(revokeNetworkAccess('jsilva')).resolves.toBeUndefined();
+  });
+
+  it('sem estado legível, a classe do erro decide: CONCEDER + AlreadyExists -> SUCESSO', async () => {
+    seedUser();
+    const groupDn = seedGroup([]);
+    const { AlreadyExistsError } = await import('ldapts');
+    modifyShouldThrowInstanceForDn = { dn: groupDn, error: new AlreadyExistsError() };
+    baseSearchMode = 'empty';
+
+    const { grantNetworkAccess } = await importAdService({ ...AD_ENV, AD_NETWORK_ACCESS_GROUP_DN: groupDn });
+    await expect(grantNetworkAccess('jsilva')).resolves.toBeUndefined();
+  });
+
+  // Mudança de comportamento DELIBERADA ao mover a releitura para antes do
+  // catch por classe: quando HÁ estado legível, ele manda — mesmo que a
+  // classe do erro sozinha dissesse o contrário. `AlreadyExists` num grupo
+  // que a releitura prova NÃO conter o usuário é uma contradição, e a
+  // direção segura é falhar, não relatar um acesso que não foi concedido.
+  it('estado legível VENCE a classe do erro: AlreadyExists + releitura dizendo que NÃO é membro -> ERRO', async () => {
+    seedUser();
+    const groupDn = seedGroup([]);
+    const { AlreadyExistsError } = await import('ldapts');
+    modifyShouldThrowInstanceForDn = { dn: groupDn, error: new AlreadyExistsError() };
+
+    const { grantNetworkAccess, AdRequestError } = await importAdService({ ...AD_ENV, AD_NETWORK_ACCESS_GROUP_DN: groupDn });
+    await expect(grantNetworkAccess('jsilva')).rejects.toThrow(AdRequestError);
   });
 
   it('revokeNetworkAccess remove o DN do usuário do grupo', async () => {

@@ -4,12 +4,17 @@ import { z } from 'zod';
 import { env } from '../config/env.js';
 import {
   AdPasswordAmbiguousError,
+  addGroupMember,
+  createGroup,
   createUser,
   deleteUser,
+  getGroup,
   getUser,
   grantNetworkAccess,
+  removeGroupMember,
   resetPassword,
   revokeNetworkAccess,
+  searchGroups,
   searchUsers,
   setUserEnabled,
   setUserWorkstations,
@@ -25,11 +30,9 @@ import {
 // AdRequestError) são mapeados pelo error handler central em src/app.ts —
 // nenhum try/catch aqui, mesmo padrão de ClassicApiNotConfiguredError.
 //
-// Grupos e computadores (demais itens do escopo funcional do plano) ficam
-// para subtarefas seguintes — este arquivo cobre só "Usuários" +
-// "Ponte 802.1X", nesta ordem porque é a base que os outros dois dependem
-// (nenhuma operação de grupo/computador precisa existir para usuário
-// funcionar, o inverso não é verdade).
+// Computadores (demais item do escopo funcional do plano) fica para a
+// subtarefa seguinte. Este arquivo cobre "Usuários" + "Ponte 802.1X" +
+// "Grupos / privilégios" (subtarefa 3).
 
 const usernameParam = z.object({
   username: z.string().trim().min(1, 'username é obrigatório'),
@@ -83,6 +86,30 @@ const resetPasswordBody = z.object({
 const workstationsBody = z.object({
   // Lista vazia remove a restrição (ver setUserWorkstations no serviço).
   workstations: z.array(z.string().trim().min(1)),
+});
+
+// Mesmo charset barrado de sAMAccountName (createUserBody acima) — defesa
+// em profundidade sobre o escape de DN de `buildGroupDn` (ad.service.ts):
+// um grupo é AINDA mais sensível que um usuário (é o próprio mecanismo de
+// privilégio do AD), não vale depender só de a lib escapar certo.
+// Limite de 64 caracteres é o teto real do atributo `cn` no schema do AD.
+const groupNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64, 'nome de grupo do AD tem limite de 64 caracteres (atributo cn)')
+  .regex(/^[^,\\/:;|=+*?<>\"\[\]\u0000-\u001f]+$/, 'nome de grupo contém caractere não permitido pelo Active Directory');
+
+const groupNameParam = z.object({ groupName: groupNameSchema });
+
+const groupMemberParams = z.object({
+  groupName: groupNameSchema,
+  username: z.string().trim().min(1, 'username é obrigatório'),
+});
+
+const createGroupBody = z.object({
+  name: groupNameSchema,
+  description: z.string().trim().min(1).optional(),
 });
 
 // Mesmo padrão de generatePrinterAdminPassword em printers.routes.ts: senha
@@ -229,6 +256,36 @@ export default async function adRoutes(app: FastifyInstance) {
   app.delete('/ad/users/:username/network-access', mutationConfig, async (request, reply) => {
     const { username } = usernameParam.parse(request.params);
     await revokeNetworkAccess(username);
+    return reply.send({ ok: true });
+  });
+
+  // --- Grupos / privilégios (subtarefa 3, ver docs/ad-module-plan.md) ---
+  app.get('/ad/groups', async (request) => {
+    const { query } = searchQuery.parse(request.query);
+    const data = await searchGroups(query);
+    return { data };
+  });
+
+  app.get('/ad/groups/:groupName', async (request) => {
+    const { groupName } = groupNameParam.parse(request.params);
+    return getGroup(groupName);
+  });
+
+  app.post('/ad/groups', mutationConfig, async (request, reply) => {
+    const body = createGroupBody.parse(request.body);
+    const group = await createGroup(body);
+    return reply.code(201).send(group);
+  });
+
+  app.post('/ad/groups/:groupName/members/:username', mutationConfig, async (request, reply) => {
+    const { groupName, username } = groupMemberParams.parse(request.params);
+    await addGroupMember(groupName, username);
+    return reply.send({ ok: true });
+  });
+
+  app.delete('/ad/groups/:groupName/members/:username', mutationConfig, async (request, reply) => {
+    const { groupName, username } = groupMemberParams.parse(request.params);
+    await removeGroupMember(groupName, username);
     return reply.send({ ok: true });
   });
 }
