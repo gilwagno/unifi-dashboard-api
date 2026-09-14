@@ -1,0 +1,79 @@
+version: 2
+
+# Três ecossistemas, porque são três coisas que envelhecem separado:
+# o npm da raiz (backend), o npm de `frontend/` (lockfile próprio, não é
+# workspace) e as próprias actions do CI — que também recebem CVE e, se
+# ficarem para trás, quebram o workflow sozinhas (foi o que já aconteceu
+# aqui: `checkout@v4`/`setup-node@v4` apontando para o Node 20 depreciado,
+# achado na primeira execução real do CI).
+#
+# CADÊNCIA `weekly` de propósito: `daily` vira ruído que todo mundo aprende
+# a ignorar, `monthly` deixa CVE parado semanas. E vale lembrar que **alerta
+# de segurança não espera o schedule** — o Dependabot abre PR de CVE fora da
+# cadência, que é justamente o caso que mais importa.
+#
+# AGRUPAMENTO: patch e minor vêm juntos por ecossistema; **major vem
+# sozinho, de propósito**. Um PR por dependência afoga e faz todo mundo
+# parar de olhar — mas agrupar major com o resto esconde a mudança que
+# justamente pede leitura de changelog. A regra desta casa vale aqui como
+# nos outros PRs: **CI verde é necessário, não suficiente.** Um bump pode
+# passar nos 943 testes e mudar comportamento não coberto — foi exatamente
+# o tema do item 4 desta onda.
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      backend-producao:
+        applies-to: version-updates
+        dependency-type: production
+        update-types: [patch, minor]
+      backend-dev:
+        applies-to: version-updates
+        dependency-type: development
+        update-types: [patch, minor]
+      # Agrupa também as correções de segurança, que chegam fora da
+      # cadência acima — sem isto, uma CVE que atinja 4 pacotes vira 4 PRs.
+      backend-seguranca:
+        applies-to: security-updates
+        patterns: ['*']
+    commit-message:
+      prefix: chore(deps)
+      prefix-development: chore(deps-dev)
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      frontend-producao:
+        applies-to: version-updates
+        dependency-type: production
+        update-types: [patch, minor]
+      frontend-dev:
+        applies-to: version-updates
+        dependency-type: development
+        update-types: [patch, minor]
+      frontend-seguranca:
+        applies-to: security-updates
+        patterns: ['*']
+    commit-message:
+      prefix: chore(deps)
+      prefix-development: chore(deps-dev)
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci(deps)
