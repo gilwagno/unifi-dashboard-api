@@ -653,13 +653,23 @@ export async function setUserWorkstations(username: string, workstations: string
 // exato que `applyGroupMembership` existe para evitar. Casos reais de AD
 // que caem em `undetermined`:
 //   - a busca `base` não devolve entrada nenhuma (grupo removido/renomeado
-//     entre o modify e a releitura, referral, ACL sobre o objeto);
+//     entre o modify e a releitura, referral, ACL sobre o OBJETO inteiro);
 //   - RANGE RETRIEVAL: acima de ~1500 membros o AD não devolve `member` e
 //     sim `member;range=0-1499`, então `entry.member` vem `undefined` num
 //     grupo que está cheio;
 //   - a própria busca falhar.
-// `member` ausente SEM nenhum `member;range=` é um grupo genuinamente
-// vazio — esse sim é `not-member` com segurança.
+//
+// LIMITE CONHECIDO, NÃO COBERTO — leia antes de confiar nesta função como
+// garantia absoluta: `member` ausente SEM nenhum `member;range=` é tratado
+// como grupo genuinamente VAZIO (`not-member`). Um AD que filtre o
+// atributo `member` por ACL — bind que enxerga o objeto mas não a lista de
+// membros — devolve exatamente a mesma resposta, e aí `not-member` é uma
+// afirmação FALSA: a revogação relataria sucesso sem ter revogado. As duas
+// respostas são indistinguíveis no protocolo, então não há correção
+// possível aqui dentro; fechar isso exigiria um sinal independente (o
+// `memberOf` do próprio usuário, por exemplo). Registrado como limitação,
+// não como segurança — um comentário anterior afirmava que esse caso caía
+// em `undetermined`, e afirmava errado.
 type MembershipState = 'member' | 'not-member' | 'undetermined';
 
 async function readMembership(client: Client, groupDn: string, memberDn: string): Promise<MembershipState> {
@@ -713,9 +723,10 @@ async function applyGroupMembership(client: Client, groupDn: string, memberDn: s
 
     if (state === 'undetermined') {
       // Só aqui a classe do erro volta a decidir — é o único caso em que
-      // não há estado lido para consultar. Mantido porque um bind com
-      // permissão de ESCRITA mas sem leitura do `member` é um cenário real
-      // de AD, e nele a classe do erro é a única informação disponível.
+      // não há estado lido para consultar: a releitura falhou, não trouxe
+      // entrada, ou trouxe o grupo com `member;range=`. (NÃO é o caso de
+      // ACL sobre o atributo `member`, que é indistinguível de grupo vazio
+      // e nem chega aqui — ver o limite registrado em `readMembership`.)
       if (operation === 'add' && (err instanceof TypeOrValueExistsError || err instanceof AlreadyExistsError)) return;
       if (operation === 'delete' && err instanceof NoSuchAttributeError) return;
       throw err;

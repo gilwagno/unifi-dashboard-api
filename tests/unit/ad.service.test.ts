@@ -59,6 +59,12 @@ let baseSearchMode: 'normal' | 'empty' | 'ranged' | 'throw';
 // TypeOrValueExists, nem AlreadyExists, nem NoSuchAttribute) — é o caso que
 // obriga a releitura a decidir sozinha, sem caminho rápido por classe.
 let modifyShouldThrowRawForDn: string | null;
+// Faz `client.modify` de um DN falhar com uma INSTÂNCIA de erro escolhida
+// pelo teste — usado para exercitar as classes REAIS do `ldapts`
+// (TypeOrValueExists/AlreadyExists/NoSuchAttribute) no ramo em que a
+// releitura não conseguiu determinar o estado e a classe do erro volta a
+// ser a única informação disponível.
+let modifyShouldThrowInstanceForDn: { dn: string; error: Error } | null;
 
 // Erro CRU do modify: não é nenhuma das 3 classes que o caminho rápido
 // reconhece. Força a releitura a ser a única a decidir.
@@ -212,6 +218,7 @@ vi.mock('ldapts', async (importOriginal) => {
       modifyCallCount += 1;
       if (modifyShouldThrowForDn === dn) throw new Error('conexão derrubada no meio da escrita (simulado)');
       if (modifyShouldThrowRawForDn === dn) throw new RawModifyError();
+      if (modifyShouldThrowInstanceForDn?.dn === dn) throw modifyShouldThrowInstanceForDn.error;
       const entry = directory.get(dn);
       if (!entry) throw new FakeNoSuchObjectError();
       const list = Array.isArray(changes) ? changes : [changes];
@@ -293,6 +300,7 @@ beforeEach(() => {
   searchShouldThrowAfterModify = false;
   baseSearchMode = 'normal';
   modifyShouldThrowRawForDn = null;
+  modifyShouldThrowInstanceForDn = null;
 });
 
 afterEach(() => {
@@ -714,6 +722,48 @@ describe('ad.service — ponte 802.1X', () => {
       expect(cause.name).toBe('RawModifyError');
       expect(cause.message).not.toContain('releitura');
     }
+  });
+
+  // O ramo `undetermined` é o ÚNICO lugar em que a classe do erro volta a
+  // decidir — quando não há estado legível para consultar. Os dois testes
+  // abaixo existem porque sem eles esse ramo ficava indefeso: apagá-lo
+  // inteiro deixava a suíte verde, e ele é o que preserva a idempotência
+  // num diretório cuja releitura não responde.
+  it('sem estado legível, a classe do erro decide: REVOGAR + NoSuchAttribute -> SUCESSO', async () => {
+    seedUser();
+    const groupDn = seedGroup([USER_DN]);
+    const { NoSuchAttributeError } = await import('ldapts');
+    modifyShouldThrowInstanceForDn = { dn: groupDn, error: new NoSuchAttributeError() };
+    baseSearchMode = 'throw';
+
+    const { revokeNetworkAccess } = await importAdService({ ...AD_ENV, AD_NETWORK_ACCESS_GROUP_DN: groupDn });
+    await expect(revokeNetworkAccess('jsilva')).resolves.toBeUndefined();
+  });
+
+  it('sem estado legível, a classe do erro decide: CONCEDER + AlreadyExists -> SUCESSO', async () => {
+    seedUser();
+    const groupDn = seedGroup([]);
+    const { AlreadyExistsError } = await import('ldapts');
+    modifyShouldThrowInstanceForDn = { dn: groupDn, error: new AlreadyExistsError() };
+    baseSearchMode = 'empty';
+
+    const { grantNetworkAccess } = await importAdService({ ...AD_ENV, AD_NETWORK_ACCESS_GROUP_DN: groupDn });
+    await expect(grantNetworkAccess('jsilva')).resolves.toBeUndefined();
+  });
+
+  // Mudança de comportamento DELIBERADA ao mover a releitura para antes do
+  // catch por classe: quando HÁ estado legível, ele manda — mesmo que a
+  // classe do erro sozinha dissesse o contrário. `AlreadyExists` num grupo
+  // que a releitura prova NÃO conter o usuário é uma contradição, e a
+  // direção segura é falhar, não relatar um acesso que não foi concedido.
+  it('estado legível VENCE a classe do erro: AlreadyExists + releitura dizendo que NÃO é membro -> ERRO', async () => {
+    seedUser();
+    const groupDn = seedGroup([]);
+    const { AlreadyExistsError } = await import('ldapts');
+    modifyShouldThrowInstanceForDn = { dn: groupDn, error: new AlreadyExistsError() };
+
+    const { grantNetworkAccess, AdRequestError } = await importAdService({ ...AD_ENV, AD_NETWORK_ACCESS_GROUP_DN: groupDn });
+    await expect(grantNetworkAccess('jsilva')).rejects.toThrow(AdRequestError);
   });
 
   it('revokeNetworkAccess remove o DN do usuário do grupo', async () => {
