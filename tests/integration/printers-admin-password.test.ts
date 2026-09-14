@@ -555,7 +555,7 @@ describe('POST /printers/:id/admin-password', () => {
 
     vi.mocked(unifiClassicService.isConfigured).mockReturnValue(true);
     vi.mocked(unifiClassicService.getKnownClientsNetworkInfo).mockResolvedValue(
-      new Map([['aa:bb:cc:10:00:0f', { ipAddress: '10.99.99.77', connectionType: 'WIRELESS' as const }]]),
+      new Map([['aa:bb:cc:10:00:0f', { ipAddress: '10.99.99.77', connectionType: 'WIRELESS' as const, alias: null }]]),
     );
 
     const res = await app.inject({

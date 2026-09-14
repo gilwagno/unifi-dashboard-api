@@ -217,7 +217,7 @@ describe('POST /printers/:id/reboot', () => {
 
     vi.mocked(unifiClassicService.isConfigured).mockReturnValue(true);
     vi.mocked(unifiClassicService.getKnownClientsNetworkInfo).mockResolvedValue(
-      new Map([['aa:bb:cc:00:00:06', { ipAddress: '10.99.99.85', connectionType: 'WIRELESS' as const }]]),
+      new Map([['aa:bb:cc:00:00:06', { ipAddress: '10.99.99.85', connectionType: 'WIRELESS' as const, alias: null }]]),
     );
 
     const res = await app.inject({ method: 'POST', url: `/printers/${printer.id}/reboot`, headers: auth });

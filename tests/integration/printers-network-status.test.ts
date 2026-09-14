@@ -1,7 +1,7 @@
 import { rmSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
 // Cobertura dedicada da subtarefa 2 da Onda 2 (ver CLAUDE.md): merge de
 // GET /printers e GET /printers/:id com o status ao vivo do UniFi

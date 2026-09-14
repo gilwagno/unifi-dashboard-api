@@ -2,7 +2,7 @@ import { rmSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 
 // Diferente do resto das rotas de teste do projeto (que mockam a camada de
 // serviço), aqui não há serviço externo nenhum pro CRUD em si — a rota fala
