@@ -1,0 +1,101 @@
+name: CI
+
+# A maior lacuna operacional do projeto até 2026-09-14: 908 testes que só
+# rodavam se alguém lembrasse de rodar. Este workflow fecha o buraco de "PR
+# mergeado com teste quebrado sem nada avisar" e é o pré-requisito para
+# ligar branch protection.
+#
+# Backend e frontend são DOIS projetos npm independentes (lockfiles
+# separados, `frontend/` não é workspace do root), por isso dois jobs em
+# paralelo em vez de um só com dois `npm ci`: falha num não esconde o
+# resultado do outro, e o nome do check que falhou já diz onde olhar.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Um push novo no mesmo branch cancela a execução anterior — sem isso, uma
+# sequência rápida de commits enfileira runs que ninguém vai ler.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# As actions estao em @v5, nao @v4: a PRIMEIRA execucao real deste workflow
+# (run 34876545007) emitiu o aviso de que checkout@v4 e setup-node@v4 ainda
+# tem como alvo o Node 20, ja depreciado nos runners e sendo forcado para o
+# 24. Hoje e so um aviso; quando o runner parar de forcar, vira quebra. O
+# aviso so apareceu porque o workflow RODOU -- nenhuma leitura do YAML o
+# teria revelado.
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          # `engines.node` do package.json exige >=22.5.0 (o módulo de
+          # impressoras usa `node:sqlite`, built-in a partir dali). 24 é a
+          # versão em que o projeto é desenvolvido hoje.
+          node-version: '24'
+          cache: npm
+
+      # `npm ci` (não `npm install`): instala exatamente o lockfile e falha
+      # se ele estiver dessincronizado do package.json — que é uma classe de
+      # problema que este CI deve PEGAR, não contornar.
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Testes
+        run: npm test
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      # `tsc -b`, NUNCA `tsc --noEmit`: o tsconfig.json do frontend é um
+      # arquivo "solution" de project references (`files: []`, sem
+      # `include`), então `--noEmit` processa ZERO arquivos e reporta
+      # "limpo" por vacuidade. Esse engano já custou 2 arquivos de teste
+      # quebrados passando despercebidos neste projeto (PR #29).
+      - name: Typecheck
+        run: npx tsc -b
+
+      # `--max-warnings=6` é uma CATRACA, não um número mágico: hoje o
+      # projeto tem exatamente 6 warnings pré-existentes (1 de fast-refresh
+      # no AuthContext, 5 de `set-state-in-effect` em páginas que carregam
+      # dados). Falhar em 0 exigiria uma limpeza que não é escopo desta
+      # onda; não passar limite nenhum deixaria o passo INCAPAZ DE FALHAR —
+      # proteção sem trava, o padrão mais recorrente deste projeto. Com a
+      # catraca, o débito atual passa e qualquer warning NOVO quebra o CI.
+      # Ao limpar algum, baixe este número junto.
+      - name: Lint
+        run: npx oxlint --max-warnings=6
+
+      - name: Testes
+        run: npm test
+
+      # O build é o que de fato roda em produção — um erro de bundling
+      # (import quebrado, asset ausente) não aparece nem no typecheck nem
+      # nos testes.
+      - name: Build
+        run: npm run build
