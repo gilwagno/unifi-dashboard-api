@@ -100,17 +100,18 @@ async function restartFakeLdap(): Promise<void> {
 describe('ad.service — protocolo LDAP real (fake-ldap-server)', () => {
   beforeEach(restartFakeLdap);
 
-  it('searchUsers() sem query lista os 3 usuários semeados', async () => {
+  it('searchUsers() sem query lista os usuários semeados', async () => {
     const { searchUsers } = await importAdService();
     const users = await searchUsers();
-    expect(users.map((u) => u.sAMAccountName).sort()).toEqual(['jsilva', 'mreis', 'ptravado']);
+    expect(users.map((u) => u.sAMAccountName).sort()).toEqual(['jsilva', 'mreis', 'ptravado', 'semuac', 'sjoao']);
   });
 
   it('searchUsers(query) usa filtro OR de substring (cn/sAMAccountName/mail) — o servidor real decide o match, não um mock', async () => {
     const { searchUsers } = await importAdService();
+    // 'silva' casa jsilva (cn/sAMAccountName) e sjoao (cn "Silva\, Joao") —
+    // o segundo foi semeado depois, para cobrir DN com vírgula escapada.
     const users = await searchUsers('silva');
-    expect(users).toHaveLength(1);
-    expect(users[0]?.sAMAccountName).toBe('jsilva');
+    expect(users.map((u) => u.sAMAccountName).sort()).toEqual(['jsilva', 'sjoao']);
 
     // Casa por substring de e-mail também (mesmo filtro OR) — prova que o
     // `parseFilter`/`matchesFilter` do fake trata os 3 ramos do OR, não só
@@ -335,10 +336,10 @@ describe('ad.service — protocolo LDAP real (fake-ldap-server)', () => {
 describe('ad.service — grupos, protocolo LDAP real (fake-ldap-server)', () => {
   beforeEach(restartFakeLdap);
 
-  it('searchGroups() sem query lista os grupos semeados (Rede-Permitida + Financeiro), ignorando usuários', async () => {
+  it('searchGroups() sem query lista os grupos semeados, ignorando usuários', async () => {
     const { searchGroups } = await importAdService();
     const groups = await searchGroups();
-    expect(groups.map((g) => g.cn).sort()).toEqual(['Financeiro', 'Rede-Permitida']);
+    expect(groups.map((g) => g.cn).sort()).toEqual(['Acesso-Aninhado', 'Financeiro', 'Rede-Permitida']);
   });
 
   it('searchGroups(query) filtra por substring em cn/description contra o servidor real', async () => {
@@ -891,6 +892,342 @@ describe('fake-ldap-server — exige bind prévio por conexão (RFC 4511 §4.2.1
     } finally {
       await client.unbind().catch(() => undefined);
     }
+  });
+});
+
+// ACHADO de revisão cega: a recusa de escrita de `setUserEnabled` quando o
+// `userAccountControl` não é legível NÃO TINHA UM ÚNICO TESTE — o mutante
+// que a apagava passava com a suíte inteira verde (795/795). É a gêmea da
+// guarda de `setComputerEnabled` (essa sim coberta desde a subtarefa 4), e
+// vinha da PR #25 sem defesa alguma desde então.
+//
+// Sem a guarda, `null | 2` = `2`: o serviço GRAVA `userAccountControl=2` por
+// cima da conta, apagando em silêncio todos os bits que não conseguiu ler
+// (DONT_EXPIRE_PASSWORD, SMARTCARD_REQUIRED, o tipo da conta…). Numa conta
+// de usuário isso é uma reconfiguração silenciosa de credencial.
+describe('ad.service — setUserEnabled recusa escrever sem poder ler o estado', () => {
+  beforeEach(restartFakeLdap);
+
+  it('usuário sem userAccountControl legível: LEITURA devolve enabled null', async () => {
+    const { getUser } = await importAdService();
+    expect((await getUser('semuac')).enabled).toBeNull();
+  });
+
+  it('ESCRITA é recusada, não grava um UAC adivinhado', async () => {
+    const { setUserEnabled, AdRequestError } = await importAdService();
+    await expect(setUserEnabled('semuac', false)).rejects.toBeInstanceOf(AdRequestError);
+  });
+
+  it('a recusa acontece ANTES da escrita — o objeto continua sem o atributo', async () => {
+    const { getUser, setUserEnabled } = await importAdService();
+
+    await expect(setUserEnabled('semuac', false)).rejects.toThrow();
+    // Se tivesse gravado, o atributo passaria a existir e `enabled` viraria
+    // booleano — é isso que prova que nada foi escrito.
+    expect((await getUser('semuac')).enabled).toBeNull();
+  });
+
+  it('a mensagem chega inteira, sem ser reembrulhada num erro genérico', async () => {
+    const { setUserEnabled } = await importAdService();
+    try {
+      await setUserEnabled('semuac', true);
+      expect.unreachable('deveria ter lançado');
+    } catch (err) {
+      expect((err as Error).message).toContain('userAccountControl');
+      expect((err as Error).message).not.toContain('Falha na operação com o Active Directory');
+    }
+  });
+});
+
+// --- Membership DIRETA vs HERDADA por aninhamento (subtarefa 7) ----------
+//
+// Medido contra o AD real em 2026-09-14: o grupo de acesso à rede tinha 20
+// membros diretos, 12 dos quais eram grupos departamentais inteiros,
+// carregando 61 pessoas por HERANÇA. O dashboard revogaria 8 de 69 — os
+// outros 61 veriam "revogado com sucesso" e seguiriam conectados. Sem esta
+// resolução, a tela não tem como avisar, e o bug de produção continua
+// existindo na prática mesmo com o backend corrigido.
+describe('ad.service — getGroup resolve membros (direto vs aninhado)', () => {
+  beforeEach(restartFakeLdap);
+
+  it('distingue usuário (direto) de GRUPO (herança) na lista de membros', async () => {
+    const { getGroup } = await importAdService();
+    const g = await getGroup('Acesso-Aninhado');
+
+    const porNome = Object.fromEntries((g.memberDetails ?? []).map((m) => [m.name, m.type]));
+    expect(porNome.jsilva).toBe('user');
+    expect(porNome.Financeiro).toBe('group');
+  });
+
+  it('DN que não resolve vira `unknown`, NUNCA `user` — o palpite cairia no lado sem aviso', async () => {
+    const { getGroup } = await importAdService();
+    const g = await getGroup('Acesso-Aninhado');
+
+    const fantasma = (g.memberDetails ?? []).find((m) => m.dn.includes('NaoExiste'));
+    expect(fantasma?.type).toBe('unknown');
+
+    // E o membro cujo DN tem vírgula ESCAPADA mas QUE EXISTE precisa
+    // resolver como 'user' — o fake não desfazia o escape do filtro, então
+    // ele aparecia como "não resolvido" mesmo estando no diretório. Um AD
+    // real desfaz (RFC 4515 §3); o fake, e não o código, é que estava
+    // errado. Sem esta asserção, a correção do fake não tem trava.
+    const comVirgula = (g.memberDetails ?? []).find((m) => m.name === 'Silva, Joao');
+    expect(comVirgula?.type).toBe('user');
+  });
+
+  it('resolve todos os membros e preserva a ordem de `member`', async () => {
+    const { getGroup } = await importAdService();
+    const g = await getGroup('Acesso-Aninhado');
+
+    expect(g.memberDetails).toHaveLength(g.members.length);
+    expect((g.memberDetails ?? []).map((m) => m.dn)).toEqual(g.members);
+  });
+
+  // ACHADO de revisão cega: todo o tratamento de escape de DN era código NÃO
+  // DEFENDIDO — trocar a função inteira pelo `split(',')` ingênuo (o que o
+  // próprio comentário dela diz estar errado) passava com a suíte verde,
+  // porque nenhum DN do fake tinha escape. `CN=Silva\, Joao` é a forma como
+  // o AD grava um nome brasileiro comum: sem isto, a tela mostraria "Silva"
+  // e o resto do nome sumiria.
+  it('membro com VÍRGULA ESCAPADA no DN não é cortado ao meio', async () => {
+    const { getGroup } = await importAdService();
+    const g = await getGroup('Acesso-Aninhado');
+
+    const nomes = (g.memberDetails ?? []).map((m) => m.name);
+    // Resolvido: o nome vem do atributo `cn`, já limpo.
+    expect(nomes).toContain('Silva, Joao');
+    // NÃO resolvido: o nome é derivado do DN e o escape tem que ser
+    // desfeito — senão sai "Souza" e o resto do nome some da tela.
+    expect(nomes).toContain('Souza, Maria');
+    expect(nomes).not.toContain('Souza');
+  });
+
+  // Grupo CRIADO pelo serviço (não semeado) precisa ser resolvível como
+  // membro — depende de o diretório derivar `distinguishedName` sozinho no
+  // `add`, como um AD real faz. O mutante que removia essa derivação
+  // sobrevivia: nada criava um grupo e depois o resolvia.
+  it('grupo criado pelo serviço é resolvível como membro aninhado', async () => {
+    const { createGroup, addGroupMember, getGroup } = await importAdService();
+
+    await createGroup({ name: 'Grupo-Novo-Teste' });
+    // O serviço só adiciona USUÁRIO a grupo; para o caso aninhado, o membro
+    // é escrito direto no diretório do fake, como um administrador faria
+    // pelo ADUC.
+    const alvo = fakeLdap.directory.get(`cn=acesso-aninhado,cn=users,${fakeLdap.baseDn}`.toLowerCase());
+    const novoDn = `CN=Grupo-Novo-Teste,${fakeLdap.groupsOu}`;
+    alvo?.attrs.set('member', [...(alvo.attrs.get('member') ?? []), Buffer.from(novoDn, 'utf8')]);
+
+    const g = await getGroup('Acesso-Aninhado');
+    const criado = (g.memberDetails ?? []).find((m) => m.name === 'Grupo-Novo-Teste');
+
+    expect(criado?.type).toBe('group');
+    void addGroupMember;
+  });
+
+  it('grupo sem membros devolve lista vazia, sem disparar busca nenhuma', async () => {
+    const { getGroup } = await importAdService();
+    const g = await getGroup('Rede-Permitida');
+
+    expect(g.memberDetails).toEqual([]);
+  });
+
+  // `searchGroups` NÃO resolve: seriam N buscas numa listagem que já devolve
+  // o domínio inteiro. A distinção entre "não resolvido" e "sem membros"
+  // importa — por isso é `undefined`, não `[]`.
+  it('searchGroups NÃO resolve membros (undefined, não lista vazia)', async () => {
+    const { searchGroups } = await importAdService();
+    const grupos = await searchGroups('Acesso-Aninhado');
+
+    expect(grupos[0]?.memberDetails).toBeUndefined();
+  });
+});
+
+// --- Computadores (subtarefa 4) ------------------------------------------
+//
+// Contra o PROTOCOLO REAL desde o primeiro teste, nunca só com
+// `vi.mock('ldapts')` — regra explícita desta subtarefa: validar computadores
+// só no mock repetiria o padrão que já deixou passar um bug de produção
+// nesta mesma onda (a idempotência da revogação).
+describe('ad.service — computadores, protocolo LDAP real (fake-ldap-server)', () => {
+  beforeEach(restartFakeLdap);
+
+  it('searchComputers() sem query lista os 6 computadores semeados, inclusive os DCs', async () => {
+    const { searchComputers } = await importAdService();
+    const computers = await searchComputers();
+
+    expect(computers.map((c) => c.name).sort()).toEqual([
+      'EA-PC-PRECRIADO',
+      'EA-PC-SEMUAC',
+      'EA-PC-TESTE01',
+      'EA-PC-TESTE02',
+      'EA-RODC-FAKE',
+      'EA-SRV-FAKE01',
+    ]);
+  });
+
+  it('o `$` do sAMAccountName NÃO vaza para `name`, e vem no campo próprio', async () => {
+    const { getComputer } = await importAdService();
+    const pc = await getComputer('EA-PC-TESTE01');
+
+    expect(pc.name).toBe('EA-PC-TESTE01');
+    expect(pc.sAMAccountName).toBe('EA-PC-TESTE01$');
+  });
+
+  it('busca pelo nome COM `$` acha o mesmo objeto que sem `$`', async () => {
+    const { getComputer } = await importAdService();
+    const semCifrao = await getComputer('EA-PC-TESTE01');
+    const comCifrao = await getComputer('EA-PC-TESTE01$');
+
+    expect(comCifrao.dn).toBe(semCifrao.dn);
+  });
+
+  it('lê os atributos de inventário que a tela precisa', async () => {
+    const { getComputer } = await importAdService();
+    const pc = await getComputer('EA-PC-TESTE01');
+
+    expect(pc.dnsHostName).toBe('ea-pc-teste01.fakeldap.test');
+    expect(pc.operatingSystem).toBe('Windows 11 Pro');
+    expect(pc.operatingSystemVersion).toBe('10.0 (26200)');
+    expect(pc.description).toBe('Estação de teste');
+  });
+
+  it('computador semeado DESABILITADO sai com enabled: false, sem nenhuma mutação antes', async () => {
+    const { getComputer } = await importAdService();
+    expect((await getComputer('EA-PC-TESTE02')).enabled).toBe(false);
+  });
+
+  // O ponto do teste não é o booleano — é que a listagem NÃO esconde o DC.
+  // Esconder seria mentir sobre o que existe no domínio; o que a interface
+  // precisa é do sinal para avisar ANTES de alguém desabilitar a conta que
+  // sustenta o domínio inteiro.
+  it('distingue CONTROLADOR DE DOMÍNIO de estação, e não esconde o DC da listagem', async () => {
+    const { searchComputers, getComputer } = await importAdService();
+
+    expect((await getComputer('EA-SRV-FAKE01')).isDomainController).toBe(true);
+    expect((await getComputer('EA-PC-TESTE01')).isDomainController).toBe(false);
+
+    const nomes = (await searchComputers()).map((c) => c.name);
+    expect(nomes).toContain('EA-SRV-FAKE01');
+  });
+
+  // ACHADO SÉRIO de revisão. A derivação original era por AUSÊNCIA do bit de
+  // workstation, e um RODC carrega esse bit — logo saía `false`, e a
+  // interface não avisaria antes de desabilitar a conta de um controlador
+  // de domínio. Falha ABERTA no único sinal de segurança do campo.
+  it('RODC é reconhecido como controlador de domínio (carrega o bit de WORKSTATION, não o de SERVER)', async () => {
+    const { getComputer } = await importAdService();
+    expect((await getComputer('EA-RODC-FAKE')).isDomainController).toBe(true);
+  });
+
+  // O lado oposto do mesmo erro: derivar por ausência transformava toda
+  // conta pré-criada (UAC sem bit de trust) em "controlador de domínio".
+  it('conta pré-criada sem bit de trust NÃO vira falso alarme de controlador de domínio', async () => {
+    const { getComputer } = await importAdService();
+    expect((await getComputer('EA-PC-PRECRIADO')).isDomainController).toBe(false);
+  });
+
+  it('setComputerEnabled desabilita e reabilita DE VERDADE no diretório, ida e volta', async () => {
+    const { getComputer, setComputerEnabled } = await importAdService();
+
+    expect((await getComputer('EA-PC-TESTE01')).enabled).toBe(true);
+    await setComputerEnabled('EA-PC-TESTE01', false);
+    expect((await getComputer('EA-PC-TESTE01')).enabled).toBe(false);
+    await setComputerEnabled('EA-PC-TESTE01', true);
+    expect((await getComputer('EA-PC-TESTE01')).enabled).toBe(true);
+  });
+
+  // Regressão do achado já corrigido em `setUserEnabled`: escrever um UAC
+  // montado do zero apagaria os outros bits do objeto. Num computador o bit
+  // que se perderia é o que o distingue de um controlador de domínio — por
+  // isso o teste confere o bit de trust DEPOIS da escrita, não só `enabled`.
+  it('desabilitar PRESERVA os outros bits do userAccountControl (não sobrescreve o objeto)', async () => {
+    const { getComputer, setComputerEnabled } = await importAdService();
+
+    await setComputerEnabled('EA-SRV-FAKE01', false);
+    const dc = await getComputer('EA-SRV-FAKE01');
+
+    expect(dc.enabled).toBe(false);
+    expect(dc.isDomainController).toBe(true);
+  });
+
+  // PROTEÇÃO SEM TRAVA encontrada por mutação nesta subtarefa: trocar a
+  // recusa por `currentUac ?? UF_WORKSTATION_TRUST_ACCOUNT` passava com a
+  // suíte inteira verde (784/784). O efeito real do mutante seria gravar um
+  // UAC inventado por cima do objeto, apagando em silêncio todos os bits que
+  // não conseguimos ler — num computador, inclusive o que o distingue de um
+  // CONTROLADOR DE DOMÍNIO.
+  it('sem userAccountControl legível, a LEITURA devolve null em vez de afirmar "habilitado"', async () => {
+    const { getComputer } = await importAdService();
+    const pc = await getComputer('EA-PC-SEMUAC');
+
+    expect(pc.enabled).toBeNull();
+    expect(pc.isDomainController).toBeNull();
+  });
+
+  it('sem userAccountControl legível, a ESCRITA é RECUSADA (não grava um UAC adivinhado)', async () => {
+    const { setComputerEnabled, AdRequestError } = await importAdService();
+
+    await expect(setComputerEnabled('EA-PC-SEMUAC', false)).rejects.toBeInstanceOf(AdRequestError);
+  });
+
+  // ACHADO de revisão (proteção sem trava): a base `AdError` também existe
+  // para que um `AdRequestError` lançado DENTRO do callback do `withClient`
+  // não seja reembrulhado em OUTRO `AdRequestError`, aninhando a mensagem.
+  // Isso não tinha teste: o mutante que reembrulhava só esta classe passava
+  // com a suíte verde. A mensagem aninhada é o que o operador leria.
+  it('a mensagem da recusa chega INTEIRA, sem ser reembrulhada num erro genérico', async () => {
+    const { setComputerEnabled } = await importAdService();
+
+    try {
+      await setComputerEnabled('EA-PC-SEMUAC', false);
+      expect.unreachable('deveria ter lançado');
+    } catch (err) {
+      const msg = (err as Error).message;
+      expect(msg).toContain('userAccountControl');
+      expect(msg).not.toContain('Falha na operação com o Active Directory');
+    }
+  });
+
+  it('a recusa acontece ANTES de qualquer escrita — o objeto continua sem userAccountControl', async () => {
+    const { getComputer, setComputerEnabled } = await importAdService();
+
+    await expect(setComputerEnabled('EA-PC-SEMUAC', false)).rejects.toThrow();
+    // Se a escrita tivesse acontecido, o atributo passaria a existir e
+    // `enabled` viraria um booleano — é isso que prova que nada foi gravado.
+    expect((await getComputer('EA-PC-SEMUAC')).enabled).toBeNull();
+  });
+
+  it('getComputer() de quem não existe -> AdComputerNotFoundError (busca real, não DN adivinhado)', async () => {
+    const { getComputer, AdComputerNotFoundError } = await importAdService();
+    await expect(getComputer('EA-PC-NAO-EXISTE')).rejects.toBeInstanceOf(AdComputerNotFoundError);
+  });
+
+  it('setComputerEnabled() de quem não existe falha e NÃO altera nenhum outro computador', async () => {
+    const { getComputer, setComputerEnabled, AdComputerNotFoundError } = await importAdService();
+
+    await expect(setComputerEnabled('EA-PC-NAO-EXISTE', false)).rejects.toBeInstanceOf(AdComputerNotFoundError);
+    expect((await getComputer('EA-PC-TESTE01')).enabled).toBe(true);
+  });
+
+  it('searchComputers(query) filtra por substring em cn/dNSHostName/description', async () => {
+    const { searchComputers } = await importAdService();
+
+    expect((await searchComputers('TESTE01')).map((c) => c.name)).toEqual(['EA-PC-TESTE01']);
+    expect((await searchComputers('srv')).map((c) => c.name)).toEqual(['EA-SRV-FAKE01']);
+    expect((await searchComputers('Estação')).map((c) => c.name)).toEqual(['EA-PC-TESTE01']);
+  });
+
+  // Mesma disciplina do teste de injeção de `searchGroups`: o filtro vai
+  // contra o parser de filtro REAL do fake, então um payload hostil que não
+  // fosse escapado mudaria a ESTRUTURA do filtro e vazaria a lista inteira.
+  it('escapa a query no filtro — payload de injeção não vira "presença" nem vaza a lista', async () => {
+    const { searchComputers } = await importAdService();
+    expect(await searchComputers('*)(objectClass=*')).toEqual([]);
+  });
+
+  it('escapa o nome em getComputer — um nome hostil não casa outro objeto', async () => {
+    const { getComputer, AdComputerNotFoundError } = await importAdService();
+    await expect(getComputer('*')).rejects.toBeInstanceOf(AdComputerNotFoundError);
   });
 });
 

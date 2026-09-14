@@ -194,6 +194,19 @@ function matchesFilter(entry, filter) {
 // Filter ::= CHOICE { and[0], or[1], not[2], equalityMatch[3] SEQUENCE,
 //   substrings[4] SEQUENCE, present[7] OCTET STRING, ... } — ver
 // node_modules/ldapts/src/filters/{And,Or,Not,Equality,Substring,Presence}Filter.ts
+// INFIDELIDADE encontrada na subtarefa 7: um AssertionValue de filtro LDAP
+// chega ESCAPADO (RFC 4515 §3): os caracteres especiais `* ( ) \ NUL` viajam
+// como `\XX` hexadecimal. O `escapeFilter` do `ldapts` produz exatamente
+// isso — e este fake comparava a forma escapada contra o valor CRU guardado
+// no diretório, então qualquer valor contendo uma barra invertida NUNCA
+// casava. Efeito concreto: um membro de grupo cujo DN tem vírgula escapada
+// (`CN=Silva\, Joao,...`, um nome brasileiro comum) aparecia como "não
+// resolvido" mesmo existindo no diretório. Contra um AD real casaria — de
+// novo o fake errado, não o código.
+function unescapeFilterValue(valor) {
+  return valor.replace(/\\([0-9a-fA-F]{2})/g, (_todo, hex) => String.fromCharCode(Number.parseInt(hex, 16)));
+}
+
 function parseFilter(reader) {
   const tag = reader.peek();
   switch (tag) {
@@ -213,7 +226,7 @@ function parseFilter(reader) {
     case FILTER.equalityMatch: {
       reader.readSequence(tag);
       const attr = reader.readString(OCTET_STRING);
-      const value = reader.readString(OCTET_STRING);
+      const value = unescapeFilterValue(reader.readString(OCTET_STRING));
       return { type: 'equal', attr, value };
     }
     case FILTER.substrings: {
@@ -226,7 +239,7 @@ function parseFilter(reader) {
       const any = [];
       while (reader.offset < subEnd) {
         const subTag = reader.peek();
-        const value = reader.readString(subTag);
+        const value = unescapeFilterValue(reader.readString(subTag));
         if (subTag === 0x80) initial = value;
         else if (subTag === 0x81) any.push(value);
         else if (subTag === 0x82) final = value;
@@ -330,13 +343,23 @@ function encodeSearchEntry(messageId, entry, requestedAttributes) {
 
 const UF_ACCOUNTDISABLE = 0x0002;
 const UF_NORMAL_ACCOUNT = 0x0200;
+// Bits de conta de COMPUTADOR. Um objeto `computer` no AD carrega um
+// destes em vez de UF_NORMAL_ACCOUNT — e a diferença entre os dois é a
+// diferença entre uma estação qualquer e um CONTROLADOR DE DOMÍNIO.
+const UF_WORKSTATION_TRUST_ACCOUNT = 0x1000;
+const UF_SERVER_TRUST_ACCOUNT = 0x2000;
+// RODC: um Read-Only Domain Controller É controlador de domínio, mas a
+// conta dele carrega UF_WORKSTATION_TRUST_ACCOUNT + este bit, NUNCA
+// UF_SERVER_TRUST_ACCOUNT. É a armadilha que fez a primeira versão de
+// `isDomainController` classificar um RODC como estação comum.
+const UF_PARTIAL_SECRETS_ACCOUNT = 0x04000000;
 
 function seedDirectory(config) {
   const directory = new Map();
 
   const put = (entry) => directory.set(normalizeDn(entry.dn), entry);
 
-  const makeUser = ({ sam, displayName, mail, department, title, uac, lockoutTime, workstations }) => {
+  const makeUser = ({ sam, displayName, mail, department, title, uac, lockoutTime, workstations, omitUac }) => {
     const dn = `CN=${sam},${config.usersOu}`;
     const entry = makeEntry(dn);
     setAttr(entry, 'objectClass', ['top', 'person', 'organizationalPerson', 'user']);
@@ -348,7 +371,12 @@ function seedDirectory(config) {
     if (mail) setAttr(entry, 'mail', [mail]);
     if (department) setAttr(entry, 'department', [department]);
     if (title) setAttr(entry, 'title', [title]);
-    setAttr(entry, 'userAccountControl', [String(uac ?? UF_NORMAL_ACCOUNT)]);
+    // `omitUac`: simula um bind que enxerga o objeto mas NÃO o atributo
+    // userAccountControl (ACL). Existe para exercitar a recusa de escrita de
+    // `setUserEnabled` — sem um usuário assim, aquela guarda não tinha um
+    // único teste, e o mutante que a apagava passava com a suíte inteira
+    // verde. Mesmo papel do `omitUac` de `makeComputer`.
+    if (!omitUac) setAttr(entry, 'userAccountControl', [String(uac ?? UF_NORMAL_ACCOUNT)]);
     setAttr(entry, 'lockoutTime', [String(lockoutTime ?? 0)]);
     if (workstations?.length) setAttr(entry, 'userWorkstations', [workstations.join(',')]);
     put(entry);
@@ -383,10 +411,22 @@ function seedDirectory(config) {
     lockoutTime: Date.now(),
   });
 
+  // Sem `userAccountControl` legível — ver `omitUac` acima.
+  makeUser({
+    sam: 'semuac',
+    displayName: 'Usuario Sem UAC',
+    omitUac: true,
+  });
+
   // Grupo da ponte 802.1X (docs/ad-module-plan.md) — começa sem membros;
   // os testes de grant/revoke são quem povoa/esvazia `member`.
   const group = makeEntry(config.networkAccessGroupDn);
   setAttr(group, 'objectClass', ['top', 'group']);
+  // `distinguishedName` em TODO objeto, não só em usuário: é atributo
+  // operacional que um AD real sempre expõe, e é por ele que se resolve uma
+  // lista de membros numa busca só. Sem isto, um grupo aninhado saía como
+  // "não resolvido" — o fake, e não o código, é que estava errado.
+  setAttr(group, 'distinguishedName', [config.networkAccessGroupDn]);
   setAttr(group, 'cn', ['Rede-Permitida']);
   setAttr(group, 'member', []);
   put(group);
@@ -399,11 +439,143 @@ function seedDirectory(config) {
   // escopo de busca é AD_BASE_DN, não AD_GROUPS_OU).
   const financeiro = makeEntry(`CN=Financeiro,CN=Users,${config.baseDn}`);
   setAttr(financeiro, 'objectClass', ['top', 'group']);
+  setAttr(financeiro, 'distinguishedName', [`CN=Financeiro,CN=Users,${config.baseDn}`]);
   setAttr(financeiro, 'cn', ['Financeiro']);
   setAttr(financeiro, 'description', ['Equipe do financeiro']);
   const jsilvaDn = `CN=jsilva,${config.usersOu}`;
   setAttr(financeiro, 'member', [jsilvaDn]);
   put(financeiro);
+
+  // Grupo COM ANINHAMENTO — reproduz em miniatura a estrutura real medida
+  // no domínio em 2026-09-14: um grupo de acesso cujos membros são, em
+  // maioria, OUTROS GRUPOS. Quem entra por um grupo aninhado não pode ser
+  // removido pela membership direta (a operação devolve sucesso e a pessoa
+  // segue com acesso), e é isso que a tela precisa conseguir mostrar.
+  //
+  // Os 3 membros cobrem os 3 tipos de propósito:
+  //   - jsilva ....... usuário (membership DIRETA, o dashboard controla)
+  //   - Financeiro ... GRUPO (herança, o dashboard NÃO controla)
+  //   - fantasma ..... DN que não resolve (ACL/outro domínio) -> 'unknown'
+  const aninhado = makeEntry(`CN=Acesso-Aninhado,CN=Users,${config.baseDn}`);
+  setAttr(aninhado, 'objectClass', ['top', 'group']);
+  setAttr(aninhado, 'distinguishedName', [`CN=Acesso-Aninhado,CN=Users,${config.baseDn}`]);
+  setAttr(aninhado, 'cn', ['Acesso-Aninhado']);
+  // O 4º membro tem VÍRGULA ESCAPADA no CN (`Silva\, Joao`) — a forma como
+  // o AD grava um nome brasileiro comum. Sem ele, todo o tratamento de
+  // escape de `rdnValue` era código não defendido: o mutante que trocava a
+  // função inteira pelo `split(',')` ingênuo sobrevivia.
+  const nomeComVirgulaDn = `CN=Silva\\, Joao,${config.usersOu}`;
+  const nomeComVirgula = makeEntry(nomeComVirgulaDn);
+  setAttr(nomeComVirgula, 'objectClass', ['top', 'person', 'organizationalPerson', 'user']);
+  setAttr(nomeComVirgula, 'objectCategory', ['person']);
+  setAttr(nomeComVirgula, 'distinguishedName', [nomeComVirgulaDn]);
+  // O atributo `cn` guarda o valor LIMPO; só o DN carrega o escape. É assim
+  // num AD real, e a diferença importa: quem lê o `cn` vê "Silva, Joao";
+  // quem precisa derivar o nome A PARTIR do DN tem que desfazer o escape.
+  setAttr(nomeComVirgula, 'cn', ['Silva, Joao']);
+  setAttr(nomeComVirgula, 'sAMAccountName', ['sjoao']);
+  setAttr(nomeComVirgula, 'userAccountControl', [String(UF_NORMAL_ACCOUNT)]);
+  setAttr(nomeComVirgula, 'lockoutTime', ['0']);
+  put(nomeComVirgula);
+
+  setAttr(aninhado, 'member', [
+    jsilvaDn,
+    `CN=Financeiro,CN=Users,${config.baseDn}`,
+    // DN que NÃO resolve E tem vírgula escapada: é o único caminho em que o
+    // nome precisa ser derivado do próprio DN (`rdnValue`), porque não há
+    // objeto de onde ler o `cn`. Sem isto, todo o tratamento de escape era
+    // código não defendido.
+    `CN=Souza\\, Maria,OU=NaoExiste,${config.baseDn}`,
+    nomeComVirgulaDn,
+  ]);
+  put(aninhado);
+
+  // --- Computadores (subtarefa 4) ---
+  //
+  // Semeados no container padrão `CN=Computers`, que é onde o AD coloca uma
+  // máquina recém-ingressada — e NÃO em config.usersOu. Isso não é detalhe
+  // cosmético: prova que `searchComputers`/`getComputer` buscam a partir do
+  // AD_BASE_DN e não de uma OU configurada, do mesmo jeito que grupos.
+  const makeComputer = ({ cn, dnsHostName, os, osVersion, description, uac, omitUac }) => {
+    const dn = `CN=${cn},CN=Computers,${config.baseDn}`;
+    const entry = makeEntry(dn);
+    setAttr(entry, 'objectClass', ['top', 'person', 'organizationalPerson', 'user', 'computer']);
+    setAttr(entry, 'distinguishedName', [dn]);
+    setAttr(entry, 'cn', [cn]);
+    // O `$` no fim é a forma REAL como o AD grava o sAMAccountName de um
+    // computador — é justamente o que `normalizeComputerName` existe para
+    // conciliar com o nome que o operador digita.
+    setAttr(entry, 'sAMAccountName', [`${cn}$`]);
+    if (dnsHostName) setAttr(entry, 'dNSHostName', [dnsHostName]);
+    if (os) setAttr(entry, 'operatingSystem', [os]);
+    if (osVersion) setAttr(entry, 'operatingSystemVersion', [osVersion]);
+    if (description) setAttr(entry, 'description', [description]);
+    // `omitUac` existe para simular um objeto cujo userAccountControl NÃO
+    // vem legível — o caso real é um bind com permissão de leitura sobre o
+    // objeto mas não sobre esse atributo específico. É o único jeito de
+    // exercitar a recusa de escrita de `setComputerEnabled` contra o
+    // protocolo de verdade.
+    if (!omitUac) setAttr(entry, 'userAccountControl', [String(uac ?? UF_WORKSTATION_TRUST_ACCOUNT)]);
+    put(entry);
+    return entry;
+  };
+
+  makeComputer({
+    cn: 'EA-PC-TESTE01',
+    dnsHostName: 'ea-pc-teste01.fakeldap.test',
+    os: 'Windows 11 Pro',
+    osVersion: '10.0 (26200)',
+    description: 'Estação de teste',
+  });
+
+  // Desabilitado de propósito — exercita `enabled: false` na listagem sem
+  // depender de nenhuma mutação anterior.
+  makeComputer({
+    cn: 'EA-PC-TESTE02',
+    dnsHostName: 'ea-pc-teste02.fakeldap.test',
+    os: 'Windows 10 Pro',
+    uac: UF_WORKSTATION_TRUST_ACCOUNT | UF_ACCOUNTDISABLE,
+  });
+
+  // CONTROLADOR DE DOMÍNIO. Existe aqui porque `objectClass=computer` casa
+  // um DC também, e a listagem NÃO o esconde de propósito (esconder seria
+  // mentir sobre o que há no domínio) — mas `isDomainController` precisa
+  // sair `true` para que a interface possa avisar antes de alguém
+  // desabilitar a conta que sustenta o domínio inteiro.
+  makeComputer({
+    cn: 'EA-SRV-FAKE01',
+    dnsHostName: 'ea-srv-fake01.fakeldap.test',
+    os: 'Windows Server 2016 Standard',
+    uac: UF_SERVER_TRUST_ACCOUNT,
+  });
+
+  // Sem `userAccountControl` legível. Serve a dois propósitos: `enabled` e
+  // `isDomainController` têm que sair `null` (nunca "habilitado" por
+  // padrão — falhar ABERTO num módulo de controle de acesso), e a escrita
+  // tem que ser RECUSADA em vez de gravar um UAC adivinhado por cima.
+  makeComputer({
+    cn: 'EA-PC-SEMUAC',
+    dnsHostName: 'ea-pc-semuac.fakeldap.test',
+    omitUac: true,
+  });
+
+  // RODC — ver o comentário de UF_PARTIAL_SECRETS_ACCOUNT acima. Semeado
+  // porque a derivação de `isDomainController` por AUSÊNCIA do bit de
+  // workstation dava `false` aqui, e nenhum teste pegava.
+  makeComputer({
+    cn: 'EA-RODC-FAKE',
+    dnsHostName: 'ea-rodc-fake.fakeldap.test',
+    os: 'Windows Server 2016 Standard',
+    uac: UF_WORKSTATION_TRUST_ACCOUNT | UF_PARTIAL_SECRETS_ACCOUNT,
+  });
+
+  // Conta de computador PRÉ-CRIADA, com UAC sem nenhum bit de trust — o
+  // caso oposto do RODC: a derivação por ausência dava `true` aqui (alarme
+  // falso, dizendo que uma conta vazia é um controlador de domínio).
+  makeComputer({
+    cn: 'EA-PC-PRECRIADO',
+    uac: 0,
+  });
 
   return directory;
 }
@@ -651,6 +823,13 @@ function handleAdd(socket, state, messageId, reader) {
   // verdade — o mock de tests/unit/ad.service.test.ts nunca teve como
   // revelar isso, porque ele não reavalia filtro nenhum contra o que foi
   // de fato gravado no `add()`.
+  // Mesma derivação automática do `objectCategory` logo abaixo: um AD real
+  // preenche `distinguishedName` sozinho em todo objeto criado. Sem isto, um
+  // grupo criado via `createGroup` não seria resolvível por
+  // `(distinguishedName=...)` — invisível até alguém tentar.
+  if (!entry.attrs.has('distinguishedname')) {
+    setAttr(entry, 'distinguishedName', [dn]);
+  }
   if (!entry.attrs.has('objectcategory') && getAttrStrings(entry, 'objectClass').some((v) => v.toLowerCase() === 'user')) {
     setAttr(entry, 'objectCategory', ['person']);
   }
@@ -900,6 +1079,16 @@ if (invokedDirectly) {
     bindPassword: process.env.FAKE_LDAP_BIND_PASSWORD,
     log: (msg) => console.log(msg),
   });
+  // O backend só confia neste certificado via AD_TLS_CA_FILE (que aponta
+  // para um CAMINHO de arquivo, não um PEM inline) — e não existe, de
+  // propósito, nenhuma variável para desligar a verificação. Então o modo
+  // standalone precisa materializar o PEM em disco antes de o backend subir.
+  const caFile = process.env.FAKE_LDAP_CA_FILE;
+  if (caFile) {
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(caFile, handle.caCert, 'utf8');
+    console.log(`[fake-ldap-server] CA escrita em ${caFile}`);
+  }
   console.log(`[fake-ldap-server] AD_URL=${handle.url} AD_BASE_DN=${handle.baseDn} AD_USERS_OU=${handle.usersOu}`);
   console.log(`[fake-ldap-server] AD_BIND_DN=${handle.bindDn} AD_NETWORK_ACCESS_GROUP_DN=${handle.networkAccessGroupDn}`);
 }

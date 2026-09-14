@@ -18,6 +18,7 @@ import securityRoutes from './routes/security.routes.js';
 import sitesRoutes from './routes/sites.routes.js';
 import sshRoutes from './routes/ssh.routes.js';
 import {
+  AdComputerNotFoundError,
   AdGroupNotFoundError,
   AdGroupsOuNotConfiguredError,
   AdNetworkAccessGroupNotConfiguredError,
@@ -93,7 +94,11 @@ export async function buildApp(): Promise<FastifyInstance> {
       return reply.code(503).send({ error: 'Funcionalidade indisponível', details: error.message });
     }
 
-    if (error instanceof AdUserNotFoundError || error instanceof AdGroupNotFoundError) {
+    if (
+      error instanceof AdUserNotFoundError ||
+      error instanceof AdGroupNotFoundError ||
+      error instanceof AdComputerNotFoundError
+    ) {
       return reply.code(404).send({ error: error.message });
     }
 

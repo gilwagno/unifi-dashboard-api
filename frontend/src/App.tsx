@@ -7,6 +7,7 @@ import { Health } from './pages/Health';
 import { Login } from './pages/Login';
 import { Networks } from './pages/Networks';
 import { Overview } from './pages/Overview';
+import { ActiveDirectory } from './pages/ActiveDirectory';
 import { Printers } from './pages/Printers';
 import { Security } from './pages/Security';
 
@@ -81,6 +82,14 @@ function AppRoutes() {
         element={
           <RequireAuth>
             <Printers />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/active-directory"
+        element={
+          <RequireAuth>
+            <ActiveDirectory />
           </RequireAuth>
         }
       />

@@ -10,6 +10,14 @@ import {
   DASHBOARD_PASSWORD_HASH,
   DASHBOARD_USER,
   FAKE_CONTROLLER_PORT,
+  FAKE_LDAP_BASE_DN,
+  FAKE_LDAP_BIND_DN,
+  FAKE_LDAP_BIND_PASSWORD,
+  FAKE_LDAP_CA_FILE,
+  FAKE_LDAP_GROUPS_OU,
+  FAKE_LDAP_NETWORK_GROUP_DN,
+  FAKE_LDAP_PORT,
+  FAKE_LDAP_USERS_OU,
   FRONTEND_PORT,
 } from './e2e/e2e.config';
 
@@ -62,6 +70,23 @@ export default defineConfig({
       // banco antes de subir o servidor, este boot passará a emitir UDP/161
       // para o IP que o controller fake reportar — semear pela UI (como os
       // specs fazem hoje) não tem esse efeito.
+      // Active Directory FAKE. Sobe ANTES do backend porque o backend lê
+      // AD_URL/AD_TLS_CA_FILE no boot — e o arquivo de CA só existe depois
+      // que este processo o escreve.
+      command: 'node e2e/fake-ldap-server/server.mjs',
+      port: FAKE_LDAP_PORT,
+      reuseExistingServer: false,
+      stdout: 'ignore',
+      stderr: 'pipe',
+      timeout: 60_000,
+      env: {
+        FAKE_LDAP_PORT: String(FAKE_LDAP_PORT),
+        FAKE_LDAP_CA_FILE,
+        FAKE_LDAP_BIND_DN,
+        FAKE_LDAP_BIND_PASSWORD,
+      },
+    },
+    {
       command: 'node e2e/fake-controller/server.mjs',
       port: FAKE_CONTROLLER_PORT,
       reuseExistingServer: false,
@@ -120,6 +145,17 @@ export default defineConfig({
         RATE_LIMIT_MAX: '10000',
         RATE_LIMIT_CLIENT_ACTION_MAX: '1000',
         RATE_LIMIT_DEVICE_RESTART_MAX: '1000',
+        // Active Directory: aponta para o fake LDAPS acima. A verificação
+        // de certificado continua LIGADA — AD_TLS_CA_FILE só ESTENDE a
+        // lista de CAs confiadas, e não existe variável para desligá-la.
+        AD_URL: `ldaps://127.0.0.1:${FAKE_LDAP_PORT}`,
+        AD_BASE_DN: FAKE_LDAP_BASE_DN,
+        AD_BIND_DN: FAKE_LDAP_BIND_DN,
+        AD_BIND_PASSWORD: FAKE_LDAP_BIND_PASSWORD,
+        AD_USERS_OU: FAKE_LDAP_USERS_OU,
+        AD_GROUPS_OU: FAKE_LDAP_GROUPS_OU,
+        AD_NETWORK_ACCESS_GROUP_DN: FAKE_LDAP_NETWORK_GROUP_DN,
+        AD_TLS_CA_FILE: FAKE_LDAP_CA_FILE,
       },
     },
     {
