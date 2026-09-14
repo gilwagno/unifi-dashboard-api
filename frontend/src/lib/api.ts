@@ -417,6 +417,59 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
   return (await res.json()) as T;
 }
 
+
+// --- Active Directory (Onda 3) -------------------------------------------
+
+export interface AdUser {
+  dn: string;
+  sAMAccountName: string;
+  displayName: string | null;
+  mail: string | null;
+  department: string | null;
+  title: string | null;
+  // `null` = o backend NÃO conseguiu ler `userAccountControl`. Não é o mesmo
+  // que "desabilitado": é "não sabemos". A tela precisa dizer isso, não
+  // escolher um dos dois — num módulo de controle de acesso, afirmar
+  // "habilitado" sem saber é a falha ABERTA que o backend evita de
+  // propósito, e seria desfeita aqui se a UI colapsasse os três estados.
+  enabled: boolean | null;
+  lockedOut: boolean;
+  userWorkstations: string[];
+}
+
+export interface AdGroupMember {
+  dn: string;
+  name: string;
+  // 'group' = os membros DELE herdam o acesso e o dashboard NÃO consegue
+  // revogá-los pela membership direta. 'unknown' = não resolvido (ACL ou
+  // outro domínio), nunca assumido como pessoa.
+  type: 'user' | 'group' | 'unknown';
+}
+
+export interface AdGroup {
+  dn: string;
+  cn: string;
+  description: string | null;
+  members: string[];
+  // Só vem no detalhe de UM grupo (`getAdGroup`). Na listagem é `undefined`
+  // — "não resolvido", que é diferente de "sem membros".
+  memberDetails?: AdGroupMember[];
+}
+
+export interface AdComputer {
+  dn: string;
+  name: string;
+  sAMAccountName: string;
+  dnsHostName: string | null;
+  operatingSystem: string | null;
+  operatingSystemVersion: string | null;
+  description: string | null;
+  enabled: boolean | null;
+  // `true` = desabilitar esta conta derruba o domínio. `null` = não deu
+  // para ler o UAC, então a tela não pode afirmar que é seguro.
+  isDomainController: boolean | null;
+}
+
 export const api = {
   async login(username: string, password: string) {
     const body = await request<{ token: string; refreshToken: string }>('/auth/login', {
@@ -590,4 +643,44 @@ export const api = {
     }
     return body as PrinterAdminPasswordResult;
   },
+
+  // --- Active Directory ---
+  //
+  // `listAdGroups` EXIGE `query`: `searchGroups()` sem filtro devolve o
+  // domínio inteiro — 68 grupos no domínio real, incluindo `Admins. do
+  // domínio`, `Administradores de esquema` e todo o `CN=Builtin`. Não há
+  // paginação no backend (decisão registrada). Deixar o parâmetro opcional
+  // aqui seria convidar a tela a listar tudo por engano; o tipo é quem
+  // impede.
+  listAdUsers: (query?: string) =>
+    request<{ data: AdUser[] }>(`/ad/users${query ? `?query=${encodeURIComponent(query)}` : ''}`),
+  getAdUser: (username: string) => request<AdUser>(`/ad/users/${encodeURIComponent(username)}`),
+  setAdUserEnabled: (username: string, enabled: boolean) =>
+    request<{ ok: true }>(`/ad/users/${encodeURIComponent(username)}/${enabled ? 'enable' : 'disable'}`, {
+      method: 'POST',
+    }),
+  unlockAdUser: (username: string) =>
+    request<{ ok: true }>(`/ad/users/${encodeURIComponent(username)}/unlock`, { method: 'POST' }),
+  grantAdNetworkAccess: (username: string) =>
+    request<{ ok: true }>(`/ad/users/${encodeURIComponent(username)}/network-access`, { method: 'POST' }),
+  revokeAdNetworkAccess: (username: string) =>
+    request<{ ok: true }>(`/ad/users/${encodeURIComponent(username)}/network-access`, { method: 'DELETE' }),
+
+  listAdGroups: (query: string) => request<{ data: AdGroup[] }>(`/ad/groups?query=${encodeURIComponent(query)}`),
+  getAdGroup: (name: string) => request<AdGroup>(`/ad/groups/${encodeURIComponent(name)}`),
+  addAdGroupMember: (groupName: string, username: string) =>
+    request<{ ok: true }>(`/ad/groups/${encodeURIComponent(groupName)}/members/${encodeURIComponent(username)}`, {
+      method: 'POST',
+    }),
+  removeAdGroupMember: (groupName: string, username: string) =>
+    request<{ ok: true }>(`/ad/groups/${encodeURIComponent(groupName)}/members/${encodeURIComponent(username)}`, {
+      method: 'DELETE',
+    }),
+
+  listAdComputers: (query?: string) =>
+    request<{ data: AdComputer[] }>(`/ad/computers${query ? `?query=${encodeURIComponent(query)}` : ''}`),
+  setAdComputerEnabled: (name: string, enabled: boolean) =>
+    request<{ ok: true }>(`/ad/computers/${encodeURIComponent(name)}/${enabled ? 'enable' : 'disable'}`, {
+      method: 'POST',
+    }),
 };

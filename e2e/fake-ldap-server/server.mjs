@@ -397,6 +397,11 @@ function seedDirectory(config) {
   // os testes de grant/revoke são quem povoa/esvazia `member`.
   const group = makeEntry(config.networkAccessGroupDn);
   setAttr(group, 'objectClass', ['top', 'group']);
+  // `distinguishedName` em TODO objeto, não só em usuário: é atributo
+  // operacional que um AD real sempre expõe, e é por ele que se resolve uma
+  // lista de membros numa busca só. Sem isto, um grupo aninhado saía como
+  // "não resolvido" — o fake, e não o código, é que estava errado.
+  setAttr(group, 'distinguishedName', [config.networkAccessGroupDn]);
   setAttr(group, 'cn', ['Rede-Permitida']);
   setAttr(group, 'member', []);
   put(group);
@@ -409,11 +414,33 @@ function seedDirectory(config) {
   // escopo de busca é AD_BASE_DN, não AD_GROUPS_OU).
   const financeiro = makeEntry(`CN=Financeiro,CN=Users,${config.baseDn}`);
   setAttr(financeiro, 'objectClass', ['top', 'group']);
+  setAttr(financeiro, 'distinguishedName', [`CN=Financeiro,CN=Users,${config.baseDn}`]);
   setAttr(financeiro, 'cn', ['Financeiro']);
   setAttr(financeiro, 'description', ['Equipe do financeiro']);
   const jsilvaDn = `CN=jsilva,${config.usersOu}`;
   setAttr(financeiro, 'member', [jsilvaDn]);
   put(financeiro);
+
+  // Grupo COM ANINHAMENTO — reproduz em miniatura a estrutura real medida
+  // no domínio em 2026-09-14: um grupo de acesso cujos membros são, em
+  // maioria, OUTROS GRUPOS. Quem entra por um grupo aninhado não pode ser
+  // removido pela membership direta (a operação devolve sucesso e a pessoa
+  // segue com acesso), e é isso que a tela precisa conseguir mostrar.
+  //
+  // Os 3 membros cobrem os 3 tipos de propósito:
+  //   - jsilva ....... usuário (membership DIRETA, o dashboard controla)
+  //   - Financeiro ... GRUPO (herança, o dashboard NÃO controla)
+  //   - fantasma ..... DN que não resolve (ACL/outro domínio) -> 'unknown'
+  const aninhado = makeEntry(`CN=Acesso-Aninhado,CN=Users,${config.baseDn}`);
+  setAttr(aninhado, 'objectClass', ['top', 'group']);
+  setAttr(aninhado, 'distinguishedName', [`CN=Acesso-Aninhado,CN=Users,${config.baseDn}`]);
+  setAttr(aninhado, 'cn', ['Acesso-Aninhado']);
+  setAttr(aninhado, 'member', [
+    jsilvaDn,
+    `CN=Financeiro,CN=Users,${config.baseDn}`,
+    `CN=Fantasma,OU=NaoExiste,${config.baseDn}`,
+  ]);
+  put(aninhado);
 
   // --- Computadores (subtarefa 4) ---
   //
@@ -748,6 +775,13 @@ function handleAdd(socket, state, messageId, reader) {
   // verdade — o mock de tests/unit/ad.service.test.ts nunca teve como
   // revelar isso, porque ele não reavalia filtro nenhum contra o que foi
   // de fato gravado no `add()`.
+  // Mesma derivação automática do `objectCategory` logo abaixo: um AD real
+  // preenche `distinguishedName` sozinho em todo objeto criado. Sem isto, um
+  // grupo criado via `createGroup` não seria resolvível por
+  // `(distinguishedName=...)` — invisível até alguém tentar.
+  if (!entry.attrs.has('distinguishedname')) {
+    setAttr(entry, 'distinguishedName', [dn]);
+  }
   if (!entry.attrs.has('objectcategory') && getAttrStrings(entry, 'objectClass').some((v) => v.toLowerCase() === 'user')) {
     setAttr(entry, 'objectCategory', ['person']);
   }

@@ -807,11 +807,34 @@ export async function revokeNetworkAccess(username: string): Promise<void> {
 // sAMAccountName — resolver cada membro custaria uma busca por membro, sem
 // pedido explícito para isso no escopo funcional).
 
+// Um membro de grupo RESOLVIDO: sabemos se é uma pessoa ou outro GRUPO.
+//
+// Essa distinção não é cosmética — é o bug de produção que motivou a
+// Decisão 2 desta onda. Medido contra o AD real em 2026-09-14: o grupo de
+// acesso à rede tinha 20 membros diretos, dos quais 12 eram grupos
+// departamentais inteiros, carregando 61 pessoas por HERANÇA. Remover
+// alguém que entrou por herança é impossível pela membership direta: a
+// operação retorna SUCESSO e a pessoa continua com acesso.
+//
+// `type: 'group'` é, portanto, o aviso de que aquela linha traz gente que o
+// dashboard NÃO controla. `'unknown'` quando o objeto não pôde ser
+// resolvido (ACL, ou membro de outro domínio) — nunca chutado para 'user',
+// porque o chute cairia justamente no lado que não gera aviso.
+export interface AdGroupMember {
+  dn: string;
+  name: string;
+  type: 'user' | 'group' | 'unknown';
+}
+
 export interface AdGroup {
   dn: string;
   cn: string;
   description: string | null;
   members: string[];
+  // Só preenchido por `getGroup` (o detalhe de UM grupo). `searchGroups`
+  // deixa `undefined`: resolver membros de todos os grupos do domínio numa
+  // listagem custaria uma busca por grupo sem ninguém ter pedido.
+  memberDetails?: AdGroupMember[];
 }
 
 const GROUP_SEARCH_ATTRIBUTES = ['distinguishedName', 'cn', 'description', 'member'];
@@ -871,10 +894,66 @@ export async function searchGroups(query?: string): Promise<AdGroup[]> {
   });
 }
 
+// Resolve a lista de DNs de `member` em objetos que dizem o que cada um É.
+//
+// UMA busca só, com um OR de distinguishedName — não uma busca por membro.
+// Um grupo com 20 membros custaria 20 round-trips ao DC pelo caminho
+// ingênuo; aqui custa 1. (O comentário original deste bloco dizia que
+// resolver membros "custaria uma busca por membro" e por isso não era
+// feito — custaria, do jeito ingênuo. Não é o jeito usado aqui.)
+//
+// Um DN que a busca não devolver vira `'unknown'`, nunca `'user'`: o
+// palpite cairia justamente no lado que NÃO gera aviso na tela.
+async function resolveGroupMembers(client: Client, memberDns: string[]): Promise<AdGroupMember[]> {
+  if (memberDns.length === 0) return [];
+
+  const filter = `(|${memberDns.map((dn) => escapeFilter`(distinguishedName=${dn})`).join('')})`;
+  const { searchEntries } = await client.search(env.AD_BASE_DN!, {
+    scope: 'sub',
+    filter,
+    attributes: ['distinguishedName', 'cn', 'sAMAccountName', 'objectClass'],
+    paged: true,
+  });
+
+  const porDn = new Map<string, Record<string, string | string[] | Buffer | Buffer[]>>();
+  for (const raw of searchEntries) {
+    const e = raw as unknown as Record<string, string | string[] | Buffer | Buffer[]>;
+    const dn = asString(e.distinguishedName) ?? (raw.dn as unknown as string);
+    porDn.set(dn.toLowerCase(), e);
+  }
+
+  return memberDns.map((dn) => {
+    const e = porDn.get(dn.toLowerCase());
+    if (!e) return { dn, name: rdnValue(dn), type: 'unknown' as const };
+
+    const ocRaw = e.objectClass;
+    const oc = (Array.isArray(ocRaw) ? ocRaw : ocRaw ? [ocRaw] : []).map((v) => (asString(v) ?? '').toLowerCase());
+    const type = oc.includes('group') ? ('group' as const) : oc.includes('user') ? ('user' as const) : ('unknown' as const);
+
+    return { dn, name: asString(e.cn) ?? asString(e.sAMAccountName) ?? rdnValue(dn), type };
+  });
+}
+
+// Extrai o valor do primeiro RDN de um DN para exibição, respeitando o
+// escape com barra invertida (`CN=Silva\, João,OU=...` é UM componente, não
+// dois) — dividir por vírgula crua partiria nomes brasileiros no meio.
+function rdnValue(dn: string): string {
+  // A mascara PRECISA preservar o COMPRIMENTO do original: o indice achado
+  // aqui e usado para cortar `dn`, nao `semEscape`. Trocar 2 caracteres por
+  // 1 desalinharia tudo depois do primeiro escape.
+  const semEscape = dn.replace(/\\./g, '\u0000\u0000');
+  const corte = semEscape.indexOf(',');
+  const primeiro = corte === -1 ? dn : dn.slice(0, corte);
+  const igual = primeiro.indexOf('=');
+  const valor = igual === -1 ? primeiro : primeiro.slice(igual + 1);
+  return valor.replace(/\\(.)/g, '$1');
+}
+
 export async function getGroup(name: string): Promise<AdGroup> {
   return withClient(async (client) => {
     const entry = await findGroupEntry(client, name);
-    return toAdGroup(entry, asString(entry.distinguishedName) ?? (entry.dn as unknown as string));
+    const group = toAdGroup(entry, asString(entry.distinguishedName) ?? (entry.dn as unknown as string));
+    return { ...group, memberDetails: await resolveGroupMembers(client, group.members) };
   });
 }
 

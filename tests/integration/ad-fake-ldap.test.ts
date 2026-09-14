@@ -335,10 +335,10 @@ describe('ad.service — protocolo LDAP real (fake-ldap-server)', () => {
 describe('ad.service — grupos, protocolo LDAP real (fake-ldap-server)', () => {
   beforeEach(restartFakeLdap);
 
-  it('searchGroups() sem query lista os grupos semeados (Rede-Permitida + Financeiro), ignorando usuários', async () => {
+  it('searchGroups() sem query lista os grupos semeados, ignorando usuários', async () => {
     const { searchGroups } = await importAdService();
     const groups = await searchGroups();
-    expect(groups.map((g) => g.cn).sort()).toEqual(['Financeiro', 'Rede-Permitida']);
+    expect(groups.map((g) => g.cn).sort()).toEqual(['Acesso-Aninhado', 'Financeiro', 'Rede-Permitida']);
   });
 
   it('searchGroups(query) filtra por substring em cn/description contra o servidor real', async () => {
@@ -891,6 +891,60 @@ describe('fake-ldap-server — exige bind prévio por conexão (RFC 4511 §4.2.1
     } finally {
       await client.unbind().catch(() => undefined);
     }
+  });
+});
+
+// --- Membership DIRETA vs HERDADA por aninhamento (subtarefa 7) ----------
+//
+// Medido contra o AD real em 2026-09-14: o grupo de acesso à rede tinha 20
+// membros diretos, 12 dos quais eram grupos departamentais inteiros,
+// carregando 61 pessoas por HERANÇA. O dashboard revogaria 8 de 69 — os
+// outros 61 veriam "revogado com sucesso" e seguiriam conectados. Sem esta
+// resolução, a tela não tem como avisar, e o bug de produção continua
+// existindo na prática mesmo com o backend corrigido.
+describe('ad.service — getGroup resolve membros (direto vs aninhado)', () => {
+  beforeEach(restartFakeLdap);
+
+  it('distingue usuário (direto) de GRUPO (herança) na lista de membros', async () => {
+    const { getGroup } = await importAdService();
+    const g = await getGroup('Acesso-Aninhado');
+
+    const porNome = Object.fromEntries((g.memberDetails ?? []).map((m) => [m.name, m.type]));
+    expect(porNome.jsilva).toBe('user');
+    expect(porNome.Financeiro).toBe('group');
+  });
+
+  it('DN que não resolve vira `unknown`, NUNCA `user` — o palpite cairia no lado sem aviso', async () => {
+    const { getGroup } = await importAdService();
+    const g = await getGroup('Acesso-Aninhado');
+
+    const fantasma = (g.memberDetails ?? []).find((m) => m.dn.includes('Fantasma'));
+    expect(fantasma?.type).toBe('unknown');
+  });
+
+  it('resolve todos os membros e preserva a ordem de `member`', async () => {
+    const { getGroup } = await importAdService();
+    const g = await getGroup('Acesso-Aninhado');
+
+    expect(g.memberDetails).toHaveLength(g.members.length);
+    expect((g.memberDetails ?? []).map((m) => m.dn)).toEqual(g.members);
+  });
+
+  it('grupo sem membros devolve lista vazia, sem disparar busca nenhuma', async () => {
+    const { getGroup } = await importAdService();
+    const g = await getGroup('Rede-Permitida');
+
+    expect(g.memberDetails).toEqual([]);
+  });
+
+  // `searchGroups` NÃO resolve: seriam N buscas numa listagem que já devolve
+  // o domínio inteiro. A distinção entre "não resolvido" e "sem membros"
+  // importa — por isso é `undefined`, não `[]`.
+  it('searchGroups NÃO resolve membros (undefined, não lista vazia)', async () => {
+    const { searchGroups } = await importAdService();
+    const grupos = await searchGroups('Acesso-Aninhado');
+
+    expect(grupos[0]?.memberDetails).toBeUndefined();
   });
 });
 
