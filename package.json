@@ -20,7 +20,7 @@
     "@fastify/jwt": "^10.2.2",
     "@fastify/rate-limit": "^10.1.1",
     "@fastify/websocket": "^11.0.1",
-    "bcryptjs": "^2.4.3",
+    "bcryptjs": "^3.0.3",
     "dotenv": "^16.4.5",
     "fastify": "^5.12.4",
     "fastify-plugin": "^5.0.1",
@@ -31,14 +31,13 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@playwright/test": "^1.63.0",
-    "@types/bcryptjs": "^2.4.6",
-    "@types/node": "^26.5.1",
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^22.7.4",
     "@types/ws": "^8.5.12",
     "asn1-ber": "^1.2.2",
     "oxlint": "^1.83.0",
     "selfsigned": "^5.5.0",
-    "tsx": "^4.23.13",
+    "tsx": "^4.19.1",
     "typescript": "^5.6.2",
     "vitest": "^2.1.1"
   },
