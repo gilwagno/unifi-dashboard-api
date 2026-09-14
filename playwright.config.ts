@@ -145,6 +145,17 @@ export default defineConfig({
         RATE_LIMIT_MAX: '10000',
         RATE_LIMIT_CLIENT_ACTION_MAX: '1000',
         RATE_LIMIT_DEVICE_RESTART_MAX: '1000',
+        // A suíte faz login pela UI de VERDADE em quase todo teste (ver
+        // `login()` em e2e/tests/helpers.ts), então estoura o limite
+        // dedicado de 5/min da porta de entrada a partir do 6º teste. Sem
+        // esta linha, os testes seguintes falham em `toHaveURL(/\/$/)`
+        // porque o login devolve 429 e a UI fica em /login — um sintoma
+        // que não diz nada sobre a causa.
+        //
+        // Foi assim que esta regressão apareceu: o limite de login entrou
+        // sem que a suíte e2e fosse rodada (o CI só roda unit/integration),
+        // e só o navegador de verdade a revelou.
+        RATE_LIMIT_LOGIN_MAX: '1000',
         // Active Directory: aponta para o fake LDAPS acima. A verificação
         // de certificado continua LIGADA — AD_TLS_CA_FILE só ESTENDE a
         // lista de CAs confiadas, e não existe variável para desligá-la.
