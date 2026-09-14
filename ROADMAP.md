@@ -61,9 +61,11 @@
   `wifi-colaboradores` tem grupos departamentais inteiros como membros; `removeGroupMember`
   opera sobre membership DIRETA e retornaria sucesso sem revogar o acesso herdado. Duas
   opções registradas no `CLAUDE.md`, nenhuma escolhida.
-- **`nps.msc` pendente COM O USUÁRIO** — confirmar que `wifi-colaboradores` é mesmo a
-  condição "Grupos de Windows" da Network Policy de 802.1X. Hoje é inferência forte, não
-  confirmação; nenhuma variável de produção deve apontar para esse DN antes disso.
+- ~~`nps.msc`~~ **CONFIRMADO em 2026-09-14.** A Network Policy `wifi-colaboradores` (ordem 1,
+  habilitada) tem `Grupos do Windows = EVOKAUDIO\wifi-colaboradores` + porta NAS sem fio, com
+  PEAP. Gate fechado; `AD_NETWORK_ACCESS_GROUP_DN` liberado para produção.
+- **Aninhamento MEDIDO** (`tools/ad-nesting-probe.mts`): 69 pessoas com acesso, das quais o
+  dashboard revogaria **8** — 61 (88%) entram por 12 grupos departamentais aninhados.
 - **Levantamento dos pontos do `fake-ldap-server` modelados por RFC e nunca confrontados com
   um DC real** — obrigatório ANTES de computadores (subtarefa 4). Foi exatamente esse padrão
   que deixou 746 testes verdes provando um comportamento de revogação que nunca existiu no

@@ -58,13 +58,53 @@ nada e do mtime do `printers.db` que não prova isolamento.
    do dashboard (`Rede-Permitida-Dashboard`?) + Network Policy do NPS aceitando
    `wifi-colaboradores` OU o grupo novo; o dashboard nunca mexe no `wifi-colaboradores`.
    Confirmar antes da subtarefa 5.
-3. **`nps.msc`** (pendente COM O USUÁRIO) — segue valendo: nenhuma variável de produção aponta
-   para objeto real do domínio antes disso.
+3. ~~`nps.msc`~~ **GATE FECHADO em 2026-09-14** — ver a seção própria logo abaixo. Deixou de ser
+   inferência: a Network Policy foi lida e confirmada.
 4. **Subtarefa 7 (frontend)** — o módulo de AD **não tem NENHUMA tela** hoje. Duas restrições
    não-negociáveis: a tela de grupos manda `query` por padrão (68 grupos no domínio, inclui
    `Admins. do domínio`), e precisa DISTINGUIR membership direta de herdada por aninhamento.
 5. **Subtarefa 8 (e2e)** e fechamento da onda.
 6. **Percentuais dos painéis das Brothers** (pendente COM O USUÁRIO, independente de tudo acima).
+
+### ✅ GATE DO `nps.msc` FECHADO (2026-09-14) — e o número do aninhamento, medido
+
+Duas coisas que eram inferência viraram medição nesta data.
+
+**1. A Network Policy do 802.1X, lida no `nps.msc` do `EA-SRV-AD01`** (print conferido):
+
+```
+Política ......... wifi-colaboradores   (Habilitada, Ordem de Processamento 1)
+Condições ........ Grupos do Windows  = EVOKAUDIO\wifi-colaboradores
+                   Tipo de Porta NAS  = Sem Fio - IEEE 802.11
+Configurações .... Conceder Acesso · EAP · Microsoft: EAP protegido (PEAP)
+```
+
+Bate exatamente com o DN que a sonda LDAP leu. A inferência de 2026-09-11 (o `Servidores RAS e
+IAS` alterado 15 minutos antes da criação do grupo) estava certa — mas agora é a coisa, não o
+indício. **`AD_NETWORK_ACCESS_GROUP_DN` pode apontar para produção**, respeitada a Decisão 2.
+
+**2. O aninhamento, medido por `tools/ad-nesting-probe.mts`** (sonda somente-leitura, 1 nível):
+
+```
+membros diretos ... 20  ->  8 usuários nominais + 12 grupos departamentais
+por herança ....... 61 pessoas
+```
+
+O `wifi-colaboradores` dá acesso a **69 pessoas; o dashboard revogaria 8**. As outras **61 (88%)
+veriam "revogado com sucesso" e seguiriam conectadas.** Os 12 grupos cobrem a empresa inteira:
+Comercial, Produção, Financeiro, Compras, Marketing, Supervisão, Estoque, Garantia, TI,
+Implantação, Coordenação, Administrativo. **Membership direta é a EXCEÇÃO neste domínio** — e o
+desenho original da ponte 802.1X assumia o contrário. (1 nível apenas; se algum `G-Departamento`
+contiver grupos, o número real é maior.)
+
+**Consequência para a Decisão 2**: a opção (a) — só detectar e avisar — seria um botão de revogar
+que não funciona em 88% dos casos. Num incidente, um aviso que ninguém lê no susto vira um acesso
+que ninguém cortou. A evidência está do lado da **(b)**.
+
+**E a (b) ficou barata**: no NPS, múltiplos valores na condição `Grupos do Windows` são avaliados
+como **OU**. Não precisa de política nova, nem mexer na ordem de processamento, nem tocar em
+PEAP/EAP — é **adicionar um segundo valor a uma condição que já existe**, reversível, e o caminho
+atual dos 69 continua idêntico enquanto isso.
 
 ### Pendência de segurança registrada
 
