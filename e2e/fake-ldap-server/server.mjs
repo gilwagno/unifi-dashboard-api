@@ -335,6 +335,11 @@ const UF_NORMAL_ACCOUNT = 0x0200;
 // diferença entre uma estação qualquer e um CONTROLADOR DE DOMÍNIO.
 const UF_WORKSTATION_TRUST_ACCOUNT = 0x1000;
 const UF_SERVER_TRUST_ACCOUNT = 0x2000;
+// RODC: um Read-Only Domain Controller É controlador de domínio, mas a
+// conta dele carrega UF_WORKSTATION_TRUST_ACCOUNT + este bit, NUNCA
+// UF_SERVER_TRUST_ACCOUNT. É a armadilha que fez a primeira versão de
+// `isDomainController` classificar um RODC como estação comum.
+const UF_PARTIAL_SECRETS_ACCOUNT = 0x04000000;
 
 function seedDirectory(config) {
   const directory = new Map();
@@ -477,6 +482,24 @@ function seedDirectory(config) {
     cn: 'EA-PC-SEMUAC',
     dnsHostName: 'ea-pc-semuac.fakeldap.test',
     omitUac: true,
+  });
+
+  // RODC — ver o comentário de UF_PARTIAL_SECRETS_ACCOUNT acima. Semeado
+  // porque a derivação de `isDomainController` por AUSÊNCIA do bit de
+  // workstation dava `false` aqui, e nenhum teste pegava.
+  makeComputer({
+    cn: 'EA-RODC-FAKE',
+    dnsHostName: 'ea-rodc-fake.fakeldap.test',
+    os: 'Windows Server 2016 Standard',
+    uac: UF_WORKSTATION_TRUST_ACCOUNT | UF_PARTIAL_SECRETS_ACCOUNT,
+  });
+
+  // Conta de computador PRÉ-CRIADA, com UAC sem nenhum bit de trust — o
+  // caso oposto do RODC: a derivação por ausência dava `true` aqui (alarme
+  // falso, dizendo que uma conta vazia é um controlador de domínio).
+  makeComputer({
+    cn: 'EA-PC-PRECRIADO',
+    uac: 0,
   });
 
   return directory;

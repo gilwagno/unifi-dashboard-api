@@ -903,11 +903,18 @@ describe('fake-ldap-server — exige bind prévio por conexão (RFC 4511 §4.2.1
 describe('ad.service — computadores, protocolo LDAP real (fake-ldap-server)', () => {
   beforeEach(restartFakeLdap);
 
-  it('searchComputers() sem query lista os 4 computadores semeados, inclusive o DC', async () => {
+  it('searchComputers() sem query lista os 6 computadores semeados, inclusive os DCs', async () => {
     const { searchComputers } = await importAdService();
     const computers = await searchComputers();
 
-    expect(computers.map((c) => c.name).sort()).toEqual(['EA-PC-SEMUAC', 'EA-PC-TESTE01', 'EA-PC-TESTE02', 'EA-SRV-FAKE01']);
+    expect(computers.map((c) => c.name).sort()).toEqual([
+      'EA-PC-PRECRIADO',
+      'EA-PC-SEMUAC',
+      'EA-PC-TESTE01',
+      'EA-PC-TESTE02',
+      'EA-RODC-FAKE',
+      'EA-SRV-FAKE01',
+    ]);
   });
 
   it('o `$` do sAMAccountName NÃO vaza para `name`, e vem no campo próprio', async () => {
@@ -955,6 +962,22 @@ describe('ad.service — computadores, protocolo LDAP real (fake-ldap-server)', 
     expect(nomes).toContain('EA-SRV-FAKE01');
   });
 
+  // ACHADO SÉRIO de revisão. A derivação original era por AUSÊNCIA do bit de
+  // workstation, e um RODC carrega esse bit — logo saía `false`, e a
+  // interface não avisaria antes de desabilitar a conta de um controlador
+  // de domínio. Falha ABERTA no único sinal de segurança do campo.
+  it('RODC é reconhecido como controlador de domínio (carrega o bit de WORKSTATION, não o de SERVER)', async () => {
+    const { getComputer } = await importAdService();
+    expect((await getComputer('EA-RODC-FAKE')).isDomainController).toBe(true);
+  });
+
+  // O lado oposto do mesmo erro: derivar por ausência transformava toda
+  // conta pré-criada (UAC sem bit de trust) em "controlador de domínio".
+  it('conta pré-criada sem bit de trust NÃO vira falso alarme de controlador de domínio', async () => {
+    const { getComputer } = await importAdService();
+    expect((await getComputer('EA-PC-PRECRIADO')).isDomainController).toBe(false);
+  });
+
   it('setComputerEnabled desabilita e reabilita DE VERDADE no diretório, ida e volta', async () => {
     const { getComputer, setComputerEnabled } = await importAdService();
 
@@ -997,6 +1020,24 @@ describe('ad.service — computadores, protocolo LDAP real (fake-ldap-server)', 
     const { setComputerEnabled, AdRequestError } = await importAdService();
 
     await expect(setComputerEnabled('EA-PC-SEMUAC', false)).rejects.toBeInstanceOf(AdRequestError);
+  });
+
+  // ACHADO de revisão (proteção sem trava): a base `AdError` também existe
+  // para que um `AdRequestError` lançado DENTRO do callback do `withClient`
+  // não seja reembrulhado em OUTRO `AdRequestError`, aninhando a mensagem.
+  // Isso não tinha teste: o mutante que reembrulhava só esta classe passava
+  // com a suíte verde. A mensagem aninhada é o que o operador leria.
+  it('a mensagem da recusa chega INTEIRA, sem ser reembrulhada num erro genérico', async () => {
+    const { setComputerEnabled } = await importAdService();
+
+    try {
+      await setComputerEnabled('EA-PC-SEMUAC', false);
+      expect.unreachable('deveria ter lançado');
+    } catch (err) {
+      const msg = (err as Error).message;
+      expect(msg).toContain('userAccountControl');
+      expect(msg).not.toContain('Falha na operação com o Active Directory');
+    }
   });
 
   it('a recusa acontece ANTES de qualquer escrita — o objeto continua sem userAccountControl', async () => {

@@ -174,10 +174,26 @@ function isAdConfigured(): boolean {
 const UF_ACCOUNTDISABLE = 0x0002;
 const UF_NORMAL_ACCOUNT = 0x0200; // 512
 const UF_PASSWD_NOTREQD = 0x0020;
-// Conta de computador ingressado no domínio. Usado só para DISTINGUIR uma
-// estação de um CONTROLADOR DE DOMÍNIO (que é UF_SERVER_TRUST_ACCOUNT,
-// 0x2000) — este módulo nunca escreve este bit.
+// Bits de conta de COMPUTADOR. Este módulo nunca os escreve — só lê, para
+// distinguir uma estação de um controlador de domínio.
+//
+// ACHADO de revisão: a primeira versão derivava "é DC" pela AUSÊNCIA de
+// UF_WORKSTATION_TRUST_ACCOUNT, e isso classifica um RODC ERRADO. Um
+// Read-Only Domain Controller É um controlador de domínio, mas a conta
+// dele carrega UF_WORKSTATION_TRUST_ACCOUNT junto de
+// UF_PARTIAL_SECRETS_ACCOUNT — não UF_SERVER_TRUST_ACCOUNT. Derivar por
+// ausência fazia um RODC sair como `isDomainController: false`, ou seja: a
+// interface NÃO avisaria antes de desabilitar a conta de um controlador de
+// domínio, que é a única coisa para a qual o campo existe. Falha ABERTA,
+// no sinal de segurança da operação mais destrutiva do módulo.
+//
+// A derivação correta é AFIRMATIVA — perguntar quais bits o objeto TEM,
+// nunca quais não tem. Assim um UAC desconhecido/atípico erra para
+// "não é DC" só quando de fato não carrega nenhum bit de DC, e uma conta
+// pré-criada com UAC 0 não vira alarme falso.
 const UF_WORKSTATION_TRUST_ACCOUNT = 0x1000;
+const UF_SERVER_TRUST_ACCOUNT = 0x2000;
+const UF_PARTIAL_SECRETS_ACCOUNT = 0x04000000; // RODC
 
 function asString(value: string | string[] | Buffer | Buffer[] | undefined): string | null {
   if (value === undefined) return null;
@@ -997,14 +1013,16 @@ function toAdComputer(entry: Record<string, string | string[] | Buffer | Buffer[
     name: asString(entry.cn) ?? sam.replace(/\$$/, ''),
     sAMAccountName: sam,
     // O AD grafa este atributo como `dNSHostName` e o `ldapts` devolve a
-    // chave exatamente como o servidor a escreveu — lemos as duas grafias
-    // em vez de apostar numa.
-    dnsHostName: asString(entry.dNSHostName) ?? asString(entry.dnsHostName),
+    // chave exatamente como o servidor a escreveu. Houve aqui um fallback
+    // para a grafia minúscula "por segurança" — a revisão provou por
+    // mutação que era CÓDIGO MORTO (removê-lo não matava teste nenhum).
+    // Fallback que nada exercita não é defesa, é ruído que finge ser.
+    dnsHostName: asString(entry.dNSHostName),
     operatingSystem: asString(entry.operatingSystem),
     operatingSystemVersion: asString(entry.operatingSystemVersion),
     description: asString(entry.description),
     enabled: uac === null ? null : (uac & UF_ACCOUNTDISABLE) === 0,
-    isDomainController: uac === null ? null : (uac & UF_WORKSTATION_TRUST_ACCOUNT) === 0,
+    isDomainController: uac === null ? null : (uac & (UF_SERVER_TRUST_ACCOUNT | UF_PARTIAL_SECRETS_ACCOUNT)) !== 0,
   };
 }
 
