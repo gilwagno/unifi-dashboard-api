@@ -27,7 +27,7 @@
 | Núcleo UniFi (clientes, devices, Wi-Fi/RADIUS, networks, segurança, SSH, banda) | ✅ Implementado | `CLAUDE.md` (histórico geral) |
 | Onda 1 — Cobertura de testes | ✅ Concluída (2026-08-31) | `CLAUDE.md` §"Onda 1" |
 | Onda 2 — Manutenção de impressoras (SNMP, WBM/SWS, consumíveis, histórico) | ✅ Concluída (2026-09-08) | `CLAUDE.md` §"Onda 2" |
-| Onda 3 — Active Directory + ponte 802.1X | 🚧 **Em andamento** — usuários + ponte 802.1X mergeados (PR #25, 2026-09-11); grupos, computadores, `fake-ldap-server`, frontend e e2e não iniciados | `docs/ad-module-plan.md` |
+| Onda 3 — Active Directory + ponte 802.1X | 🚧 **Em andamento** — usuários + ponte 802.1X (PR #25), `fake-ldap-server` (PR #32) e bind por conexão (PR #33) mergeados; **grupos na PR #34, aberta**; computadores, frontend e e2e não iniciados | `docs/ad-module-plan.md` |
 | Onda 4 — Acesso remoto a qualquer PC (Guacamole) | 📋 Planejada, não iniciada | `docs/remote-access-plan.md` |
 | Infraestrutura — Cloudflare Tunnel + Access | 📋 Planejada, não iniciada | `docs/cloudflare-tunnel-setup.md` |
 
@@ -41,9 +41,40 @@
 
 > A PR #30 (toner das HPs em 0%) foi **mergeada em 2026-09-11** (squash `5f9f9f2`) — saiu
 > desta lista.
-- **Variáveis `AD_*` não configuradas no `.env` real** — documentadas no `.env.example`, mas
-  ausentes. Sem elas o módulo de AD responde 503 por desenho (o resto do app funciona
-  normal), e **nenhuma linha do módulo jamais falou com um Active Directory de verdade**.
+> **Correção de exatidão (2026-09-14)**: a versão anterior desta seção dizia que
+> `fake-ldap-server` e grupos estavam "não iniciados" e que **nenhuma linha do módulo jamais
+> falou com um AD de verdade**. As duas coisas deixaram de ser verdade em 2026-09-11 — ver o
+> ponto de parada no topo do `CLAUDE.md`. Este arquivo ficou para trás; corrigido agora.
+
+### Onda 3 — o que está aberto agora
+
+- **PR #34 (grupos do AD) não mergeada.** Aprovada 4/4 pelo par formal, mas a correção de
+  idempotência (`317ecfe`) foi terminada pelo orquestrador depois de o executor cair no
+  limite de sessão — **é a única peça da PR sem revisão cega de Verificador**. É o primeiro
+  item da retomada.
+- **⛔ Aninhamento de grupos bloqueia fechar a subtarefa 5 (ponte 802.1X) para produção.**
+  `wifi-colaboradores` tem grupos departamentais inteiros como membros; `removeGroupMember`
+  opera sobre membership DIRETA e retornaria sucesso sem revogar o acesso herdado. Duas
+  opções registradas no `CLAUDE.md`, nenhuma escolhida.
+- **`nps.msc` pendente COM O USUÁRIO** — confirmar que `wifi-colaboradores` é mesmo a
+  condição "Grupos de Windows" da Network Policy de 802.1X. Hoje é inferência forte, não
+  confirmação; nenhuma variável de produção deve apontar para esse DN antes disso.
+- **Levantamento dos pontos do `fake-ldap-server` modelados por RFC e nunca confrontados com
+  um DC real** — obrigatório ANTES de computadores (subtarefa 4). Foi exatamente esse padrão
+  que deixou 746 testes verdes provando um comportamento de revogação que nunca existiu no
+  AD real.
+
+### Outras
+
+- **Variáveis `AD_*`**: já validadas contra o AD real (`evokaudio.local`) no teste de fumaça
+  de 2026-09-11 — `AD_URL` precisa ser o NOME do DC, nunca IP (o certificado quebra com
+  `ERR_TLS_CERT_ALTNAME_INVALID`). Hoje `AD_USERS_OU`/`AD_GROUPS_OU` apontam para uma OU de
+  teste; apontar para produção só depois do `nps.msc`.
+- **Senha do administrador do domínio em texto plano no `.env` real** (fora do Git, mas em
+  disco) — trocar quando houver calma.
+- **Percentuais dos painéis das Brothers** (Onda 2, independente da Onda 3) — pendente COM O
+  USUÁRIO. `tools/brother-mib-probe.mjs --cruzar` pronto; não imprimir nada entre ler o
+  painel e rodar o cruzamento.
 - **Nenhum teste do backend é typechecked** — o `tsconfig.json` da raiz tem
   `include: ["src/**/*.ts"]`, então `tsc --noEmit` limpo não diz nada sobre `tests/`.
   Pré-existente, achado de 2026-09-11.
