@@ -27,7 +27,7 @@
 | Núcleo UniFi (clientes, devices, Wi-Fi/RADIUS, networks, segurança, SSH, banda) | ✅ Implementado | `CLAUDE.md` (histórico geral) |
 | Onda 1 — Cobertura de testes | ✅ Concluída (2026-08-31) | `CLAUDE.md` §"Onda 1" |
 | Onda 2 — Manutenção de impressoras (SNMP, WBM/SWS, consumíveis, histórico) | ✅ Concluída (2026-09-08) | `CLAUDE.md` §"Onda 2" |
-| Onda 3 — Active Directory + ponte 802.1X | 🚧 **Em andamento** — usuários + ponte 802.1X (PR #25), `fake-ldap-server` (PR #32) e bind por conexão (PR #33) mergeados; **grupos na PR #34, aberta**; computadores, frontend e e2e não iniciados | `docs/ad-module-plan.md` |
+| Onda 3 — Active Directory + ponte 802.1X | 🚧 **Em andamento** — usuários + ponte 802.1X (#25), `fake-ldap-server` (#32), bind por conexão (#33) e **grupos (#34, mergeada em 2026-09-14)**; faltam computadores (4), frontend (7) e e2e (8) | `docs/ad-module-plan.md` |
 | Onda 4 — Acesso remoto a qualquer PC (Guacamole) | 📋 Planejada, não iniciada | `docs/remote-access-plan.md` |
 | Infraestrutura — Cloudflare Tunnel + Access | 📋 Planejada, não iniciada | `docs/cloudflare-tunnel-setup.md` |
 
@@ -48,10 +48,15 @@
 
 ### Onda 3 — o que está aberto agora
 
-- **PR #34 (grupos do AD) não mergeada.** Aprovada 4/4 pelo par formal, mas a correção de
-  idempotência (`317ecfe`) foi terminada pelo orquestrador depois de o executor cair no
-  limite de sessão — **é a única peça da PR sem revisão cega de Verificador**. É o primeiro
-  item da retomada.
+- ~~PR #34 (grupos do AD)~~ **MERGEADA em 2026-09-14** (squash `c1c6704`). A correção de
+  idempotência passou por DUAS rodadas de revisão cega: reprovada 3/4 na primeira (a releitura
+  passava com a suíte inteira verde mesmo respondendo cego), aprovada 4/4 na segunda.
+  Subtarefa 3 fechada.
+- **Subtarefas 4 (computadores) e 7 (frontend) não iniciadas.** O módulo de AD **não tem
+  nenhuma tela** — existe só por HTTP. O gate do inventário do `fake-ldap-server` está
+  cumprido (`docs/fake-ldap-rfc-vs-real.md`), então computadores está liberada.
+- **Decisão 2 (aninhamento) pendente com o usuário** — opção (b), grupo próprio do
+  dashboard, proposta e não confirmada.
 - **⛔ Aninhamento de grupos bloqueia fechar a subtarefa 5 (ponte 802.1X) para produção.**
   `wifi-colaboradores` tem grupos departamentais inteiros como membros; `removeGroupMember`
   opera sobre membership DIRETA e retornaria sucesso sem revogar o acesso herdado. Duas

@@ -1,53 +1,76 @@
 # Gauntlet Loop — unifi-dashboard-api
 
-## ⏸️ PONTO DE PARADA — sessão de 2026-09-11 (leia isto antes de qualquer coisa)
+## ⏸️ PONTO DE PARADA — sessão de 2026-09-14 (leia isto antes de qualquer coisa)
 
-Estado exato no fim da sessão. Tudo commitado e com push; nenhuma árvore com arquivo pendente.
+Estado exato no fim da sessão. Tudo commitado e com push; nenhuma árvore com arquivo pendente,
+nenhuma PR aberta.
 
 ```
-master          75adf92   sincronizado com origin
-feat/ad-groups  317ecfe   PR #34 ABERTA, não mergeada
+master   3194ca9   sincronizado com origin
 ```
 
 ### O que esta sessão fez
 
-1. **PR #33 mergeada** (`0c640c5`) — `fake-ldap-server` passou a rastrear estado de bind por
-   conexão. Fechou o ⛔ que bloqueava grupos. Aprovada **4/4**, primeira nota máxima do harness.
-2. **PR #34 aberta** — grupos do AD (buscar/listar/criar, add/remove membro). Aprovada **4/4**
-   pelo par formal; 2 achados sérios corrigidos (injeção de filtro LDAP em `searchGroups`, rate
-   limit ausente nas rotas de membro).
-3. **Teste de fumaça supervisionado contra o AD real** (`evokaudio.local`) — 14 passos, ambiente
-   limpo ao fim, produção intocada. **Achou um BUG DE PRODUÇÃO** que os 746 testes verdes não
-   pegavam. Seção própria abaixo ("TESTE DE FUMAÇA CONTRA O AD REAL").
-4. **Correção do bug commitada na branch da #34** (`317ecfe`) — idempotência por releitura de
-   estado, não por resultCode. Suíte **748/748**, `tsc --noEmit` limpo. **NOTA: esta correção
-   foi terminada pelo orquestrador porque o executor caiu no limite de sessão no meio — ela
-   NÃO passou por revisão cega de Verificador. É o item 1 da retomada.**
+1. **ROADMAP.md sincronizado** (`cac77a3`) — estava parado antes das PRs #32/#33/#34 e do teste
+   de fumaça, ainda afirmando que grupos e `fake-ldap-server` não tinham começado.
+2. **Revisão cega da correção de idempotência — DUAS rodadas.** Era a única peça da PR #34 sem
+   Verificador às cegas (o executor caiu no limite de sessão e o orquestrador terminou sozinho).
+   - **1ª rodada: REPROVADO, 3/4.** Três achados sérios. O principal: a releitura que o código
+     chamava de "ÚLTIMA PALAVRA sobre o estado final" passava com a suíte **inteira verde**
+     (748/748) mesmo devolvendo resposta cega, sem nunca olhar o diretório — reconfirmado pelo
+     orquestrador de forma independente, e pior do que o Verificador reportou (ele mediu só nos
+     arquivos de AD). Mais: a releitura do lado ADD era **inalcançável** (o AD real devolve 68,
+     o catch por classe tratava antes), e o teste que levava o nome dela nunca passava por ela.
+   - **Corrigido em `cd81cf7`**: `readMembership` com TRÊS estados (`member`/`not-member`/
+     `undetermined`), releitura ANTES do catch por classe, detecção de range retrieval. Achado
+     no PRÓPRIO harness corrigido junto: o mock do `ldapts` ignorava `baseDN`/`scope` e casava
+     pelo FILTRO — uma busca de escopo `base` não manda filtro, então a releitura lia uma
+     entrada ARBITRÁRIA do diretório. Todo teste unitário de idempotência afirmava coisa nenhuma.
+   - **2ª rodada: APROVADO, 4/4.** Ainda achou dois itens, corrigidos em `b5e7ed9`: o ramo
+     `undetermined` era indefeso (apagá-lo deixava a suíte verde) e **um comentário que mentia** —
+     afirmava que ACL sobre o atributo `member` caía em `undetermined`, quando na verdade cai em
+     `not-member` e a revogação relataria sucesso sem revogar. Sem correção possível dentro da
+     função (as respostas são idênticas no protocolo); registrado como LIMITE, não como segurança.
+3. **PR #34 mergeada** (squash `c1c6704`) — grupos do AD em `master`. **Subtarefa 3 FECHADA.**
+4. **Suíte deixou de ler o `.env` do desenvolvedor** (`3194ca9`) — ver seção própria abaixo.
+5. **Inventário do `fake-ldap-server`** (item 3 da sequência de fechamento) em
+   `docs/fake-ldap-rfc-vs-real.md` — o que é suposição de RFC e o que foi medido contra o DC real.
+
+### ⚠️ Achado: a suíte dependia do `.env` da máquina
+
+`src/config/env.ts` faz `import 'dotenv/config'`, então toda variável do `.env` real vazava para
+dentro dos testes — e como o dotenv não sobrescreve o que já está em `process.env`, nem os
+defaults de `tests/setup.ts` protegiam. Descoberto ao rodar a suíte em `master` logo após o merge
+da #34, com as `AD_*` recém-configuradas: **2 testes falharam no mesmo commit que passava 759/759
+numa worktree** (que não tem `.env`).
+
+A falha foi barulhenta por sorte. **O sentido oposto é o perigoso**: um teste que afirma um
+DEFAULT seguro passaria porque o `.env` local define o valor certo, e quebraria só em produção,
+em CI, ou na máquina de outra pessoa. Mesma família do `tsc --noEmit` do frontend que não checa
+nada e do mtime do `printers.db` que não prova isolamento.
 
 ### Retomar por aqui, nesta ordem
 
-1. **Verificador (Opus, às cegas) na correção da idempotência** — única peça da #34 sem revisão
-   cega. Mutantes já executados pelo orquestrador: remover a releitura → 3 testes morrem; fake
-   voltar a responder 16 → 1 morre.
-2. **`nps.msc`** (pendente COM O USUÁRIO) — confirmar se `wifi-colaboradores` aparece como
-   condição "Grupos de Windows" numa Network Policy de 802.1X. Hoje é **inferência forte, não
-   confirmação** — nenhuma variável de produção deve apontar para esse DN antes disso.
-3. **Decidir o ⛔ do aninhamento de grupos** — bloqueia fechar a subtarefa 5 (ponte 802.1X) para
-   produção. Duas opções registradas na seção do teste de fumaça; nenhuma escolhida.
-4. **Mergear a PR #34**, e então o **levantamento dos pontos do `fake-ldap-server` modelados por
-   RFC e nunca confrontados com um DC real** — obrigatório ANTES de computadores (subtarefa 4),
-   que é a próxima peça nova e senão herda o mesmo padrão que causou o bug desta sessão.
-5. **Percentuais dos painéis das Brothers** (pendente COM O USUÁRIO, independente de tudo acima)
-   — `tools/brother-mib-probe.mjs --cruzar` está pronto, prioridade DCP-L3560CDW (`.80`), os 4
-   toners separados. **Não imprimir nada entre ler o painel e rodar o cruzamento**, senão o
-   contador anda e a correlação perde o valor.
+1. **Subtarefa 4 — computadores.** Liberada: o inventário do fake (gate) está feito. Usar o
+   `fake-ldap-server` desde o início, **não** validar só com `vi.mock('ldapts')` primeiro — esse
+   padrão já se provou insuficiente uma vez nesta onda.
+2. **Decisão 2 (aninhamento) — PENDENTE COM O USUÁRIO.** Opção (b) proposta: grupo novo próprio
+   do dashboard (`Rede-Permitida-Dashboard`?) + Network Policy do NPS aceitando
+   `wifi-colaboradores` OU o grupo novo; o dashboard nunca mexe no `wifi-colaboradores`.
+   Confirmar antes da subtarefa 5.
+3. **`nps.msc`** (pendente COM O USUÁRIO) — segue valendo: nenhuma variável de produção aponta
+   para objeto real do domínio antes disso.
+4. **Subtarefa 7 (frontend)** — o módulo de AD **não tem NENHUMA tela** hoje. Duas restrições
+   não-negociáveis: a tela de grupos manda `query` por padrão (68 grupos no domínio, inclui
+   `Admins. do domínio`), e precisa DISTINGUIR membership direta de herdada por aninhamento.
+5. **Subtarefa 8 (e2e)** e fechamento da onda.
+6. **Percentuais dos painéis das Brothers** (pendente COM O USUÁRIO, independente de tudo acima).
 
 ### Pendência de segurança registrada
 
 O `.env` real está com a **senha do administrador do domínio em texto plano** (fora do Git, mas
-em disco), e esse valor também passou pela conversa da sessão. **Trocar quando houver calma.**
-A conta usada no teste de fumaça é `gilwagno.silva` — conta de ADMIN do domínio, não uma conta de
-serviço escopada; foi decisão explícita do usuário depois de o risco ser levantado.
+em disco). A conta é `gilwagno.silva`, ADMIN do domínio, não uma conta de serviço escopada —
+decisão explícita do usuário depois de o risco ser levantado. **Trocar quando houver calma.**
 
 ---
 
