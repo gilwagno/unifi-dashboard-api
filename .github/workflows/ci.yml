@@ -53,6 +53,22 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # `tsconfig.json` cobre só `src/`, então `npm run typecheck` NÃO diz
+      # nada sobre os 47 arquivos de teste. Quando este passo foi ligado
+      # pela primeira vez, apareceram 45 erros escondidos — entre eles
+      # fixtures a que faltavam campos OBRIGATÓRIOS do tipo de produção
+      # (`levelSource`, `alias`), ou seja, testes que afirmavam sobre
+      # objetos que não podem existir de verdade.
+      - name: Typecheck dos testes
+        run: npm run typecheck:tests
+
+      # O backend não tinha lint nenhum até aqui. Mesma catraca do
+      # frontend: trava o débito atual (14 warnings intencionais — regex de
+      # caracteres de controle e escapes dentro de classe) e quebra em
+      # qualquer warning NOVO.
+      - name: Lint
+        run: npm run lint
+
       - name: Testes
         run: npm test
 

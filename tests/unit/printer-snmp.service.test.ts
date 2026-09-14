@@ -178,7 +178,7 @@ vi.mock('../../src/db/printers.instance.js', () => ({
       if (recordSnmpHistoryEntryShouldThrow) throw new Error('falha ao gravar histórico (simulado)');
       return recordSnmpHistoryEntryMock(...args);
     },
-    deleteSnmpHistoryOlderThan: (...args: unknown[]) => {
+    deleteSnmpHistoryOlderThan: (...args: Parameters<typeof deleteSnmpHistoryOlderThanMock>) => {
       if (deleteSnmpHistoryOlderThanShouldThrow) throw new Error('falha ao limpar histórico (simulado)');
       return deleteSnmpHistoryOlderThanMock(...args);
     },

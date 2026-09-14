@@ -249,7 +249,7 @@ vi.mock('ldapts', async (importOriginal) => {
   };
 });
 
-const AD_ENV = {
+const AD_ENV: Record<string, string> = {
   AD_URL: 'ldaps://dc.test.local:636',
   AD_BASE_DN: 'DC=test,DC=local',
   AD_BIND_DN: 'CN=svc-dashboard,CN=Users,DC=test,DC=local',

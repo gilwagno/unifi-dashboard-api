@@ -54,13 +54,22 @@ async function wipePrinters(page: Page) {
   // "Remover", o que faria o laco abaixo sair achando que ja esta vazia.
   await expect(page.getByText('Carregando…')).toHaveCount(0);
   for (;;) {
-    const remove = page.getByRole('button', { name: 'Remover' }).first();
-    if ((await page.getByRole('button', { name: 'Remover' }).count()) === 0) break;
+    const remover = page.getByRole('button', { name: 'Remover' });
+    const antes = await remover.count();
+    if (antes === 0) break;
     // Remover pede confirmacao (window.confirm) — sem um handler proprio o
     // Playwright DISPENSA o dialogo por padrao e a remocao nunca acontece.
     page.once('dialog', (d) => void d.accept());
-    await remove.click();
-    await page.waitForTimeout(300);
+    await remover.first().click();
+    // Espera a CONDICAO (a lista encolheu), nao um tempo fixo.
+    //
+    // Aqui havia um `waitForTimeout(300)`. Passava sempre nesta maquina e
+    // FALHOU no runner do GitHub (PR #39): mais lento, 300ms nao bastavam
+    // para a lista recarregar, e o clique seguinte pegava um elemento em
+    // pleno re-render — "waiting for element to be visible, enabled and
+    // stable", 60s de timeout. Sleep fixo e sempre uma aposta sobre a
+    // maquina mais lenta que vai rodar o teste algum dia.
+    await expect(remover).toHaveCount(antes - 1, { timeout: 15_000 });
   }
   await expect(page.getByText('Nenhuma impressora cadastrada.')).toBeVisible();
 }
@@ -283,9 +292,12 @@ test('[U4] layout do card: 2 colunas, ações em 2 grupos, sem estouro horizonta
 
   for (const width of [1280, 1600]) {
     await page.setViewportSize({ width, height: 1000 });
-    await page.waitForTimeout(400);
 
     const card = printerCard(page, SEEDED_PRINTER_CLIENT.mac);
+    // Antes havia um `waitForTimeout(400)` aqui só para "esperar o
+    // relayout". O `toBeVisible()` abaixo já espera pela condição de
+    // verdade, com retry — o sleep só adiantava a aposta de que 400ms
+    // bastam em toda máquina.
     await expect(card).toBeVisible();
 
     // 1) Sem barra de rolagem horizontal na página.

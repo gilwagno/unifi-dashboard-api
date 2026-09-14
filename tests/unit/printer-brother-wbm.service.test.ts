@@ -93,7 +93,7 @@ describe('setSleepTime', () => {
     await setSleepTime('172.16.0.222', 15);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe('http://172.16.0.222/general/sleep.html');
     expect(init.method).toBe('POST');
     expect(init.headers).toMatchObject({ 'Content-Type': 'application/x-www-form-urlencoded' });
@@ -127,7 +127,7 @@ describe('setAutoPowerOff', () => {
     await setAutoPowerOff('172.16.0.222', 3);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe('http://172.16.0.222/general/powerdown.html');
     expect(init.body).toBe('pageid=6&postif_registration_reject=1&B204=3');
   });

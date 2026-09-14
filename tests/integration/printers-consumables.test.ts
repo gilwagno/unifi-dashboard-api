@@ -200,6 +200,7 @@ describe('GET /printers/:id/consumables', () => {
             maxCapacity: { status: 'ok', value: 12000 },
             level: { status: 'ok', value: 8280 },
             levelPercent: 69,
+            levelSource: 'standard',
           },
           // Nível abaixo do threshold de 20% -> 'low'.
           {
@@ -213,6 +214,7 @@ describe('GET /printers/:id/consumables', () => {
             maxCapacity: { status: 'ok', value: 100 },
             level: { status: 'ok', value: 10 },
             levelPercent: 10,
+            levelSource: 'standard',
           },
           // Sentinela partial(-3) no nível — comportamento real das Brother.
           {
@@ -226,6 +228,7 @@ describe('GET /printers/:id/consumables', () => {
             maxCapacity: { status: 'unknown' },
             level: { status: 'partial' },
             levelPercent: null,
+            levelSource: 'standard',
           },
           // Sentinela unknown(-2) no nível.
           {
@@ -239,6 +242,7 @@ describe('GET /printers/:id/consumables', () => {
             maxCapacity: { status: 'unknown' },
             level: { status: 'unknown' },
             levelPercent: null,
+            levelSource: 'standard',
           },
           // OID não suportado neste modelo -> 'unsupported'.
           {
@@ -252,6 +256,7 @@ describe('GET /printers/:id/consumables', () => {
             maxCapacity: { status: 'unsupported' },
             level: { status: 'unsupported' },
             levelPercent: null,
+            levelSource: 'standard',
           },
         ],
       }),
@@ -300,6 +305,7 @@ describe('GET /printers/:id/consumables', () => {
             maxCapacity: { status: 'ok', value: 100 },
             level: { status: 'ok', value: 55 },
             levelPercent: 55,
+            levelSource: 'standard',
           },
         ],
       }),
@@ -338,6 +344,7 @@ describe('GET /printers/:id/consumables', () => {
             maxCapacity: { status: 'unknown' },
             level: { status: 'partial' },
             levelPercent: null,
+            levelSource: 'standard',
           },
         ],
       }),
@@ -374,6 +381,7 @@ describe('GET /printers/:id/consumables', () => {
             maxCapacity: { status: 'ok', value: 100 },
             level: { status: 'ok', value: 1 }, // 1% — seria "low" com qualquer threshold razoável
             levelPercent: 1,
+            levelSource: 'standard',
           },
         ],
       }),
@@ -427,6 +435,7 @@ describe('GET /printers/:id/consumables', () => {
             maxCapacity: { status: 'ok', value: 100 },
             level: { status: 'ok', value: 20 },
             levelPercent: 20,
+            levelSource: 'standard',
           },
         ],
       }),
@@ -467,6 +476,7 @@ describe('GET /printers/:id/consumables', () => {
             maxCapacity: { status: 'error' },
             level: { status: 'error' },
             levelPercent: null,
+            levelSource: 'standard',
           },
           {
             index: '1.2',
@@ -479,6 +489,7 @@ describe('GET /printers/:id/consumables', () => {
             maxCapacity: { status: 'other' },
             level: { status: 'other' },
             levelPercent: null,
+            levelSource: 'standard',
           },
         ],
       }),
@@ -549,6 +560,7 @@ describe('GET /printers/:id/consumables', () => {
             maxCapacity: { status: 'ok', value: 100 },
             level: { status: 'ok', value: 143066 },
             levelPercent: null,
+            levelSource: 'standard',
           },
         ],
       }),

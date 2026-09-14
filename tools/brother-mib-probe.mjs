@@ -134,7 +134,7 @@ function cruzar(percentuais) {
   console.log(`Painel informou: ${alvo.cores.map((c, i) => `${c}=${percentuais[i]}%`).join(', ')}\n`);
 
   const candidatos = [];
-  for (const [raiz, linhas] of Object.entries(alvo.privado)) {
+  for (const [, linhas] of Object.entries(alvo.privado)) {
     for (const l of linhas) {
       if (typeof l.valor === 'number') candidatos.push({ onde: l.oid, valor: l.valor });
       else if (/^[0-9a-f]+$/.test(String(l.valor))) {

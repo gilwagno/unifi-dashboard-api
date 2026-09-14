@@ -91,8 +91,12 @@ async function createPrinter(auth: Record<string, string>, app: Awaited<ReturnTy
 beforeEach(() => {
   vi.mocked(unifiClassicService.blockClient).mockClear();
   vi.mocked(unifiClassicService.unblockClient).mockClear();
-  vi.mocked(unifiClassicService.blockClient).mockImplementation(async () => undefined);
-  vi.mocked(unifiClassicService.unblockClient).mockImplementation(async () => undefined);
+  // A forma REAL do retorno, não `undefined`: o mock precisa ser tão
+  // estrito quanto a produção, senão ele deixa de travar a regressão que
+  // deveria travar (ver o achado do typecheck de `tests/`).
+  const respostaOk = { meta: { rc: 'ok' }, data: [] };
+  vi.mocked(unifiClassicService.blockClient).mockImplementation(async () => respostaOk);
+  vi.mocked(unifiClassicService.unblockClient).mockImplementation(async () => respostaOk);
 });
 
 describe('POST /printers/:id/reconnect', () => {
@@ -104,9 +108,11 @@ describe('POST /printers/:id/reconnect', () => {
     const callOrder: string[] = [];
     vi.mocked(unifiClassicService.blockClient).mockImplementation(async () => {
       callOrder.push('block');
+      return { meta: { rc: 'ok' }, data: [] };
     });
     vi.mocked(unifiClassicService.unblockClient).mockImplementation(async () => {
       callOrder.push('unblock');
+      return { meta: { rc: 'ok' }, data: [] };
     });
 
     const res = await app.inject({ method: 'POST', url: `/printers/${printer.id}/reconnect`, headers: auth });

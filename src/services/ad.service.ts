@@ -191,7 +191,11 @@ const UF_PASSWD_NOTREQD = 0x0020;
 // nunca quais não tem. Assim um UAC desconhecido/atípico erra para
 // "não é DC" só quando de fato não carrega nenhum bit de DC, e uma conta
 // pré-criada com UAC 0 não vira alarme falso.
-const UF_WORKSTATION_TRUST_ACCOUNT = 0x1000;
+// Mantido como DOCUMENTAÇÃO do bit, não como código morto: o comentário
+// acima explica a armadilha do RODC em termos dele, e quem for reler a
+// derivação precisa do valor à mão para conferir. O prefixo `_` é o que o
+// lint reconhece como "declarado de propósito, não esquecido".
+const _UF_WORKSTATION_TRUST_ACCOUNT = 0x1000;
 const UF_SERVER_TRUST_ACCOUNT = 0x2000;
 const UF_PARTIAL_SECRETS_ACCOUNT = 0x04000000; // RODC
 

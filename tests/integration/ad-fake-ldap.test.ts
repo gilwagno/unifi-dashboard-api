@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Attribute, AlreadyExistsError, Change, Client, InvalidCredentialsError, NoSuchAttributeError, OperationsError, TypeOrValueExistsError, UnwillingToPerformError } from 'ldapts';
+import { Attribute, AlreadyExistsError, Change, Client, InvalidCredentialsError, NoSuchAttributeError, OperationsError, UnwillingToPerformError } from 'ldapts';
 import selfsigned from 'selfsigned';
 import { startFakeLdapServer } from '../../e2e/fake-ldap-server/server.mjs';
 import type { AdUser } from '../../src/services/ad.service.js';

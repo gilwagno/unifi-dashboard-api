@@ -205,7 +205,7 @@ describe('POST /printers/:id/sleep-time', () => {
 
     vi.mocked(unifiClassicService.isConfigured).mockReturnValue(true);
     vi.mocked(unifiClassicService.getKnownClientsNetworkInfo).mockResolvedValue(
-      new Map([['aa:11:22:33:44:14', { ipAddress: '172.16.0.85', connectionType: 'WIRELESS' as const }]]),
+      new Map([['aa:11:22:33:44:14', { ipAddress: '172.16.0.85', connectionType: 'WIRELESS' as const, alias: null }]]),
     );
 
     const res = await app.inject({
