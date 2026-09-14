@@ -32,7 +32,13 @@ import { UniFiApiError } from './services/unifi.service.js';
 import { ClassicApiNotConfiguredError, UniFiClassicApiError } from './services/unifi-classic.service.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
-  const app = Fastify({ logger: true });
+  // `trustProxy` decide de onde sai `request.ip` — e é dele que TODO rate
+  // limit por IP depende. Ver o comentário de `TRUST_PROXY` em
+  // src/config/env.ts para os quatro cenários; o resumo é que ligar isto
+  // sem um proxy confiável na frente desarma o rate limit por completo,
+  // então o default é `false` e quem põe um proxy na frente liga de forma
+  // consciente.
+  const app = Fastify({ logger: true, trustProxy: env.TRUST_PROXY });
 
   await app.register(cors, { origin: true });
   await app.register(rateLimit, { max: env.RATE_LIMIT_MAX, timeWindow: env.RATE_LIMIT_WINDOW });
