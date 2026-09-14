@@ -99,3 +99,38 @@ jobs:
       # nos testes.
       - name: Build
         run: npm run build
+
+  # O e2e existe neste job porque a AUSÊNCIA dele deixou passar uma
+  # regressão real: o limite dedicado de login (5/min) entrou sem que a
+  # suíte de navegador fosse rodada, e a partir do 6º teste TODO login
+  # devolvia 429 — a UI ficava em /login e o sintoma não dizia nada sobre a
+  # causa. Unit e integration seguiram verdes o tempo todo.
+  #
+  # É mais lento que os outros dois jobs (sobe backend + frontend + dois
+  # servidores fake e um navegador de verdade), mas é o único que exercita
+  # a stack como o usuário a usa.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      # O frontend é um projeto npm à parte; o `webServer` do Playwright
+      # sobe o Vite dele, então as dependências precisam existir.
+      - name: Dependências do frontend
+        run: npm ci
+        working-directory: frontend
+
+      # `--with-deps` instala as bibliotecas de sistema que o Chromium
+      # precisa no runner; só `playwright install` falha no boot do browser.
+      - name: Navegador
+        run: npx playwright install --with-deps chromium
+
+      - name: e2e
+        run: npm run test:e2e

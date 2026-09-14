@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance, type FastifyError } from 'fastify';
 import cors from '@fastify/cors';
+import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import { ZodError } from 'zod';
 import { env } from './config/env.js';
@@ -41,6 +42,44 @@ export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: true, trustProxy: env.TRUST_PROXY });
 
   await app.register(cors, { origin: true });
+
+  // Headers de segurança. Este backend é uma API **pura**: não serve HTML,
+  // não serve estático (não há `@fastify/static` registrado, e o Dockerfile
+  // publica só o `dist/` do backend — o frontend Vite é deployado à parte).
+  // Por isso o CSP pode ser o mais restritivo que existe: `default-src
+  // 'none'` diz "esta resposta não deve carregar recurso nenhum", que é a
+  // verdade sobre um corpo JSON.
+  //
+  // A armadilha clássica do helmet — o CSP padrão quebrar o front por causa
+  // de script/estilo inline do Vite/Tailwind — NÃO se aplica aqui
+  // justamente porque o front não é servido por este processo. Se um dia
+  // passar a ser (`@fastify/static` + `dist/` do frontend), este CSP precisa
+  // ser recalibrado CONTRA O BUILD DE PRODUÇÃO, nunca contra o dev server:
+  // o dev precisa de `unsafe-eval`/`unsafe-inline` para HMR, e calibrar por
+  // ele deixaria produção com um CSP frouxo — helmet ligado sem proteger.
+  await app.register(helmet, {
+    contentSecurityPolicy: {
+      directives: {
+        'default-src': ["'none'"],
+        'frame-ancestors': ["'none'"],
+        'base-uri': ["'none'"],
+        'form-action': ["'none'"],
+      },
+    },
+    // O default do helmet é `same-origin`, e isso CONTRADIZ o `cors` logo
+    // acima (`origin: true`, que reflete qualquer origem). Um frontend
+    // servido de outra origem — que é exatamente o deploy deste projeto —
+    // teria as respostas bloqueadas pelo navegador mesmo com o CORS
+    // liberado, e o erro apareceria como falha de rede sem explicação.
+    // Declarar `cross-origin` aqui torna a intenção explícita em vez de
+    // deixar dois plugins discordando em silêncio.
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    // HSTS só faz sentido sob HTTPS. Este app roda HTTP atrás de um proxy
+    // (hoje em LAN; Cloudflare Tunnel no roadmap), e é o proxy que termina
+    // o TLS e deve emitir o HSTS — mandá-lo daqui num ambiente HTTP faria
+    // o navegador recusar o próprio app depois.
+    hsts: false,
+  });
   await app.register(rateLimit, { max: env.RATE_LIMIT_MAX, timeWindow: env.RATE_LIMIT_WINDOW });
   await app.register(authPlugin);
   await app.register(websocketPlugin);
