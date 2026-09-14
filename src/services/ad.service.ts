@@ -646,18 +646,39 @@ export async function setUserWorkstations(username: string, workstations: string
 // privilégio qualquer (achado desta subtarefa): um operador adicionando
 // alguém a um grupo administrativo que a pessoa já integra, ou removendo de
 // um que ela já não integra, não deveria ver um erro genérico.
-// Releitura do `member` do grupo, usada como ÚLTIMA PALAVRA sobre o estado
-// desejado ter sido alcançado (ver comentário de `applyGroupMembership`
-// abaixo) — nunca engolida: se a busca em si falhar, quem chama decide (e
-// hoje decide propagar o erro ORIGINAL da operação de modify, não este).
-async function isGroupMember(client: Client, groupDn: string, memberDn: string): Promise<boolean> {
-  const { searchEntries } = await client.search(groupDn, { scope: 'base', attributes: ['member'] });
-  const entry = searchEntries[0] as unknown as Record<string, string | string[] | Buffer | Buffer[]> | undefined;
-  if (!entry) return false;
+// Releitura do `member` do grupo. Devolve TRÊS estados, nunca dois: o
+// terceiro (`undetermined`) existe porque "não consegui ler os membros" NÃO
+// é a mesma afirmação que "não é membro" — colapsar os dois faria uma
+// revogação que nunca leu o diretório relatar SUCESSO, o falso positivo
+// exato que `applyGroupMembership` existe para evitar. Casos reais de AD
+// que caem em `undetermined`:
+//   - a busca `base` não devolve entrada nenhuma (grupo removido/renomeado
+//     entre o modify e a releitura, referral, ACL sobre o objeto);
+//   - RANGE RETRIEVAL: acima de ~1500 membros o AD não devolve `member` e
+//     sim `member;range=0-1499`, então `entry.member` vem `undefined` num
+//     grupo que está cheio;
+//   - a própria busca falhar.
+// `member` ausente SEM nenhum `member;range=` é um grupo genuinamente
+// vazio — esse sim é `not-member` com segurança.
+type MembershipState = 'member' | 'not-member' | 'undetermined';
+
+async function readMembership(client: Client, groupDn: string, memberDn: string): Promise<MembershipState> {
+  let entry: Record<string, string | string[] | Buffer | Buffer[]> | undefined;
+  try {
+    const { searchEntries } = await client.search(groupDn, { scope: 'base', attributes: ['member'] });
+    entry = searchEntries[0] as unknown as Record<string, string | string[] | Buffer | Buffer[]> | undefined;
+  } catch {
+    return 'undetermined';
+  }
+  if (!entry) return 'undetermined';
   const memberValue = entry.member;
-  const members = memberValue === undefined ? [] : Array.isArray(memberValue) ? memberValue : [memberValue];
+  if (memberValue === undefined) {
+    const ranged = Object.keys(entry).some((k) => k.toLowerCase().startsWith('member;range='));
+    return ranged ? 'undetermined' : 'not-member';
+  }
+  const members = Array.isArray(memberValue) ? memberValue : [memberValue];
   const targetLower = memberDn.toLowerCase();
-  return members.some((m) => (asString(m) ?? '').toLowerCase() === targetLower);
+  return members.some((m) => (asString(m) ?? '').toLowerCase() === targetLower) ? 'member' : 'not-member';
 }
 
 // ACHADO de um teste de fumaça supervisionado contra um AD REAL (Windows
@@ -678,25 +699,30 @@ async function isGroupMember(client: Client, groupDn: string, memberDn: string):
 // Atingiu o estado desejado -> sucesso (mesmo princípio da verificação por
 // relogin da troca de senha da HP). Não atingiu -> propaga o erro
 // ORIGINAL da operação de modify (não um erro genérico da releitura, que
-// perderia a causa raiz). Os catches por classe de erro abaixo continuam
-// como caminho rápido (evitam a busca extra no caso comum), a releitura é
-// quem garante a idempotência de verdade.
+// perderia a causa raiz).
+// A releitura vem PRIMEIRO e é a única palavra sempre que houver estado
+// legível; os catches por classe de erro só decidem quando ela devolve
+// `undetermined`. A ordem importa: com os catches na frente, o ramo de
+// `add` era inalcançável na prática (o AD real devolve 68, que o catch
+// já tratava) e ficava indefeso contra regressão.
 async function applyGroupMembership(client: Client, groupDn: string, memberDn: string, operation: 'add' | 'delete'): Promise<void> {
   try {
     await client.modify(groupDn, new Change({ operation, modification: new Attribute({ type: 'member', values: [memberDn] }) }));
   } catch (err) {
-    if (operation === 'add' && (err instanceof TypeOrValueExistsError || err instanceof AlreadyExistsError)) return;
-    if (operation === 'delete' && err instanceof NoSuchAttributeError) return;
+    const state = await readMembership(client, groupDn, memberDn);
 
-    let memberNow: boolean;
-    try {
-      memberNow = await isGroupMember(client, groupDn, memberDn);
-    } catch {
+    if (state === 'undetermined') {
+      // Só aqui a classe do erro volta a decidir — é o único caso em que
+      // não há estado lido para consultar. Mantido porque um bind com
+      // permissão de ESCRITA mas sem leitura do `member` é um cenário real
+      // de AD, e nele a classe do erro é a única informação disponível.
+      if (operation === 'add' && (err instanceof TypeOrValueExistsError || err instanceof AlreadyExistsError)) return;
+      if (operation === 'delete' && err instanceof NoSuchAttributeError) return;
       throw err;
     }
 
-    if (operation === 'add' && memberNow) return;
-    if (operation === 'delete' && !memberNow) return;
+    if (operation === 'add' && state === 'member') return;
+    if (operation === 'delete' && state === 'not-member') return;
     throw err;
   }
 }
