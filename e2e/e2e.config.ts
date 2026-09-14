@@ -9,6 +9,24 @@
 /** Controller UniFi FAKE (HTTPS, certificado autoassinado em memória). */
 export const FAKE_CONTROLLER_PORT = 8443;
 
+/**
+ * Active Directory FAKE (LDAPS, certificado autoassinado em memória —
+ * e2e/fake-ldap-server/server.mjs em modo standalone). Porta fixa, ao
+ * contrário da suíte de integração (que usa porta 0), porque o backend
+ * precisa da URL em env var ANTES de subir.
+ */
+export const FAKE_LDAP_PORT = 3636;
+
+/** Onde o fake escreve o PEM da própria CA para o backend confiar nela. */
+export const FAKE_LDAP_CA_FILE = './e2e/.fake-ldap-ca.pem';
+
+export const FAKE_LDAP_BASE_DN = 'DC=fakeldap,DC=test';
+export const FAKE_LDAP_BIND_DN = `CN=svc-dashboard,CN=Users,${FAKE_LDAP_BASE_DN}`;
+export const FAKE_LDAP_BIND_PASSWORD = 'S3nha-Fake-Ldap-2026';
+export const FAKE_LDAP_USERS_OU = `OU=Funcionarios,${FAKE_LDAP_BASE_DN}`;
+export const FAKE_LDAP_GROUPS_OU = `OU=Grupos,${FAKE_LDAP_BASE_DN}`;
+export const FAKE_LDAP_NETWORK_GROUP_DN = `CN=Rede-Permitida,CN=Users,${FAKE_LDAP_BASE_DN}`;
+
 /** Backend Fastify real, apontado para o controller fake. */
 export const BACKEND_PORT = 3100;
 
@@ -50,3 +68,22 @@ export const SEEDED_PRINTER_CLIENT = {
   name: 'Impressora Recepcao',
   mac: 'aa:bb:cc:dd:ee:02',
 };
+
+/**
+ * Usuário semeado no fake-ldap-server que o fluxo de AD exercita. Separado
+ * dos demais: o fluxo o DESABILITA e concede/revoga acesso à rede, e o
+ * estado do diretório é compartilhado por toda a run (workers: 1).
+ */
+export const SEEDED_AD_USER = {
+  sAMAccountName: 'jsilva',
+  displayName: 'João Silva',
+};
+
+/** Grupo semeado COM aninhamento — é o que a tela precisa saber distinguir. */
+export const SEEDED_AD_NESTED_GROUP = 'Acesso-Aninhado';
+
+/** Computador semeado, habilitado. */
+export const SEEDED_AD_COMPUTER = 'EA-PC-TESTE01';
+
+/** Controlador de domínio semeado — a tela tem que marcá-lo. */
+export const SEEDED_AD_DC = 'EA-SRV-FAKE01';

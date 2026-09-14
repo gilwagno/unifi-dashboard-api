@@ -38,3 +38,7 @@ tools/.brother-mib-snapshot.json
 
 # Certificados de CA interna (especificos do ambiente, nao versionar)
 .certs/
+
+# PEM da CA do fake-ldap-server, materializado a cada run do e2e
+# (ver e2e/e2e.config.ts#FAKE_LDAP_CA_FILE). Artefato de execução.
+e2e/.fake-ldap-ca.pem

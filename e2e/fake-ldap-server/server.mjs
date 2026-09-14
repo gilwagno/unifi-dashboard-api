@@ -1031,6 +1031,16 @@ if (invokedDirectly) {
     bindPassword: process.env.FAKE_LDAP_BIND_PASSWORD,
     log: (msg) => console.log(msg),
   });
+  // O backend só confia neste certificado via AD_TLS_CA_FILE (que aponta
+  // para um CAMINHO de arquivo, não um PEM inline) — e não existe, de
+  // propósito, nenhuma variável para desligar a verificação. Então o modo
+  // standalone precisa materializar o PEM em disco antes de o backend subir.
+  const caFile = process.env.FAKE_LDAP_CA_FILE;
+  if (caFile) {
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(caFile, handle.caCert, 'utf8');
+    console.log(`[fake-ldap-server] CA escrita em ${caFile}`);
+  }
   console.log(`[fake-ldap-server] AD_URL=${handle.url} AD_BASE_DN=${handle.baseDn} AD_USERS_OU=${handle.usersOu}`);
   console.log(`[fake-ldap-server] AD_BIND_DN=${handle.bindDn} AD_NETWORK_ACCESS_GROUP_DN=${handle.networkAccessGroupDn}`);
 }
