@@ -24,13 +24,20 @@ concurrency:
 permissions:
   contents: read
 
+# As actions estao em @v5, nao @v4: a PRIMEIRA execucao real deste workflow
+# (run 34876545007) emitiu o aviso de que checkout@v4 e setup-node@v4 ainda
+# tem como alvo o Node 20, ja depreciado nos runners e sendo forcado para o
+# 24. Hoje e so um aviso; quando o runner parar de forcar, vira quebra. O
+# aviso so apareceu porque o workflow RODOU -- nenhuma leitura do YAML o
+# teria revelado.
+
 jobs:
   backend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           # `engines.node` do package.json exige >=22.5.0 (o módulo de
           # impressoras usa `node:sqlite`, built-in a partir dali). 24 é a
@@ -55,9 +62,9 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: npm
