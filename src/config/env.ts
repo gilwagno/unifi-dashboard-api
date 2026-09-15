@@ -129,6 +129,31 @@ const envSchema = z.object({
   // o certificado autoassinado do `e2e/fake-ldap-server` — a verificação
   // continua acontecendo de verdade, só que contra essa CA de teste.
   AD_TLS_CA_FILE: z.string().min(1).optional(),
+
+  // --- Acesso Remoto / Apache Guacamole (Onda 4) ---
+  //
+  // Todas OPCIONAIS, mesmo regime das AD_* e das UNIFI_CONTROLLER_*: sem
+  // elas o módulo de acesso remoto responde de forma clara que está
+  // desligado (RemoteAccessNotConfiguredError) e o resto do app sobe igual.
+  //
+  // GUACAMOLE_URL aponta para a raiz da aplicação, incluindo o contexto
+  // (`/guacamole` na imagem oficial). O default do docker-compose.yml deste
+  // repo publica em 127.0.0.1 de propósito — o dashboard é o gateway, o
+  // Guacamole nunca é exposto direto (ver docs/guacamole-setup.md).
+  GUACAMOLE_URL: z.string().url().optional(),
+  // "Data source" do Guacamole: o identificador do backend de autenticação
+  // que guarda as conexões, e ele entra no PATH de toda chamada da API REST
+  // (`/api/session/data/<ds>/connections`). `postgresql` é o do nosso
+  // compose; uma instalação com MySQL usaria `mysql`. Não é adivinhável a
+  // partir da URL, por isso é configuração e não constante.
+  GUACAMOLE_DATA_SOURCE: z.string().min(1).default('postgresql'),
+  // Credencial do USUÁRIO DE SERVIÇO do backend, não a do `guacadmin`.
+  // Provisionado com CREATE_CONNECTION apenas (ver docs/guacamole-setup.md):
+  // ele cria/administra as conexões que ele mesmo criou e não enxerga mais
+  // nada do Guacamole. Segredo de primeira classe, mesmo tratamento do
+  // segredo SNMP/SSH — nunca em resposta de rota, nunca em log.
+  GUACAMOLE_USERNAME: z.string().min(1).optional(),
+  GUACAMOLE_PASSWORD: z.string().min(1).optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -95,9 +95,29 @@ propósito**: não produz `$`, `/` nem `+`, então não esbarra no interpolador 
 escape de shell. `openssl rand -base64 32` produz esses caracteres e é a origem provável de um
 "funciona na minha máquina" aqui.
 
-### ⚠️ Pendente e vivo: `guacadmin` / `guacadmin`
+### Credenciais — RESOLVIDO em 2026-09-15
 
-O serviço está de pé **com a credencial padrão**. Hoje ela só é alcançável de `127.0.0.1`,
-o que contém o risco — mas é a conta que administra o gateway que vai alcançar a tela de
-qualquer máquina do domínio. Trocar é o próximo passo, junto com a criação do usuário de
-serviço da subtarefa 3.
+A senha padrão do `guacadmin` **foi rotacionada** e o usuário de serviço do backend foi criado,
+com permissão mínima. Onde cada segredo mora (os dois arquivos são gitignored):
+
+| segredo | arquivo | para quê |
+|---|---|---|
+| `GUACAMOLE_ADMIN_PASSWORD` | `guacamole/.env` | login humano na UI do Guacamole |
+| `GUACAMOLE_USERNAME` / `GUACAMOLE_PASSWORD` | `.env` da raiz | o que o backend usa na API REST |
+
+O usuário de serviço é `dashboard-backend` com **`CREATE_CONNECTION` e mais nada**. No
+Guacamole, quem cria uma conexão recebe controle sobre ela — então isso basta para
+criar/ler/editar/remover as conexões que o próprio backend criou, e não dá nenhum poder
+administrativo. Verificado depois de provisionar:
+
+- `guacadmin` / `guacadmin` → **403** (a senha padrão está morta);
+- o usuário de serviço lista usuários e enxerga **só a si mesmo** (`["dashboard-backend"]`);
+- nenhuma permissão de sistema além de `CREATE_CONNECTION`.
+
+> **Erro cometido e corrigido no caminho, registrado porque a lição vale**: na primeira
+> tentativa o script trocou a senha do `guacadmin` **antes** de persistir o valor gerado, e a
+> gravação falhou depois — a senha nova existiu só na memória daquele processo e se perdeu, com
+> o `guacadmin` trancado. Como o catálogo estava vazio, a recuperação foi recriar o volume
+> (`down -v`). O script passou a **persistir o segredo antes de qualquer mutação**. É a mesma
+> classe do `AdPasswordAmbiguousError` da Onda 3: a única cópia de um segredo gerado não pode
+> depender de um passo que ainda pode falhar.

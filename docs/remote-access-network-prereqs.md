@@ -50,9 +50,16 @@ Settings → Windows Firewall with Advanced Security`), regra de entrada:
 Confirme também que o firewall do UniFi não roteia 3389 de fora para dentro (nenhum
 port-forward).
 
-## 3. Como a sessão autentica — DECISÃO SUA, e ela muda a auditoria
+## 3. Como a sessão autentica — ✅ DECIDIDO: passe-through (2026-09-15)
 
-O `remote-access-plan.md` deixou em aberto; a subtarefa 3 precisa da resposta.
+Decisão do usuário. O que ela implica no código já está escrito como regra dura no topo de
+`src/services/remote-access.service.ts`: **passe-through não persiste credencial**. As conexões
+do catálogo não carregam `username`/`password`, e `createRdpConnection` sequer tem parâmetro
+para recebê-los — um catálogo RDP com credencial embutida seria um cofre de senhas de domínio.
+A credencial de quem acessa é usada para montar a sessão e descartada, nunca gravada "para
+reconectar".
+
+O quadro abaixo fica como registro do porquê.
 
 | | Passe-through (credencial de domínio de quem acessa) | Conta de serviço única |
 |---|---|---|
