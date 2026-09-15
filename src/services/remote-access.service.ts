@@ -576,6 +576,26 @@ async function provisionSessionUser(
 // Dá READ na conexão pedida — não ADMINISTER: a pessoa vê e usa a conexão,
 // não a edita nem a remove. Editar/remover é só do usuário de serviço, pelo
 // sync.
+//
+// ⚠️ DECISÃO SEGURA SOB CONDIÇÃO — a condição está escrita aqui de propósito.
+//
+// O READ ACUMULA POR DESIGN: abrir sessão noutro PC não revoga os READs
+// anteriores, então a pessoa mantém acesso às conexões que já acessou.
+//
+//   - Por que é seguro HOJE: o dashboard tem um único usuário administrador.
+//     Acumular acesso a PCs que ele já poderia acessar de qualquer forma não
+//     concede nada de novo, e revogar poderia derrubar uma sessão legítima
+//     aberta noutra aba.
+//   - QUANDO ISSO DEIXA DE VALER: no dia em que existir multi-usuário/RBAC.
+//     Aí o acúmulo vira privilégio persistente indevido — a versão-Guacamole
+//     do problema de aninhamento de grupos do AD (Onda 3): acesso que
+//     sobrevive depois que deveria ter acabado, sem nada avisar.
+//   - O QUE FAZER nesse dia: revogação explícita do READ ao fim da sessão
+//     (a tela precisa saber quando a sessão termina — ver a subtarefa 6).
+//
+// Mesmo padrão do `ignore-cert=true` + regra de firewall: a condição que
+// torna a decisão segura mora ao lado dela, para não sobreviver em silêncio
+// à mudança que a invalida.
 async function grantConnectionRead(username: string, connectionIdentifier: string): Promise<void> {
   await withToken(async (url) => {
     const res = await guacFetch(

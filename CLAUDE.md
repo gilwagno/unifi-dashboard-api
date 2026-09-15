@@ -1122,6 +1122,22 @@ corrigido em 2026-09-09.
   pequena/uso interno autenticado, mas README já registra a recomendação de sempre filtrar por
   `from`/`to`/`mac`, e que paginação é o próximo passo se a rede crescer.
 - Suíte final: 311/311, `tsc` limpo.
+## ⚠️ PREMISSAS QUE SUSTENTAM DECISÕES DE SEGURANÇA (Onda 4)
+
+Duas decisões do módulo de Acesso Remoto são seguras **sob condição**. A condição está escrita
+ao lado de cada uma no código, e repetida aqui para não sobreviver em silêncio à mudança que a
+invalida — que é exatamente como uma proteção morre sem ninguém notar.
+
+| decisão | segura ENQUANTO | quando a premissa cair |
+|---|---|---|
+| `ignore-cert=true` nas conexões RDP | o 3389 estiver restrito ao host do `guacd` por firewall | tirar o `ignore-cert` **no mesmo momento** em que o firewall for afrouxado; a saída definitiva é certificado pela PKI interna |
+| **`READ` acumula** (abrir sessão noutro PC não revoga os anteriores) | houver **um único usuário administrador** no dashboard | com multi-usuário/RBAC vira privilégio persistente indevido — passa a exigir **revogação explícita ao fim da sessão** |
+
+O segundo caso é a versão-Guacamole do problema de aninhamento de grupos da Onda 3: **acesso que
+sobrevive depois que deveria ter acabado, sem nada avisar**. Hoje o ganho de revogar é nulo (o
+único admin já alcança tudo) e o risco é real (derrubar uma sessão legítima aberta noutra aba) —
+por isso não foi feito. No dia do RBAC, é item obrigatório, não melhoria.
+
 ## ⚠️ RISCO DE ARQUITETURA: autenticação é opt-in POR ARQUIVO de rotas
 
 **Todo arquivo de rotas novo neste projeto nasce SEM autenticação.** Não existe guarda global:
