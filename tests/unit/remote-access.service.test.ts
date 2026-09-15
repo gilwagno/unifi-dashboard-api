@@ -460,3 +460,139 @@ describe('listConnectionsWithAnchors', () => {
     ]);
   });
 });
+
+describe('sessão — uma conta Guacamole por pessoa', () => {
+  // O desenho existe porque a alternativa "óbvia" foi MEDIDA e descartada:
+  // o token do Guacamole carrega as permissões de quem autenticou, então
+  // entregar o token do usuário de serviço ao navegador daria ao cliente o
+  // CREATE_CONNECTION dele — escalação de privilégio.
+  const PESSOA = 'fulano.silva';
+  const TOKEN_DA_PESSOA = 'TOKEN-DA-PESSOA';
+
+  const conexao = {
+    identifier: '10',
+    name: 'EA-PC-TESTE01',
+    protocol: 'rdp',
+    hostname: 'ea-pc-teste01.evokaudio.local',
+    activeConnections: 0,
+    adObjectGuid: 'guid-1',
+  };
+
+  /** fetch que distingue o login do SERVIÇO do login da PESSOA. */
+  function fetchSessao({ usuarioExiste }: { usuarioExiste: boolean }) {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const mock = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+
+      if (url.endsWith('/api/tokens')) {
+        const corpo = String(init?.body ?? '');
+        // O login da pessoa usa o usuário `dash-...`; o do serviço, não.
+        const ehPessoa = corpo.includes('dash-');
+        return jsonResponse(200, { authToken: ehPessoa ? TOKEN_DA_PESSOA : TOKEN });
+      }
+      if (url.includes('/users/dash-') && init?.method === undefined) {
+        return usuarioExiste ? jsonResponse(200, { username: 'dash-fulano.silva' }) : emptyResponse(404);
+      }
+      return emptyResponse(204);
+    });
+    vi.stubGlobal('fetch', mock);
+    return { mock, calls };
+  }
+
+  it('o nome da conta é determinístico a partir do usuário do dashboard', () => {
+    expect(service.sessionUserNameFor('admin')).toBe('dash-admin');
+    expect(service.sessionUserNameFor('admin')).toBe(service.sessionUserNameFor('admin'));
+  });
+
+  it('o nome da conta é sanitizado, mas continua estável', () => {
+    // Chave estável é o ponto: sem determinismo, cada abertura de sessão
+    // criaria uma conta nova e o Guacamole acumularia órfãos — o mesmo
+    // problema que o objectGUID resolveu para computador↔conexão.
+    const primeiro = service.sessionUserNameFor('EVOKAUDIO\\Fulano Silva');
+    const segundo = service.sessionUserNameFor('EVOKAUDIO\\Fulano Silva');
+    expect(primeiro).toBe(segundo);
+    expect(primeiro).toMatch(/^dash-[a-z0-9._-]+$/);
+  });
+
+  it('pessoa NOVA: cria a conta (POST /users)', async () => {
+    const { calls } = fetchSessao({ usuarioExiste: false });
+
+    await service.remoteAccessService.openSession(PESSOA, conexao);
+
+    const criacao = calls.find((c) => c.url.includes('/users?') && c.init?.method === 'POST');
+    expect(criacao).toBeDefined();
+    expect(JSON.parse(String(criacao?.init?.body)).username).toBe('dash-fulano.silva');
+  });
+
+  it('pessoa CONHECIDA: reusa a conta (PUT), não cria outra', async () => {
+    const { calls } = fetchSessao({ usuarioExiste: true });
+
+    await service.remoteAccessService.openSession(PESSOA, conexao);
+
+    expect(calls.some((c) => c.url.includes('/users?') && c.init?.method === 'POST')).toBe(false);
+    expect(calls.some((c) => c.url.includes('/users/dash-') && c.init?.method === 'PUT')).toBe(true);
+  });
+
+  it('concede READ apenas na conexão pedida — nunca ADMINISTER', async () => {
+    const { calls } = fetchSessao({ usuarioExiste: true });
+
+    await service.remoteAccessService.openSession(PESSOA, conexao);
+
+    const permissao = calls.find((c) => c.init?.method === 'PATCH');
+    const patch = JSON.parse(String(permissao?.init?.body));
+    expect(patch).toEqual([
+      { op: 'add', path: '/connectionPermissions/10', value: 'READ' },
+    ]);
+    expect(JSON.stringify(patch)).not.toContain('ADMINISTER');
+    expect(JSON.stringify(patch)).not.toContain('systemPermissions');
+  });
+
+  it('a URL devolvida carrega o token DA PESSOA, nunca o do serviço', async () => {
+    // Se esta asserção cair, voltou o buraco de escalação de privilégio que
+    // a sonda matou: o token do serviço no navegador permite criar conexões.
+    fetchSessao({ usuarioExiste: true });
+
+    const sessao = await service.remoteAccessService.openSession(PESSOA, conexao);
+
+    expect(sessao.url).toContain(`token=${TOKEN_DA_PESSOA}`);
+    expect(sessao.url).not.toContain(TOKEN);
+    expect(sessao.guacamoleUser).toBe('dash-fulano.silva');
+  });
+
+  it('nenhuma credencial de domínio transita: ela nem existe na API', async () => {
+    // Garantia por CAMINHO, não por disciplina: a conexão não tem
+    // username/password, então o Guacamole pede a credencial no navegador e
+    // ela vai direto ao guacd. `openSession` sequer aceita um parâmetro onde
+    // uma credencial de domínio caberia.
+    const { calls } = fetchSessao({ usuarioExiste: true });
+
+    await service.remoteAccessService.openSession(PESSOA, conexao);
+
+    const corpos = calls.map((c) => String(c.init?.body ?? '')).join('|');
+    expect(corpos).not.toContain('domain');
+    expect(service.remoteAccessService.openSession).toHaveLength(2);
+  });
+
+  it('a senha da conta é rotacionada a cada sessão (não fica guardada)', async () => {
+    const primeira = fetchSessao({ usuarioExiste: true });
+    await service.remoteAccessService.openSession(PESSOA, conexao);
+    const senha1 = JSON.parse(
+      String(primeira.calls.find((c) => c.init?.method === 'PUT')?.init?.body),
+    ).password;
+
+    service.resetSessionForTests();
+    const segunda = fetchSessao({ usuarioExiste: true });
+    await service.remoteAccessService.openSession(PESSOA, conexao);
+    const senha2 = JSON.parse(
+      String(segunda.calls.find((c) => c.init?.method === 'PUT')?.init?.body),
+    ).password;
+
+    expect(senha1).not.toBe(senha2);
+    expect(senha1.length).toBeGreaterThanOrEqual(24);
+  });
+
+  it('buildClientId usa o formato NUL-separado que a UI do Guacamole espera', () => {
+    const id = service.buildClientId('10', 'postgresql');
+    expect(Buffer.from(id, 'base64').toString('utf8')).toBe('10\u0000c\u0000postgresql');
+  });
+});

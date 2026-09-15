@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { env } from '../config/env.js';
 
 // Cliente da API REST do Apache Guacamole (Onda 4 — Acesso Remoto, ver
@@ -93,6 +94,13 @@ export class RemoteAccessRequestError extends RemoteAccessError {
   ) {
     super(message);
     this.name = 'RemoteAccessRequestError';
+  }
+}
+
+export class RemoteAccessComputerNotFoundError extends RemoteAccessError {
+  constructor(objectGuid: string) {
+    super(`Nenhuma conexao de acesso remoto ancorada no computador "${objectGuid}"`);
+    this.name = 'RemoteAccessComputerNotFoundError';
   }
 }
 
@@ -475,6 +483,171 @@ async function deleteConnection(identifier: string): Promise<{ removed: boolean 
   });
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// SESSÃO (subtarefa 5) — uma conta Guacamole POR PESSOA
+// ────────────────────────────────────────────────────────────────────────
+//
+// Por que NÃO reaproveitar a sessão do backend no navegador: MEDIDO, não
+// suposto (tools/guacamole-session-probe.mjs). O token que o Guacamole
+// devolve carrega as permissões de quem autenticou — `/self/permissions` com
+// o token do usuário de serviço reporta `CREATE_CONNECTION`. Entregar esse
+// token ao frontend deixaria qualquer pessoa com o DevTools aberto criar
+// conexões RDP arbitrárias direto no gateway, fora de todo controle deste
+// backend. Escalação de privilégio pelo caminho que parecia o natural.
+//
+// Em vez disso, cada pessoa do dashboard tem a PRÓPRIA conta no Guacamole,
+// com READ apenas na conexão que está abrindo. O ganho que justifica o
+// custo: o histórico do próprio Guacamole passa a registrar a pessoa real —
+// uma segunda trilha de auditoria, independente do nosso log.
+//
+// `CREATE_USER` no usuário de serviço está CONTIDO, e isso também é medido
+// (tools/guacamole-privilege-probe.mjs): as três tentativas de escalação —
+// dar ADMINISTER a um usuário novo, passar CREATE_USER adiante em cadeia, e
+// dar ADMINISTER a si mesmo — foram recusadas com 403, cada uma confirmada
+// por RELEITURA independente, não pelo status HTTP (lição da subtarefa 4).
+//
+// A CREDENCIAL DE DOMÍNIO NÃO PASSA POR AQUI. A conexão não carrega
+// `username`/`password` (regra 2 do topo), então o Guacamole pede a
+// credencial no navegador e ela vai direto ao `guacd`. Não existe neste
+// backend um ponto onde ela possa ser logada, gravada ou esquecida — a
+// garantia é do CAMINHO do dado, não da disciplina do código. A senha que
+// este bloco gera é outra coisa: a da conta Guacamole da pessoa.
+
+// Nome da conta Guacamole de uma pessoa do dashboard.
+//
+// Precisa ser DETERMINÍSTICO a partir de uma chave estável, pelo mesmo
+// motivo que o `objectGUID` ancora computador↔conexão: sem isso, cada
+// abertura de sessão criaria uma conta nova e o Guacamole acumularia órfãos.
+// A chave é o `sub` do JWT do dashboard — o mesmo identificador que o log de
+// auditoria já grava como `actor`, então as duas trilhas casam sem tradução.
+export function sessionUserNameFor(dashboardUser: string): string {
+  const slug = dashboardUser.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').slice(0, 100);
+  return `dash-${slug}`;
+}
+
+async function userExists(username: string): Promise<boolean> {
+  return withToken(async (url) => {
+    const res = await guacFetch(url(`/users/${encodeURIComponent(username)}`), 'Ler usuário do Guacamole');
+    if (res.status === 404) return false;
+    await parseOrThrow(res, 'Ler usuário do Guacamole');
+    return true;
+  });
+}
+
+// Garante a conta da pessoa e devolve uma senha NOVA para ela.
+//
+// A senha é rotacionada a cada abertura de sessão de propósito: este backend
+// não precisa dela entre chamadas (ela só é trocada por um token em
+// seguida), e não guardar é melhor que guardar bem. "Provisionar se não
+// existe" casa pelo nome determinístico acima — nunca por busca por nome
+// parecido, que é como se acumulam órfãos.
+async function provisionSessionUser(
+  dashboardUser: string,
+): Promise<{ username: string; password: string }> {
+  const username = sessionUserNameFor(dashboardUser);
+  const password = randomBytes(24).toString('base64url');
+  const corpo = JSON.stringify({ username, password, attributes: {} });
+
+  if (await userExists(username)) {
+    await withToken(async (url) => {
+      const res = await guacFetch(
+        url(`/users/${encodeURIComponent(username)}`),
+        'Atualizar usuário do Guacamole',
+        { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: corpo },
+      );
+      await parseOrThrow(res, 'Atualizar usuário do Guacamole');
+      return null;
+    });
+    return { username, password };
+  }
+
+  await withToken(async (url) => {
+    const res = await guacFetch(url('/users'), 'Criar usuário do Guacamole', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: corpo,
+    });
+    await parseOrThrow(res, 'Criar usuário do Guacamole');
+    return null;
+  });
+  return { username, password };
+}
+
+// Dá READ na conexão pedida — não ADMINISTER: a pessoa vê e usa a conexão,
+// não a edita nem a remove. Editar/remover é só do usuário de serviço, pelo
+// sync.
+async function grantConnectionRead(username: string, connectionIdentifier: string): Promise<void> {
+  await withToken(async (url) => {
+    const res = await guacFetch(
+      url(`/users/${encodeURIComponent(username)}/permissions`),
+      'Conceder acesso à conexão',
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify([
+          { op: 'add', path: `/connectionPermissions/${connectionIdentifier}`, value: 'READ' },
+        ]),
+      },
+    );
+    await parseOrThrow(res, 'Conceder acesso à conexão');
+    return null;
+  });
+}
+
+async function issueUserToken(username: string, password: string): Promise<string> {
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl()}/api/tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ username, password }),
+    });
+  } catch (error) {
+    throw new RemoteAccessRequestError(`Guacamole inalcançável: ${redactError(error)}`, undefined, error);
+  }
+
+  if (!res.ok) {
+    throw new RemoteAccessRequestError(`Guacamole recusou o token da sessão (HTTP ${res.status})`, res.status);
+  }
+  const body = (await res.json().catch(() => null)) as { authToken?: unknown } | null;
+  if (!body || typeof body.authToken !== 'string' || body.authToken.length === 0) {
+    throw new RemoteAccessRequestError('Emissão do token de sessão não devolveu authToken');
+  }
+  return body.authToken;
+}
+
+// Identificador de cliente do Guacamole: base64 de
+// `<identifier>` + NUL + `c` + NUL + `<data source>`, o formato que a própria
+// UI dele usa na rota `#/client/<id>`.
+export function buildClientId(connectionIdentifier: string, dataSource: string): string {
+  return Buffer.from(`${connectionIdentifier}\u0000c\u0000${dataSource}`, 'utf8').toString('base64');
+}
+
+export interface RemoteSession {
+  connectionIdentifier: string;
+  connectionName: string;
+  /** Conta Guacamole da PESSOA — é ela que aparece no histórico do Guacamole. */
+  guacamoleUser: string;
+  /** URL que o frontend abre. Carrega o token DA PESSOA, nunca o do serviço. */
+  url: string;
+}
+
+async function openSession(
+  dashboardUser: string,
+  connection: RemoteAccessConnection,
+): Promise<RemoteSession> {
+  const { username, password } = await provisionSessionUser(dashboardUser);
+  await grantConnectionRead(username, connection.identifier);
+  const token = await issueUserToken(username, password);
+
+  return {
+    connectionIdentifier: connection.identifier,
+    connectionName: connection.name,
+    guacamoleUser: username,
+    url: `${baseUrl()}/#/client/${buildClientId(connection.identifier, env.GUACAMOLE_DATA_SOURCE)}?token=${token}`,
+  };
+}
+
 export const remoteAccessService = {
   isConfigured,
   listConnections,
@@ -483,4 +656,6 @@ export const remoteAccessService = {
   createRdpConnection,
   updateRdpConnection,
   deleteConnection,
+  openSession,
+  sessionUserNameFor,
 };

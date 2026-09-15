@@ -32,6 +32,7 @@ import {
 import { auditLogService } from './services/audit-log.service.js';
 import { UniFiApiError } from './services/unifi.service.js';
 import {
+  RemoteAccessComputerNotFoundError,
   RemoteAccessConnectionNotFoundError,
   RemoteAccessNotConfiguredError,
   RemoteAccessError,
@@ -171,7 +172,10 @@ export async function buildApp(): Promise<FastifyInstance> {
       return reply.code(503).send({ error: 'Funcionalidade indisponível', details: error.message });
     }
 
-    if (error instanceof RemoteAccessConnectionNotFoundError) {
+    if (
+      error instanceof RemoteAccessConnectionNotFoundError ||
+      error instanceof RemoteAccessComputerNotFoundError
+    ) {
       return reply.code(404).send({ error: error.message });
     }
 

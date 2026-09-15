@@ -174,3 +174,75 @@ pulados** — os três eram contas de computador **desabilitadas** no AD (`EA-PC
 `EA-PC-FAT01`, `EA-PC-EST02`), exatamente o comportamento desenhado. A 2ª rodada não criou, não
 atualizou e não removeu nada; releitura independente confirmou 48 conexões com 48 âncoras
 distintas. O catálogo foi devolvido ao estado inicial ao fim.
+
+## Abertura de sessão (subtarefa 5)
+
+`POST /remote-access/computers/:objectGuid/session` devolve a URL do Guacamole que o frontend
+abre. `GET /remote-access/computers` lista os PCs do AD já cruzados com o catálogo.
+
+### O desenho perigoso que a sonda matou antes de existir
+
+O caminho natural seria o backend reaproveitar a própria sessão do Guacamole e entregar aquele
+token ao navegador. **Medido** (`tools/guacamole-session-probe.mjs`): o token carrega as
+permissões de quem autenticou — `/self/permissions` com o token do usuário de serviço reporta
+`CREATE_CONNECTION`. Uma pessoa com o DevTools aberto poderia **criar conexões RDP arbitrárias
+direto no gateway**, fora de qualquer controle do backend. Escalação de privilégio.
+
+### O desenho adotado: uma conta Guacamole por pessoa
+
+| | |
+|---|---|
+| nome da conta | `dash-<usuário do dashboard>`, **determinístico** |
+| chave de correlação | o `sub` do JWT — o mesmo que o log de auditoria grava como `actor` |
+| permissão | `READ` **apenas** na conexão que está sendo aberta |
+| senha | aleatória, **rotacionada a cada abertura**; o backend não a guarda entre chamadas |
+
+A chave determinística resolve para pessoa↔conta o mesmo problema que o `objectGUID` resolve
+para computador↔conexão: sem ela, cada abertura criaria uma conta nova e o Guacamole acumularia
+órfãos.
+
+### Pré-requisito: `CREATE_USER` no usuário de serviço — e a prova de que está contido
+
+```bash
+node tools/guacamole-privilege-probe.mjs
+```
+
+A sonda concede `CREATE_USER` ao usuário de serviço e **mede** se isso é ampliação contida. O
+risco não é "criar usuários" (é o objetivo), é **criar um usuário e dar a ele mais poder do que
+o criador tem** — se desse, `CREATE_USER` seria equivalente a admin. Resultado de 2026-09-15,
+com cada tentativa confirmada por **releitura independente**, não pelo status HTTP:
+
+| tentativa | resultado |
+|---|---|
+| dar `ADMINISTER` a um usuário novo | **403, não efetivou** |
+| passar `CREATE_USER` adiante (auto-replicação em cadeia) | **403, não efetivou** |
+| dar `ADMINISTER` a si mesmo (auto-promoção) | **403, não efetivou** |
+
+### A credencial de domínio não passa pelo backend
+
+Não é "usada e descartada com disciplina": **não há o que descartar porque ela nunca chega
+aqui**. A conexão não carrega `username`/`password` (os dois são parâmetros opcionais do RDP no
+Guacamole — verificado no schema), então o Guacamole pede a credencial no navegador e ela vai
+direto ao `guacd`. A garantia é do **caminho do dado**, não do código estar correto — mesma
+lógica de `createRdpConnection` não ter parâmetro de credencial.
+
+A senha que este módulo gera é outra coisa, de outra natureza: a da conta Guacamole da pessoa.
+
+### Auditoria
+
+O hook global `onResponse` de `src/app.ts` grava **ator, rota, `objectGuid` do PC, status e
+timestamp** — inclusive nas tentativas que **falham**, que são as que mais importam numa
+investigação. Não há gravação manual na rota de propósito: uma segunda escrita poderia divergir
+da do hook. Há teste afirmando que a entrada é registrada de fato (não só que a sessão abre),
+que o corpo da requisição nunca entra no log, e que o ator vem do JWT e **nunca** do corpo.
+
+Com a conta por pessoa, o histórico do **próprio Guacamole** vira uma segunda trilha,
+independente do nosso log.
+
+### Teste de fumaça contra o Guacamole real
+
+`npx tsx tools/guacamole-session-smoke.mts` — 14 verificações, execução de 2026-09-15: conta
+criada com nome determinístico; **o token da pessoa não carrega `CREATE_CONNECTION` nem
+permissão de sistema nenhuma**; `READ` só na conexão da sessão, sem `ADMINISTER`; a 2ª abertura
+**reusa a mesma conta** (contagem de usuários inalterada) com token próprio; conta e conexão
+removidas ao fim.
