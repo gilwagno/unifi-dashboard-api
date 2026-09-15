@@ -109,3 +109,48 @@ GPO — infraestrutura própria, não um parâmetro de conexão. Fica registrado
 futura para que a decisão atual seja **uma escolha com prazo**, não um default herdado.
 Precedente do projeto: a flag de TLS do módulo de AD, que foi eliminada em vez de defendida
 assim que houve caminho melhor (`AD_TLS_CA_FILE`, PR #32).
+
+## ⚠️ Estar no grupo ≠ ter o direito de logon remoto
+
+**São dois controles separados no Windows, e satisfazer um não satisfaz o outro.** Esta é a causa
+mais provável de "acesso negado" quando o RDP for para o parque via GPO — e já mordeu neste
+projeto, no teste da subtarefa 7 contra a `EA-PC-MKT01`.
+
+| controle | onde fica | o que faz |
+|---|---|---|
+| **associação ao grupo** | grupo local *Usuários da Área de Trabalho Remota* | coloca a pessoa na lista |
+| **direito de usuário** | `secpol.msc` → Políticas Locais → **Atribuição de Direitos de Usuário** → *"Permitir logon por meio dos Serviços de Área de Trabalho Remota"* (`SeRemoteInteractiveLogonRight`) | é o que **de fato** autoriza o logon |
+
+Por padrão o direito já contém *Administradores* **e** *Usuários da Área de Trabalho Remota* — mas
+**uma GPO de domínio que defina essa atribuição SUBSTITUI a lista inteira**. Se a GPO listar só
+*Administradores*, adicionar alguém ao grupo não produz efeito nenhum: admin entra, usuário comum
+é recusado, e a associação ao grupo está lá, correta e inútil.
+
+### Como reconhecer no log do `guacd`
+
+O sintoma muda conforme o estágio, e a distinção economiza horas:
+
+| mensagem do `guacd` | significado |
+|---|---|
+| `Server refused connection (wrong security type?)` | a estação recusou **antes** de autenticar — tipicamente sem o direito/associação |
+| `Authentication failure (invalid credentials?)` | a estação aceitou a conexão e **rejeitou a credencial** |
+| `DNS lookup failed (incorrect hostname?)` | a máquina saiu do DNS (ex.: durante um reboot) |
+
+### O discriminador que não exige testar senha
+
+`badPwdCount` da conta no AD (atributo por controlador de domínio) separa as duas causas **sem
+ninguém digitar credencial**:
+
+- tentativa nova e `badPwdCount` **sobe** → a senha está chegando ao DC e é **inválida**;
+- tentativa nova e `badPwdCount` **fica em 0** → a credencial **nem chega ao DC**: é direito de
+  logon, não senha.
+
+### Verificações na estação
+
+```powershell
+Get-LocalGroupMember -Group "Usuários da Área de Trabalho Remota"
+whoami /groups   # rodado COMO a pessoa: se o grupo não aparecer, o token é antigo
+```
+
+O `whoami /groups` importa: a associação de grupo só entra no **token do próximo logon**. Adicionar
+ao grupo e testar na sessão já aberta falha mesmo com tudo correto.
