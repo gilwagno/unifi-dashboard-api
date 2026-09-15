@@ -54,6 +54,37 @@
   do DC. Não medido: o maior grupo real deste domínio tem 20 membros.
   Registrado como não verificado, não como "funciona".
 
+## Dívida técnica registrada
+
+Itens conhecidos, com correção planejada — não "TODO vago". Cada um diz o que fazer, em que
+escopo, e **qual sinal desliga quando terminar**.
+
+### `set-state-in-effect` no carregamento inicial das páginas
+
+**7 warnings de lint** hoje (1 de fast-refresh no `AuthContext` + **6 de `set-state-in-effect`**),
+todos pré-existentes ou do mesmo padrão. As 6 ocorrências estão em
+`Clients.tsx`, `Devices.tsx`, `Networks.tsx`, `ActiveDirectory.tsx` (×2) e `RemoteAccess.tsx`:
+todas o mesmo idioma de "carrega dados ao montar".
+
+**O que fazer** — numa subtarefa PRÓPRIA, com par executor/verificador, nunca de carona noutra
+onda:
+
+1. **Confirmar caso a caso qual é qual.** `set-state-in-effect` às vezes aponta um bug real
+   (cascading render causando flicker ou refetch duplo) e às vezes é falso-positivo do padrão
+   "carregar ao montar". Silenciar os 6 sem essa triagem trocaria um aviso por um bug escondido.
+2. Se o padrão for o problema, a saída provavelmente é **um hook compartilhado** (`useInitialLoad`
+   ou equivalente) que faça certo uma vez e as 6 páginas usem — não seis correções separadas.
+3. **Ao fim, zerar o teto**: `--max-warnings=0` no `.github/workflows/ci.yml` (e baixar o
+   `--max-warnings` do `package.json` do backend junto, se couber).
+
+**Por que não foi feito na Onda 4**: tocar o carregamento inicial de 5 páginas aprovadas dentro de
+um PR cujo título fala de Guacamole significa que a mudança não recebe a revisão que merece, e um
+cascading render que quebre sutilmente fica enterrado num diff sobre outro assunto — esse tipo de
+bug não aparece em teste unitário, aparece na tela sob carga.
+
+**O item só está fechado quando o teto estiver em 0.** Enquanto ele for > 0, esta dívida está
+aberta.
+
 ## Ordem de dependência entre as ondas planejadas
 
 1. **Onda 3 (AD)** primeiro — além do valor próprio, ela é pré-requisito de duas coisas:
