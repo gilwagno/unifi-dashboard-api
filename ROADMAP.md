@@ -85,6 +85,38 @@ bug não aparece em teste unitário, aparece na tela sob carga.
 **O item só está fechado quando o teto estiver em 0.** Enquanto ele for > 0, esta dívida está
 aberta.
 
+## Decisões seguras SOB PREMISSA (Onda 4 — Acesso Remoto)
+
+Três decisões do módulo de acesso remoto são seguras **enquanto** uma condição valer. A condição
+mora ao lado de cada uma no código; esta tabela existe para que nenhuma sobreviva em silêncio à
+mudança que a invalida — que é como uma proteção morre sem ninguém notar.
+
+| decisão | segura ENQUANTO | o que fazer quando a premissa cair |
+|---|---|---|
+| `ignore-cert=true` nas conexões RDP | o 3389 estiver restrito ao host do `guacd` por firewall | tirar o `ignore-cert` **no mesmo momento** do afrouxamento; saída definitiva: certificado pela PKI interna (AD CS) |
+| **`READ` acumula** (abrir sessão noutro PC não revoga os anteriores) | houver **um único usuário administrador** | com multi-usuário/RBAC vira privilégio persistente indevido → **revogação explícita ao fim da sessão** |
+| **token da sessão no `src` do iframe** | esse token for **a credencial da própria pessoa**, inerte nas mãos dela | ver abaixo |
+
+### O token no DOM, e o proxy reverso same-origin
+
+O token da sessão **aparece no DOM**, no `src` do iframe — não há caminho que evite isso: o
+navegador **é** o cliente do Guacamole, a autenticação precisa chegar nele. O que torna isso
+aceitável hoje não é estar escondido (não está), é o que ele permite: **medido** contra o
+Guacamole real, o token da pessoa tem `systemPermissions: []` e `READ` em **uma** conexão — é a
+credencial dela própria, para um acesso que ela já tem. Vê-lo no DevTools dela não lhe concede
+nada de novo. O que foi tratado é **onde ele pode parar**: nunca em `window.location` (histórico
+do navegador), nunca em `localStorage`/`sessionStorage`, nunca em texto da página, descartado ao
+encerrar, e emitido só no clique.
+
+**A premissa**: isso vale enquanto o token no DOM for a credencial da própria pessoa sobre um
+acesso que ela já tem. **No dia em que houver múltiplos usuários não-admin, essa frase deixa de
+ser verdadeira e a análise precisa ser refeita do zero** — não ajustada.
+
+**A saída, com nome**: um **proxy reverso same-origin** na frente do Guacamole, injetando a
+autenticação do lado do servidor, de modo que o token nunca chegue ao cliente. É infraestrutura
+própria (não um parâmetro de conexão), por isso ficou fora da Onda 4 — e é o pré-requisito
+natural do mesmo momento em que o RBAC entrar, junto da revogação de `READ` ao fim da sessão.
+
 ## Ordem de dependência entre as ondas planejadas
 
 1. **Onda 3 (AD)** primeiro — além do valor próprio, ela é pré-requisito de duas coisas:
