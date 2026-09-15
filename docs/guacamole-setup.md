@@ -33,6 +33,10 @@ O Compose usa `guacamole/.env`, **não** o `.env` da raiz:
 
 ## Passo a passo
 
+Pré-requisito: **o daemon do Docker precisa estar rodando**. Ter o `docker` no PATH não
+basta — o Docker Desktop instalado e fechado dá
+`failed to connect to the docker API at npipe:...` em todo comando.
+
 ```bash
 # 1. Variáveis
 cp guacamole/.env.example guacamole/.env
@@ -73,9 +77,27 @@ Fluxo recomendado, a decidir junto com a subtarefa 3:
 `1.5.5` nos dois containers, propositalmente pinada. Subir de versão é mudança deliberada
 (pode exigir migração de schema), não um `latest` que muda sozinho num `docker compose pull`.
 
-## Ainda NÃO feito nesta subtarefa
+## Teste de fumaça — EXECUTADO em 2026-09-15
 
-Nada aqui foi executado contra o ambiente real — o `docker-compose.yml` foi validado com
-`docker compose config` (parsing e interpolação corretos, guarda de senha ausente falhando
-como deve), mas **`up` não foi rodado**. Subir os containers é o teste de fumaça desta
-subtarefa e depende de você (é infraestrutura nova na sua máquina/rede).
+O passo a passo acima foi rodado de verdade nesta bancada, não só validado por
+`docker compose config`:
+
+| verificação | resultado |
+|---|---|
+| `initdb.sql` gerado da imagem | **791 linhas, 23 tabelas** |
+| `docker compose up -d` | 3 containers de pé; `postgres` **healthy** antes de o `guacamole` subir (o `depends_on: service_healthy` funciona) |
+| portas publicadas | `guacamole` em `127.0.0.1:8080` · `guacd` e `postgres` **sem porta publicada**, como desenhado |
+| UI | `GET /guacamole/` → **200** |
+| **API REST** (o que a subtarefa 3 consome) | `POST /api/tokens` → **token de 64 chars**; `GET …/connections` → `{}` (limpo); `GET …/schema/protocols` → `kubernetes, telnet, ssh, vnc, rdp` |
+
+A senha do Postgres foi gerada com `randomBytes(24).toString('base64url')` — **`base64url` de
+propósito**: não produz `$`, `/` nem `+`, então não esbarra no interpolador do Compose nem em
+escape de shell. `openssl rand -base64 32` produz esses caracteres e é a origem provável de um
+"funciona na minha máquina" aqui.
+
+### ⚠️ Pendente e vivo: `guacadmin` / `guacadmin`
+
+O serviço está de pé **com a credencial padrão**. Hoje ela só é alcançável de `127.0.0.1`,
+o que contém o risco — mas é a conta que administra o gateway que vai alcançar a tela de
+qualquer máquina do domínio. Trocar é o próximo passo, junto com a criação do usuário de
+serviço da subtarefa 3.
