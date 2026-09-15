@@ -128,3 +128,49 @@ administrativo. Verificado depois de provisionar:
 > (`down -v`). O script passou a **persistir o segredo antes de qualquer mutação**. É a mesma
 > classe do `AdPasswordAmbiguousError` da Onda 3: a única cópia de um segredo gerado não pode
 > depender de um passo que ainda pode falhar.
+
+## Sincronização AD → Guacamole (subtarefa 4)
+
+`POST /remote-access/sync` reconcilia o catálogo do Guacamole com `GET /ad/computers`.
+
+### A âncora
+
+A correlação é pelo **`objectGUID`** do computador, gravado no **parâmetro** `ad-object-guid` da
+conexão. As duas metades dessa frase foram verificadas contra o sistema real, não deduzidas:
+
+- **`objectGUID` porque é imutável** — sobrevive a renomeação e a mudança de OU. O nome não
+  sobrevive nem à primeira: casar por nome faria uma máquina renomeada virar conexão duplicada,
+  com a antiga órfã para sempre.
+- **Parâmetro, não atributo** — os atributos de conexão do Guacamole são um conjunto **fechado**
+  de 7 campos, e um atributo custom é aceito com **HTTP 200 e descartado em silêncio**
+  (`tools/guacamole-attr-probe.mjs`). Uma âncora que não grava produziria duplicação a cada
+  rodada, reportando sucesso sempre.
+
+### Regras
+
+| situação | o que o sync faz |
+|---|---|
+| computador novo no AD | cria a conexão, ancorada |
+| computador já ancorado, nada mudou | **não escreve nada** |
+| computador renomeado / FQDN mudou | **atualiza** a conexão existente |
+| computador saiu do AD | **remove** a conexão |
+| computador desabilitado no AD | **remove** a conexão (revoga o acesso) |
+| `enabled` ilegível (`null`) | trata como não habilitado — falha FECHADO |
+| conexão **sem** âncora (feita à mão) | **nunca toca**; reporta em `ignoradas` |
+
+### Por que REMOVER e não desabilitar
+
+Porque o rastro de auditoria não é filho da conexão — e isso foi **confirmado por experimento**
+contra o banco real, não presumido. Em `guacamole_connection_history`, `connection_id` é
+`ON DELETE SET NULL` e `connection_name` é uma cópia `NOT NULL`. Apagando a conexão, a linha do
+histórico permanece com usuário, nome da conexão e datas intactos; só o `connection_id` vira
+NULL. Se o histórico caísse junto, a decisão correta seria desabilitar em vez de remover.
+
+### Teste de fumaça contra AD + Guacamole reais
+
+`npx tsx tools/guacamole-sync-smoke.mts` (`--manter` preserva o resultado para inspeção).
+Execução de 2026-09-15 contra `evokaudio.local`: **51 computadores, 48 conexões criadas, 3
+pulados** — os três eram contas de computador **desabilitadas** no AD (`EA-PC-EST01`,
+`EA-PC-FAT01`, `EA-PC-EST02`), exatamente o comportamento desenhado. A 2ª rodada não criou, não
+atualizou e não removeu nada; releitura independente confirmou 48 conexões com 48 âncoras
+distintas. O catálogo foi devolvido ao estado inicial ao fim.

@@ -207,8 +207,8 @@ describe('listConnections', () => {
     const connections = await service.remoteAccessService.listConnections();
 
     expect(connections).toEqual([
-      { identifier: '1', name: 'PC-01', protocol: 'rdp', hostname: null, activeConnections: 2 },
-      { identifier: '2', name: 'PC-02', protocol: 'rdp', hostname: null, activeConnections: 0 },
+      { identifier: '1', name: 'PC-01', protocol: 'rdp', hostname: null, activeConnections: 2, adObjectGuid: null },
+      { identifier: '2', name: 'PC-02', protocol: 'rdp', hostname: null, activeConnections: 0, adObjectGuid: null },
     ]);
   });
 
@@ -231,6 +231,7 @@ describe('getConnection', () => {
       protocol: 'rdp',
       hostname: 'pc01.test',
       activeConnections: 1,
+      adObjectGuid: null,
     });
   });
 
@@ -349,5 +350,113 @@ describe('montagem de URL', () => {
     await service.remoteAccessService.deleteConnection('a/b');
     const call = calls.find((c) => c.init?.method === 'DELETE');
     expect(call?.url).toContain('a%2Fb');
+  });
+});
+
+describe('âncora de correlação AD ↔ Guacamole', () => {
+  // A âncora vai como PARÂMETRO porque o Guacamole aceita atributo custom
+  // com HTTP 200 e o DESCARTA EM SILÊNCIO (sondado contra o Guacamole real,
+  // tools/guacamole-attr-probe.mjs). Uma âncora que não grava faria o sync
+  // duplicar conexão a cada rodada, reportando sucesso todas as vezes.
+  it('o objectGUID é gravado como parâmetro, não como atributo', async () => {
+    const { calls } = fetchWith(jsonResponse(200, { identifier: '7' }));
+
+    await service.remoteAccessService.createRdpConnection({
+      name: 'PC-01',
+      hostname: 'pc01.test',
+      adObjectGuid: 'c1c04940-1c5b-4cfa-a4f9-d05689e80045',
+    });
+
+    const create = calls.find((c) => c.init?.method === 'POST' && !c.url.endsWith('/api/tokens'));
+    const payload = JSON.parse(String(create?.init?.body));
+    expect(payload.parameters[service.AD_OBJECT_GUID_PARAM]).toBe('c1c04940-1c5b-4cfa-a4f9-d05689e80045');
+    expect(payload.attributes).toEqual({});
+  });
+
+  it('a conexão lida devolve a âncora em adObjectGuid', async () => {
+    fetchWith(
+      jsonResponse(200, { identifier: '1', name: 'PC-01', protocol: 'rdp' }),
+      jsonResponse(200, { hostname: 'pc01.test', [service.AD_OBJECT_GUID_PARAM]: 'guid-1' }),
+    );
+
+    const connection = await service.remoteAccessService.getConnection('1');
+    expect(connection.adObjectGuid).toBe('guid-1');
+  });
+
+  it('conexão sem a âncora devolve adObjectGuid null (foi criada à mão)', async () => {
+    fetchWith(
+      jsonResponse(200, { identifier: '1', name: 'Feito-a-mao', protocol: 'rdp' }),
+      jsonResponse(200, { hostname: 'x.test' }),
+    );
+
+    const connection = await service.remoteAccessService.getConnection('1');
+    expect(connection.adObjectGuid).toBeNull();
+  });
+});
+
+describe('updateRdpConnection — o PUT é full-object', () => {
+  // O PUT do Guacamole perde o que não for enviado. O risco concreto é o
+  // update "atualizar" o hostname e apagar em silêncio o `security=nla` ou a
+  // própria âncora — a conexão continuaria existindo, aparentemente saudável,
+  // e o sync a recriaria como duplicata na rodada seguinte.
+  it('reenvia TODOS os parâmetros, incluindo NLA e a âncora', async () => {
+    const { calls } = fetchWith(emptyResponse(204));
+
+    await service.remoteAccessService.updateRdpConnection('7', {
+      name: 'PC-01-RENOMEADO',
+      hostname: 'novo.test',
+      adObjectGuid: 'guid-1',
+    });
+
+    const put = calls.find((c) => c.init?.method === 'PUT');
+    const payload = JSON.parse(String(put?.init?.body));
+    expect(payload.parameters).toEqual({
+      hostname: 'novo.test',
+      port: '3389',
+      security: 'nla',
+      'ignore-cert': 'true',
+      'resize-method': 'display-update',
+      [service.AD_OBJECT_GUID_PARAM]: 'guid-1',
+    });
+    expect(payload.name).toBe('PC-01-RENOMEADO');
+    expect(payload.identifier).toBe('7');
+  });
+
+  it('o update continua sem persistir credencial (regra 2)', async () => {
+    const { calls } = fetchWith(emptyResponse(204));
+    await service.remoteAccessService.updateRdpConnection('7', { name: 'PC', hostname: 'h.test' });
+    const put = calls.find((c) => c.init?.method === 'PUT');
+    const parameters = JSON.parse(String(put?.init?.body)).parameters;
+    expect(Object.keys(parameters)).not.toContain('username');
+    expect(Object.keys(parameters)).not.toContain('password');
+  });
+
+  it('atualizar conexão inexistente vira RemoteAccessConnectionNotFoundError', async () => {
+    fetchWith(emptyResponse(404));
+    await expect(
+      service.remoteAccessService.updateRdpConnection('999', { name: 'PC', hostname: 'h.test' }),
+    ).rejects.toBeInstanceOf(service.RemoteAccessConnectionNotFoundError);
+  });
+});
+
+describe('listConnectionsWithAnchors', () => {
+  it('busca os parâmetros de cada conexão para preencher a âncora', async () => {
+    fetchWith(
+      jsonResponse(200, { '1': { name: 'PC-01', protocol: 'rdp' } }),
+      jsonResponse(200, { identifier: '1', name: 'PC-01', protocol: 'rdp' }),
+      jsonResponse(200, { hostname: 'pc01.test', [service.AD_OBJECT_GUID_PARAM]: 'guid-1' }),
+    );
+
+    const connections = await service.remoteAccessService.listConnectionsWithAnchors();
+    expect(connections).toEqual([
+      {
+        identifier: '1',
+        name: 'PC-01',
+        protocol: 'rdp',
+        hostname: 'pc01.test',
+        activeConnections: 0,
+        adObjectGuid: 'guid-1',
+      },
+    ]);
   });
 });

@@ -1086,6 +1086,17 @@ export interface AdComputer {
   // `null` pela mesma razão: sem UAC legível não dá para afirmar nem
   // negar. Um `false` aqui seria uma afirmação, não uma lacuna.
   isDomainController: boolean | null;
+  // objectGUID no formato canônico (o mesmo que `Get-ADComputer` mostra).
+  //
+  // Existe para a Onda 4: é a ÂNCORA que casa um computador do AD com a
+  // conexão dele no Guacamole. Escolhido por ser IMUTÁVEL — sobrevive a
+  // renomeação e a mudança de OU, enquanto `name`/`sAMAccountName` não
+  // sobrevive nem à primeira. É identificador, não segredo: aparece em
+  // `GET /ad/computers` de propósito, decisão consciente.
+  //
+  // `null` quando o atributo não veio na leitura — mesma regra dos demais
+  // campos deste objeto: lacuna é lacuna, não se inventa valor.
+  objectGuid: string | null;
 }
 
 const COMPUTER_SEARCH_ATTRIBUTES = [
@@ -1097,7 +1108,49 @@ const COMPUTER_SEARCH_ATTRIBUTES = [
   'operatingSystemVersion',
   'description',
   'userAccountControl',
+  'objectGUID',
 ];
+
+// Atributos que o `ldapts` deve entregar como Buffer CRU em vez de decodificar
+// como texto. `objectGUID` é binário de 16 bytes: deixá-lo virar string passa
+// os bytes por uma decodificação UTF-8 que corrompe tudo que não for ASCII
+// válido, de forma irreversível.
+const COMPUTER_BUFFER_ATTRIBUTES = ['objectGUID'];
+
+// Converte o objectGUID binário do AD (16 bytes) para a forma canônica.
+//
+// ⚠️ A ORDEM DOS BYTES É MISTA, e este é o ponto inteiro desta função.
+// Os três primeiros grupos são LITTLE-endian e os dois últimos, BIG-endian —
+// é o layout da struct GUID do Windows. Um `toString('hex')` ingênuo produz
+// um GUID que PARECE válido e está com os bytes trocados; pior, está
+// consistentemente errado, então um sync que use esse valor dos dois lados
+// funciona (a chave errada casa com ela mesma) até o dia em que alguém
+// cruzar o valor com outra ferramenta que lê o AD (PowerShell, outro
+// script) e os valores não baterem.
+//
+// Por isso o teste desta função é ancorado num objectGUID REAL cuja forma
+// canônica foi obtida por uma implementação INDEPENDENTE (o construtor
+// `System.Guid` do .NET, via PowerShell) — provar que o código concorda
+// consigo mesmo não provaria nada. É a mesma armadilha da sonda da Onda 3
+// que comparava o DN contra o campo errado.
+export function formatObjectGuid(value: string | string[] | Buffer | Buffer[] | undefined): string | null {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (!Buffer.isBuffer(raw) || raw.length !== 16) return null;
+
+  const hex = (start: number, end: number, reverse: boolean): string => {
+    const slice = Buffer.from(raw.subarray(start, end));
+    if (reverse) slice.reverse();
+    return slice.toString('hex');
+  };
+
+  return [
+    hex(0, 4, true),
+    hex(4, 6, true),
+    hex(6, 8, true),
+    hex(8, 10, false),
+    hex(10, 16, false),
+  ].join('-');
+}
 
 function toAdComputer(entry: Record<string, string | string[] | Buffer | Buffer[]>, dn: string): AdComputer {
   const uac = asNumber(entry.userAccountControl);
@@ -1120,6 +1173,9 @@ function toAdComputer(entry: Record<string, string | string[] | Buffer | Buffer[
     description: asString(entry.description),
     enabled: uac === null ? null : (uac & UF_ACCOUNTDISABLE) === 0,
     isDomainController: uac === null ? null : (uac & (UF_SERVER_TRUST_ACCOUNT | UF_PARTIAL_SECRETS_ACCOUNT)) !== 0,
+    // NÃO passa por `asString`: ele faz `toString('utf8')` num Buffer, que
+    // é exatamente a corrupção que `formatObjectGuid` existe para evitar.
+    objectGuid: formatObjectGuid(entry.objectGUID),
   };
 }
 
@@ -1138,6 +1194,7 @@ async function findComputerEntry(
     scope: 'sub',
     filter: escapeFilter`(&(objectClass=computer)(|(cn=${cn})(sAMAccountName=${sam})))`,
     attributes: COMPUTER_SEARCH_ATTRIBUTES,
+    explicitBufferAttributes: COMPUTER_BUFFER_ATTRIBUTES,
   });
 
   const entry = searchEntries[0];
@@ -1158,6 +1215,7 @@ export async function searchComputers(query?: string): Promise<AdComputer[]> {
       scope: 'sub',
       filter,
       attributes: COMPUTER_SEARCH_ATTRIBUTES,
+      explicitBufferAttributes: COMPUTER_BUFFER_ATTRIBUTES,
       paged: true,
     });
 

@@ -48,6 +48,20 @@ import { env } from '../config/env.js';
 //    parâmetro para receber credencial. Quem precisar de uma reconexão sem
 //    digitar senha está pedindo exatamente o que esta regra proíbe.
 
+// Nome do parâmetro que carrega a ÂNCORA de correlação AD ↔ Guacamole.
+//
+// Por que PARÂMETRO e não ATRIBUTO: sondado contra o Guacamole real
+// (tools/guacamole-attr-probe.mjs, 2026-09-15) — os atributos de conexão são
+// um conjunto FECHADO de 7 campos, e um atributo custom é aceito com
+// **HTTP 200 e descartado em silêncio**, sem erro nem aviso. Construir o
+// sync sobre ele daria uma âncora que parece gravada e não está: o sync
+// duplicaria conexão a cada rodada, reportando sucesso todas as vezes.
+// Parâmetros, ao contrário, são chave/valor livre e sobrevivem à releitura.
+//
+// O valor é o `objectGUID` do computador — imutável, sobrevive a renomeação
+// e a mudança de OU. Mesmo papel do `external_id` no módulo de VPN.
+export const AD_OBJECT_GUID_PARAM = 'ad-object-guid';
+
 // Base comum de todo erro tipado deste módulo — mesmo motivo de `AdError`
 // na Onda 3: quem herda daqui atravessa intacto o `catch` central em vez de
 // ser reembrulhado em erro genérico, e uma subtarefa futura que adicione um
@@ -97,6 +111,13 @@ export interface RemoteAccessConnection {
   hostname: string | null;
   /** Quantidade de sessões ativas nesta conexão, como o Guacamole reporta. */
   activeConnections: number;
+  /**
+   * objectGUID do computador do AD que originou esta conexão, quando ela foi
+   * criada pelo sync. `null` numa conexão criada à mão no Guacamole — e essa
+   * distinção é o que protege o trabalho manual de um operador: o sync só
+   * mexe no que ele mesmo ancorou.
+   */
+  adObjectGuid: string | null;
 }
 
 interface GuacamoleConnectionPayload {
@@ -261,6 +282,10 @@ function toConnection(payload: GuacamoleConnectionPayload, identifier: string): 
         ? payload.parameters.hostname
         : null,
     activeConnections: typeof payload.activeConnections === 'number' ? payload.activeConnections : 0,
+    adObjectGuid:
+      payload.parameters && typeof payload.parameters[AD_OBJECT_GUID_PARAM] === 'string'
+        ? payload.parameters[AD_OBJECT_GUID_PARAM]
+        : null,
   };
 }
 
@@ -275,6 +300,28 @@ async function listConnections(): Promise<RemoteAccessConnection[]> {
     // A API devolve um OBJETO indexado por identifier, não um array.
     return Object.entries(body).map(([identifier, payload]) => toConnection(payload, identifier));
   });
+}
+
+// Listagem COM os parâmetros de cada conexão — e portanto com a âncora
+// `ad-object-guid` preenchida.
+//
+// Custa 1 + N requisições, porque a listagem do Guacamole não devolve
+// parâmetros (só o GET de uma conexão específica devolve). É o preço da
+// âncora viver junto do objeto no Guacamole em vez de numa tabela local, e é
+// irrelevante na escala deste domínio (~50 computadores). Registrado porque
+// numa rede grande deixaria de ser: o plano B, se isso um dia doer, é um
+// cache local da correlação — mesmo padrão de SQLite que o projeto já usa.
+//
+// As leituras são feitas em série de propósito: o Guacamole roda num Tomcat
+// pequeno ao lado do backend, e uma rajada de N requisições paralelas contra
+// ele não compra nada nesta escala.
+async function listConnectionsWithAnchors(): Promise<RemoteAccessConnection[]> {
+  const connections = await listConnections();
+  const detailed: RemoteAccessConnection[] = [];
+  for (const connection of connections) {
+    detailed.push(await getConnection(connection.identifier));
+  }
+  return detailed;
 }
 
 async function getConnection(identifier: string): Promise<RemoteAccessConnection> {
@@ -301,6 +348,8 @@ export interface CreateRdpConnectionInput {
   /** Hostname ou IP do PC alvo. */
   hostname: string;
   port?: number;
+  /** objectGUID do computador do AD — a âncora do sync (subtarefa 4). */
+  adObjectGuid?: string;
 }
 
 // Cria uma conexão RDP.
@@ -329,6 +378,18 @@ export interface CreateRdpConnectionInput {
 //                         definitiva (onda futura) é certificado emitido
 //                         pela PKI interna e verificação de verdade.
 //   resize-method       — ajusta a resolução ao navegador.
+function buildRdpParameters(input: CreateRdpConnectionInput, port: number): Record<string, string> {
+  const parameters: Record<string, string> = {
+    hostname: input.hostname,
+    port: String(port),
+    security: 'nla',
+    'ignore-cert': 'true',
+    'resize-method': 'display-update',
+  };
+  if (input.adObjectGuid) parameters[AD_OBJECT_GUID_PARAM] = input.adObjectGuid;
+  return parameters;
+}
+
 async function createRdpConnection(input: CreateRdpConnectionInput): Promise<RemoteAccessConnection> {
   const port = input.port ?? 3389;
 
@@ -340,13 +401,7 @@ async function createRdpConnection(input: CreateRdpConnectionInput): Promise<Rem
         parentIdentifier: 'ROOT',
         name: input.name,
         protocol: 'rdp',
-        parameters: {
-          hostname: input.hostname,
-          port: String(port),
-          security: 'nla',
-          'ignore-cert': 'true',
-          'resize-method': 'display-update',
-        },
+        parameters: buildRdpParameters(input, port),
         attributes: {},
       }),
     });
@@ -355,7 +410,46 @@ async function createRdpConnection(input: CreateRdpConnectionInput): Promise<Rem
     if (!body || typeof body.identifier !== 'string') {
       throw new RemoteAccessRequestError('Criação de conexão não devolveu identifier');
     }
-    return toConnection({ ...body, parameters: { hostname: input.hostname } }, body.identifier);
+    return toConnection({ ...body, parameters: buildRdpParameters(input, port) }, body.identifier);
+  });
+}
+
+// Atualiza uma conexão existente.
+//
+// O PUT do Guacamole é FULL-OBJECT: o que não for enviado é perdido. Por
+// isso os parâmetros são remontados inteiros por `buildRdpParameters` (a
+// MESMA função do create), em vez de um merge sobre o que veio da leitura —
+// assim create e update não podem divergir, que é a forma clássica deste bug
+// (o sync "atualiza" e apaga em silêncio o `security=nla` ou a âncora).
+async function updateRdpConnection(
+  identifier: string,
+  input: CreateRdpConnectionInput,
+): Promise<RemoteAccessConnection> {
+  const port = input.port ?? 3389;
+
+  return withToken(async (url) => {
+    const res = await guacFetch(
+      url(`/connections/${encodeURIComponent(identifier)}`),
+      'Atualizar conexão no Guacamole',
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          identifier,
+          parentIdentifier: 'ROOT',
+          name: input.name,
+          protocol: 'rdp',
+          parameters: buildRdpParameters(input, port),
+          attributes: {},
+        }),
+      },
+    );
+    if (res.status === 404) throw new RemoteAccessConnectionNotFoundError(identifier);
+    await parseOrThrow(res, 'Atualizar conexão no Guacamole');
+    return toConnection(
+      { identifier, name: input.name, protocol: 'rdp', parameters: buildRdpParameters(input, port) },
+      identifier,
+    );
   });
 }
 
@@ -384,7 +478,9 @@ async function deleteConnection(identifier: string): Promise<{ removed: boolean 
 export const remoteAccessService = {
   isConfigured,
   listConnections,
+  listConnectionsWithAnchors,
   getConnection,
   createRdpConnection,
+  updateRdpConnection,
   deleteConnection,
 };
