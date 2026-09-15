@@ -246,3 +246,40 @@ criada com nome determinístico; **o token da pessoa não carrega `CREATE_CONNEC
 permissão de sistema nenhuma**; `READ` só na conexão da sessão, sem `ADMINISTER`; a 2ª abertura
 **reusa a mesma conta** (contagem de usuários inalterada) com token próprio; conta e conexão
 removidas ao fim.
+
+## Tela de Acesso Remoto (subtarefa 6)
+
+`frontend/src/pages/RemoteAccess.tsx`, no menu lateral como **Acesso Remoto**.
+
+### Onde o token da sessão vive — e por que é aceitável
+
+A URL devolvida por `POST .../session` carrega o token da conta Guacamole **da pessoa** na query
+string. O navegador **é** o cliente do Guacamole, então o token precisa chegar até ele; a
+pergunta honesta não é "como esconder", é **onde ele pode parar e quem o alcança**:
+
+- **não é o token do usuário de serviço** (aquele carrega `CREATE_CONNECTION` — medido). O
+  token daqui não tem permissão de sistema nenhuma e dá `READ` em uma conexão: é a credencial da
+  própria pessoa, para um acesso que ela já tem;
+- **nunca vai para `window.location`** — iria para o histórico do navegador, que sobrevive à
+  sessão. É `src` de um `iframe`, não navegação;
+- **nunca é persistido** — nada de `localStorage`/`sessionStorage`; vive só no estado do React e
+  some ao encerrar;
+- **nunca é logado nem exibido em texto** na página;
+- é buscado **no clique**, nunca em lote junto da lista — cada chamada emite um token e grava uma
+  linha de auditoria.
+
+Cinco testes travam isso, incluindo "o token não aparece no texto da página" e "encerrar descarta
+o token do DOM". **O que o tiraria do DOM de vez** é um proxy reverso same-origin injetando a
+autenticação do lado do servidor — infraestrutura própria, registrada como a saída, não como
+pendência esquecida.
+
+### Transparência de sessão ativa
+
+Ver a tela de outra máquina não pode ser discreto:
+
+- card **"Sessões ativas"** no topo, que fica em tom de alerta quando > 0, com o texto "alguém
+  está vendo a tela de uma máquina agora";
+- selo por máquina na lista (`Sessão ativa` / `N sessões ativas`), vindo do `activeConnections`
+  que o próprio Guacamole reporta;
+- com a sessão aberta, um banner `role="alert"` no topo com **o nome da máquina e a conta
+  registrada em auditoria**, e o botão de encerrar sempre visível.
