@@ -54,6 +54,69 @@
   do DC. Não medido: o maior grupo real deste domínio tem 20 membros.
   Registrado como não verificado, não como "funciona".
 
+## Dívida técnica registrada
+
+Itens conhecidos, com correção planejada — não "TODO vago". Cada um diz o que fazer, em que
+escopo, e **qual sinal desliga quando terminar**.
+
+### `set-state-in-effect` no carregamento inicial das páginas
+
+**7 warnings de lint** hoje (1 de fast-refresh no `AuthContext` + **6 de `set-state-in-effect`**),
+todos pré-existentes ou do mesmo padrão. As 6 ocorrências estão em
+`Clients.tsx`, `Devices.tsx`, `Networks.tsx`, `ActiveDirectory.tsx` (×2) e `RemoteAccess.tsx`:
+todas o mesmo idioma de "carrega dados ao montar".
+
+**O que fazer** — numa subtarefa PRÓPRIA, com par executor/verificador, nunca de carona noutra
+onda:
+
+1. **Confirmar caso a caso qual é qual.** `set-state-in-effect` às vezes aponta um bug real
+   (cascading render causando flicker ou refetch duplo) e às vezes é falso-positivo do padrão
+   "carregar ao montar". Silenciar os 6 sem essa triagem trocaria um aviso por um bug escondido.
+2. Se o padrão for o problema, a saída provavelmente é **um hook compartilhado** (`useInitialLoad`
+   ou equivalente) que faça certo uma vez e as 6 páginas usem — não seis correções separadas.
+3. **Ao fim, zerar o teto**: `--max-warnings=0` no `.github/workflows/ci.yml` (e baixar o
+   `--max-warnings` do `package.json` do backend junto, se couber).
+
+**Por que não foi feito na Onda 4**: tocar o carregamento inicial de 5 páginas aprovadas dentro de
+um PR cujo título fala de Guacamole significa que a mudança não recebe a revisão que merece, e um
+cascading render que quebre sutilmente fica enterrado num diff sobre outro assunto — esse tipo de
+bug não aparece em teste unitário, aparece na tela sob carga.
+
+**O item só está fechado quando o teto estiver em 0.** Enquanto ele for > 0, esta dívida está
+aberta.
+
+## Decisões seguras SOB PREMISSA (Onda 4 — Acesso Remoto)
+
+Três decisões do módulo de acesso remoto são seguras **enquanto** uma condição valer. A condição
+mora ao lado de cada uma no código; esta tabela existe para que nenhuma sobreviva em silêncio à
+mudança que a invalida — que é como uma proteção morre sem ninguém notar.
+
+| decisão | segura ENQUANTO | o que fazer quando a premissa cair |
+|---|---|---|
+| `ignore-cert=true` nas conexões RDP | o 3389 estiver restrito ao host do `guacd` por firewall | tirar o `ignore-cert` **no mesmo momento** do afrouxamento; saída definitiva: certificado pela PKI interna (AD CS) |
+| **`READ` acumula** (abrir sessão noutro PC não revoga os anteriores) | houver **um único usuário administrador** | com multi-usuário/RBAC vira privilégio persistente indevido → **revogação explícita ao fim da sessão** |
+| **token da sessão no `src` do iframe** | esse token for **a credencial da própria pessoa**, inerte nas mãos dela | ver abaixo |
+
+### O token no DOM, e o proxy reverso same-origin
+
+O token da sessão **aparece no DOM**, no `src` do iframe — não há caminho que evite isso: o
+navegador **é** o cliente do Guacamole, a autenticação precisa chegar nele. O que torna isso
+aceitável hoje não é estar escondido (não está), é o que ele permite: **medido** contra o
+Guacamole real, o token da pessoa tem `systemPermissions: []` e `READ` em **uma** conexão — é a
+credencial dela própria, para um acesso que ela já tem. Vê-lo no DevTools dela não lhe concede
+nada de novo. O que foi tratado é **onde ele pode parar**: nunca em `window.location` (histórico
+do navegador), nunca em `localStorage`/`sessionStorage`, nunca em texto da página, descartado ao
+encerrar, e emitido só no clique.
+
+**A premissa**: isso vale enquanto o token no DOM for a credencial da própria pessoa sobre um
+acesso que ela já tem. **No dia em que houver múltiplos usuários não-admin, essa frase deixa de
+ser verdadeira e a análise precisa ser refeita do zero** — não ajustada.
+
+**A saída, com nome**: um **proxy reverso same-origin** na frente do Guacamole, injetando a
+autenticação do lado do servidor, de modo que o token nunca chegue ao cliente. É infraestrutura
+própria (não um parâmetro de conexão), por isso ficou fora da Onda 4 — e é o pré-requisito
+natural do mesmo momento em que o RBAC entrar, junto da revogação de `READ` ao fim da sessão.
+
 ## Ordem de dependência entre as ondas planejadas
 
 1. **Onda 3 (AD)** primeiro — além do valor próprio, ela é pré-requisito de duas coisas:

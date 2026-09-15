@@ -470,6 +470,44 @@ export interface AdComputer {
   isDomainController: boolean | null;
 }
 
+
+// --- Acesso Remoto / Guacamole (Onda 4) ----------------------------------
+
+export interface RemoteAccessComputer {
+  name: string;
+  objectGuid: string | null;
+  dnsHostName: string | null;
+  operatingSystem: string | null;
+  // `null` = o backend não conseguiu ler o userAccountControl. Mesma regra
+  // (e mesma razão) de AdComputer.enabled: não é "desabilitado".
+  enabled: boolean | null;
+  hasAccess: boolean;
+  connectionIdentifier: string | null;
+  activeSessions: number;
+}
+
+export interface RemoteSession {
+  connectionIdentifier: string;
+  connectionName: string;
+  guacamoleUser: string;
+  // ⚠️ MATERIAL SENSÍVEL. Carrega o token da conta Guacamole DA PESSOA na
+  // query string. Nunca gravar em localStorage/sessionStorage, nunca mandar
+  // para `window.location` (iria para o histórico do navegador) e nunca
+  // logar. Só é usada como `src` de um iframe e descartada ao encerrar.
+  url: string;
+}
+
+export interface RemoteAccessSyncResult {
+  resumo: {
+    criadas: number;
+    atualizadas: number;
+    inalteradas: number;
+    removidas: number;
+    puladas: number;
+    ignoradas: number;
+  };
+}
+
 export const api = {
   async login(username: string, password: string) {
     const body = await request<{ token: string; refreshToken: string }>('/auth/login', {
@@ -681,6 +719,15 @@ export const api = {
     request<{ data: AdComputer[] }>(`/ad/computers${query ? `?query=${encodeURIComponent(query)}` : ''}`),
   setAdComputerEnabled: (name: string, enabled: boolean) =>
     request<{ ok: true }>(`/ad/computers/${encodeURIComponent(name)}/${enabled ? 'enable' : 'disable'}`, {
+      method: 'POST',
+    }),
+
+  listRemoteAccessComputers: () => request<{ data: RemoteAccessComputer[] }>('/remote-access/computers'),
+  syncRemoteAccess: () => request<RemoteAccessSyncResult>('/remote-access/sync', { method: 'POST' }),
+  // Só é chamada no clique, nunca em lote nem no carregamento da lista: cada
+  // chamada emite um token de sessão e grava uma linha de auditoria.
+  openRemoteSession: (objectGuid: string) =>
+    request<RemoteSession>(`/remote-access/computers/${encodeURIComponent(objectGuid)}/session`, {
       method: 'POST',
     }),
 };

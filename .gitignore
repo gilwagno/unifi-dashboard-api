@@ -42,3 +42,10 @@ tools/.brother-mib-snapshot.json
 # PEM da CA do fake-ldap-server, materializado a cada run do e2e
 # (ver e2e/e2e.config.ts#FAKE_LDAP_CA_FILE). Artefato de execução.
 e2e/.fake-ldap-ca.pem
+
+# Schema do Guacamole, gerado localmente (ver docs/guacamole-setup.md).
+# São ~5k linhas de DDL derivadas da imagem — não versionar.
+guacamole/initdb.sql
+
+# Variáveis do docker-compose do Guacamole (ver guacamole/.env.example).
+guacamole/.env

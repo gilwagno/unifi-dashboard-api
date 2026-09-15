@@ -9,6 +9,7 @@ import { Networks } from './pages/Networks';
 import { Overview } from './pages/Overview';
 import { ActiveDirectory } from './pages/ActiveDirectory';
 import { Printers } from './pages/Printers';
+import { RemoteAccess } from './pages/RemoteAccess';
 import { Security } from './pages/Security';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -74,6 +75,14 @@ function AppRoutes() {
         element={
           <RequireAuth>
             <Health />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/remote-access"
+        element={
+          <RequireAuth>
+            <RemoteAccess />
           </RequireAuth>
         }
       />

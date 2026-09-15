@@ -15,6 +15,7 @@ import eventsRoutes from './routes/events.routes.js';
 import healthRoutes from './routes/health.routes.js';
 import networksRoutes from './routes/networks.routes.js';
 import printersRoutes from './routes/printers.routes.js';
+import remoteAccessRoutes from './routes/remote-access.routes.js';
 import securityRoutes from './routes/security.routes.js';
 import sitesRoutes from './routes/sites.routes.js';
 import sshRoutes from './routes/ssh.routes.js';
@@ -30,6 +31,12 @@ import {
 } from './services/ad.service.js';
 import { auditLogService } from './services/audit-log.service.js';
 import { UniFiApiError } from './services/unifi.service.js';
+import {
+  RemoteAccessComputerNotFoundError,
+  RemoteAccessConnectionNotFoundError,
+  RemoteAccessNotConfiguredError,
+  RemoteAccessError,
+} from './services/remote-access.service.js';
 import { ClassicApiNotConfiguredError, UniFiClassicApiError } from './services/unifi-classic.service.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
@@ -161,6 +168,24 @@ export async function buildApp(): Promise<FastifyInstance> {
       return reply.code(502).send({ error: 'Erro no Active Directory', details: error.message });
     }
 
+    if (error instanceof RemoteAccessNotConfiguredError) {
+      return reply.code(503).send({ error: 'Funcionalidade indisponível', details: error.message });
+    }
+
+    if (
+      error instanceof RemoteAccessConnectionNotFoundError ||
+      error instanceof RemoteAccessComputerNotFoundError
+    ) {
+      return reply.code(404).send({ error: error.message });
+    }
+
+    // Classe BASE por último — mesmo desenho de `AdError` na Onda 3: um erro
+    // novo deste módulo atravessa com 502 em vez de virar 500 genérico
+    // porque alguém esqueceu de somá-lo a uma lista.
+    if (error instanceof RemoteAccessError) {
+      return reply.code(502).send({ error: 'Erro no acesso remoto', details: error.message });
+    }
+
     app.log.error(error);
 
     // Erros de outros plugins do Fastify (ex: 429 do @fastify/rate-limit)
@@ -186,6 +211,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(securityRoutes);
   await app.register(networksRoutes);
   await app.register(healthRoutes);
+  await app.register(remoteAccessRoutes);
   await app.register(bandwidthRoutes);
   await app.register(sshRoutes);
   await app.register(printersRoutes);

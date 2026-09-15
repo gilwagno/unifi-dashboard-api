@@ -48,6 +48,8 @@ const SAMPLE: AdComputer = {
   operatingSystem: 'Windows 11 Pro',
   operatingSystemVersion: '10.0 (26200)',
   description: 'Estação de teste',
+  // Adicionado na Onda 4: é a âncora do sync AD -> Guacamole.
+  objectGuid: 'c1c04940-1c5b-4cfa-a4f9-d05689e80045',
   enabled: true,
   isDomainController: false,
 };

@@ -1,0 +1,74 @@
+# Onda 4 — Acesso Remoto (Apache Guacamole).
+#
+# Sobe os três componentes do gateway de acesso remoto:
+#   postgres  -> banco de conexões/usuários do Guacamole
+#   guacd     -> proxy que fala RDP/VNC/SSH de verdade (protocolo binário)
+#   guacamole -> interface web + API REST que o backend deste projeto consome
+#
+# SEGURANÇA — duas decisões deliberadas, não mexer sem entender:
+#
+# 1. `guacamole` publica a porta em 127.0.0.1:8080, NUNCA em 0.0.0.0. O
+#    dashboard é o gateway (Cloudflare Access -> dashboard -> Guacamole);
+#    expor o Guacamole direto na LAN contorna o login do dashboard e a
+#    auditoria de sessão, que é justamente o rastro que este módulo existe
+#    para produzir.
+# 2. `guacd` e `postgres` não publicam porta nenhuma — só são alcançáveis
+#    pela rede interna do Compose.
+#
+# Nenhuma senha aqui: tudo vem de `guacamole/.env`, e o comando é sempre
+#
+#     docker compose --env-file guacamole/.env up -d
+#
+# NÃO é o `.env` da raiz, e isso é deliberado — duas razões concretas:
+#   a) o `.env` da raiz guarda os segredos do backend (AD, controller); o
+#      Compose não precisa deles e o interpolador dele expande `$` nos
+#      VALORES, então uma senha com `$` chega mutilada no container e ainda
+#      vaza um pedaço em warning no terminal (observado neste repo);
+#   b) mantém o que é infraestrutura separado do que é config da aplicação.
+#
+# Antes do primeiro `up`, gere o schema do banco — ver docs/guacamole-setup.md.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${GUACAMOLE_DB_NAME:-guacamole}
+      POSTGRES_USER: ${GUACAMOLE_DB_USER:?defina GUACAMOLE_DB_USER em guacamole/.env}
+      POSTGRES_PASSWORD: ${GUACAMOLE_DB_PASSWORD:?defina GUACAMOLE_DB_PASSWORD em guacamole/.env}
+    volumes:
+      - guacamole-db:/var/lib/postgresql/data
+      # Só roda no PRIMEIRO boot, com o volume vazio. Gerado por
+      # docs/guacamole-setup.md — não é versionado (5k linhas de DDL).
+      - ./guacamole/initdb.sql:/docker-entrypoint-initdb.d/initdb.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${GUACAMOLE_DB_USER} -d ${GUACAMOLE_DB_NAME:-guacamole}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  guacd:
+    image: guacamole/guacd:1.5.5
+    restart: unless-stopped
+    # Sem `ports`: quem fala com o guacd é só o container do guacamole.
+
+  guacamole:
+    image: guacamole/guacamole:1.5.5
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      guacd:
+        condition: service_started
+    environment:
+      GUACD_HOSTNAME: guacd
+      POSTGRESQL_HOSTNAME: postgres
+      POSTGRESQL_DATABASE: ${GUACAMOLE_DB_NAME:-guacamole}
+      POSTGRESQL_USER: ${GUACAMOLE_DB_USER}
+      POSTGRESQL_PASSWORD: ${GUACAMOLE_DB_PASSWORD}
+    ports:
+      # Só loopback — ver nota de segurança no topo.
+      - '127.0.0.1:${GUACAMOLE_PORT:-8080}:8080'
+
+volumes:
+  guacamole-db:

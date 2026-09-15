@@ -1,4 +1,4 @@
-import { Activity, LayoutGrid, LogOut, Network, Printer, Radio, Router, ShieldCheck, Users, Wifi } from 'lucide-react';
+import { Activity, LayoutGrid, LogOut, MonitorPlay, Network, Printer, Radio, Router, ShieldCheck, Users, Wifi } from 'lucide-react';
 import { type ReactNode, useEffect, useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
@@ -14,6 +14,7 @@ const NAV_ITEMS = [
   { to: '/health', label: 'Saúde da rede', icon: Activity },
   { to: '/printers', label: 'Manutenção', icon: Printer },
   { to: '/active-directory', label: 'Active Directory', icon: Network },
+  { to: '/remote-access', label: 'Acesso Remoto', icon: MonitorPlay },
 ];
 
 export function Layout({ title, children }: { title: string; children: ReactNode }) {

@@ -1122,6 +1122,57 @@ corrigido em 2026-09-09.
   pequena/uso interno autenticado, mas README já registra a recomendação de sempre filtrar por
   `from`/`to`/`mac`, e que paginação é o próximo passo se a rede crescer.
 - Suíte final: 311/311, `tsc` limpo.
+## ⚠️ PREMISSAS QUE SUSTENTAM DECISÕES DE SEGURANÇA (Onda 4)
+
+Duas decisões do módulo de Acesso Remoto são seguras **sob condição**. A condição está escrita
+ao lado de cada uma no código, e repetida aqui para não sobreviver em silêncio à mudança que a
+invalida — que é exatamente como uma proteção morre sem ninguém notar.
+
+| decisão | segura ENQUANTO | quando a premissa cair |
+|---|---|---|
+| `ignore-cert=true` nas conexões RDP | o 3389 estiver restrito ao host do `guacd` por firewall | tirar o `ignore-cert` **no mesmo momento** em que o firewall for afrouxado; a saída definitiva é certificado pela PKI interna |
+| **`READ` acumula** (abrir sessão noutro PC não revoga os anteriores) | houver **um único usuário administrador** no dashboard | com multi-usuário/RBAC vira privilégio persistente indevido — passa a exigir **revogação explícita ao fim da sessão** |
+
+O segundo caso é a versão-Guacamole do problema de aninhamento de grupos da Onda 3: **acesso que
+sobrevive depois que deveria ter acabado, sem nada avisar**. Hoje o ganho de revogar é nulo (o
+único admin já alcança tudo) e o risco é real (derrubar uma sessão legítima aberta noutra aba) —
+por isso não foi feito. No dia do RBAC, é item obrigatório, não melhoria.
+
+## ⚠️ RISCO DE ARQUITETURA: autenticação é opt-in POR ARQUIVO de rotas
+
+**Todo arquivo de rotas novo neste projeto nasce SEM autenticação.** Não existe guarda global:
+cada `src/routes/*.routes.ts` aplica a sua com
+`app.addHook('preHandler', app.authenticate)` no começo da função. Quem esquecer publica rotas
+abertas — e **nem o `tsc` nem o lint reclamam**, porque não há nada de errado no código: a
+proteção simplesmente não está lá.
+
+Não é hipótese. Aconteceu na subtarefa 4 da Onda 4 (2026-09-15): a primeira versão de
+`src/routes/remote-access.routes.ts` saiu sem o hook, e `GET /remote-access/connections` e
+`POST /remote-access/sync` — esta última uma rota de ESCRITA no catálogo de acesso remoto —
+responderam **200 sem token nenhum**. Quem pegou foram os dois testes "exige autenticação",
+escritos por convenção e não por suspeita.
+
+É a mesma família de falha que este projeto já pagou caro outras vezes (o atributo custom que o
+Guacamole descarta com HTTP 200, o `resultCode 0` da Onda 3): **a ausência da proteção não
+produz sinal nenhum.**
+
+**Regra para qualquer onda futura que crie um arquivo de rotas — antes da primeira linha de
+lógica:**
+
+1. `app.addHook('preHandler', app.authenticate);` como primeira instrução da função de rotas;
+2. um teste por rota nova afirmando **401 sem token** — o teste é a trava, o hook sozinho não é
+   (alguém pode removê-lo num refactor e nada quebra).
+
+**Auditoria feita na mesma data**: dos 13 arquivos de rotas, 12 têm o hook e o único sem ele é
+`auth.routes.ts` — correto, é a porta de entrada (o `/auth/login` tem rate limit dedicado
+próprio, `RATE_LIMIT_LOGIN_MAX`). Ou seja, hoje não há nenhuma rota desprotegida por engano; o
+risco é do PRÓXIMO arquivo.
+
+A correção estrutural (uma guarda global com allowlist de rotas públicas, em vez de opt-in por
+arquivo) está registrada como melhoria possível, **não feita**: mexeria em 12 arquivos de rotas
+já aprovados, e o valor só aparece no próximo arquivo novo. Se uma onda futura for tocar em
+`src/app.ts` de qualquer forma, é a hora de considerar.
+
 ## Metodologia (harness de 4 pontos — adotado em 2026-09-10, substitui a rubrica 0-50 usada nas Ondas 1/2)
 
 Arquitetura completa de agentes e o prompt reutilizável em `docs/gauntlet-loop-prompt.md`. Resumo:
