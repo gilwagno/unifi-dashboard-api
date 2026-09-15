@@ -316,10 +316,18 @@ export interface CreateRdpConnectionInput {
 //                         baixo e a proteção vira decorativa.
 //   ignore-cert=true    — os PCs do domínio usam certificado RDP
 //                         autoassinado. Sem isto o guacd recusa e a conexão
-//                         nunca abre. É uma decisão consciente com custo:
-//                         num segmento hostil permitiria um alvo forjado —
-//                         aceitável porque o 3389 é restrito ao host do
-//                         guacd por firewall (mesmo documento).
+//                         nunca abre.
+//
+//                         ⛔ DEPENDÊNCIA MÚTUA, não nota de rodapé: este
+//                         parâmetro e a regra de firewall que restringe o
+//                         3389 ao host do guacd são um par indivisível — ver
+//                         docs/remote-access-network-prereqs.md, item 2.
+//                         Sem a regra, o guacd não verifica com quem fala e
+//                         um alvo forjado receberia a credencial de domínio
+//                         de quem acessa. Quem afrouxar o firewall precisa,
+//                         no mesmo momento, tirar este parâmetro. A saída
+//                         definitiva (onda futura) é certificado emitido
+//                         pela PKI interna e verificação de verdade.
 //   resize-method       — ajusta a resolução ao navegador.
 async function createRdpConnection(input: CreateRdpConnectionInput): Promise<RemoteAccessConnection> {
   const port = input.port ?? 3389;

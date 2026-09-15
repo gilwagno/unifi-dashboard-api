@@ -14,6 +14,13 @@
 `guacd` é quem realmente fala RDP/VNC/SSH; `guacamole` é a interface web + a **API REST** que
 o `remote-access.service.ts` (subtarefa 3) vai consumir. O Postgres guarda conexões e usuários.
 
+## ⛔ Antes de produção: leia o bloqueante do firewall
+
+As conexões RDP criadas por este módulo usam `ignore-cert=true`, e isso **pressupõe** a regra de
+firewall que restringe o 3389 ao host do `guacd` — ver
+[`remote-access-network-prereqs.md`, item 2](remote-access-network-prereqs.md). Os dois são um
+par indivisível; sem a regra, o módulo não vai a produção.
+
 ## Por que a porta é só loopback
 
 `127.0.0.1:8080`, nunca `0.0.0.0`. A cadeia de acesso é

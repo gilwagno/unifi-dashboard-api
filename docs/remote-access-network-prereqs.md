@@ -36,6 +36,26 @@ sem tornar ninguém admin da máquina, use
 
 ## 2. Firewall — 3389 só entre o host do Guacamole e os PCs
 
+> ### ⛔ BLOQUEANTE DE PRODUÇÃO — dependência mútua com o `ignore-cert=true`
+>
+> Esta regra e o parâmetro `ignore-cert=true` das conexões RDP
+> (`createRdpConnection` em [`src/services/remote-access.service.ts`](../src/services/remote-access.service.ts))
+> são **um par indivisível**. Um sem o outro é inseguro:
+>
+> - `ignore-cert=true` existe porque os PCs do domínio usam certificado RDP autoassinado — sem
+>   ele o `guacd` recusa e a conexão nunca abre. O custo é que o `guacd` **deixa de verificar
+>   com quem está falando**: num segmento onde alguém possa responder pelo IP do alvo, a sessão
+>   iria para uma máquina forjada, com a credencial de domínio de quem acessa junto.
+> - A regra de firewall é o que torna esse custo aceitável: se o 3389 só trafega entre o host do
+>   `guacd` e os PCs, não há terceiro no caminho para forjar o alvo.
+>
+> **Sem esta regra aplicada, o módulo de acesso remoto não vai a produção.** Não é gate só da
+> subtarefa 7 (e2e): é pré-condição da decisão de desenho que já está no código. Quem afrouxar
+> o firewall depois precisa, no mesmo momento, tirar o `ignore-cert=true` — senão a única linha
+> de defesa desaparece em silêncio.
+>
+> O `docs/guacamole-setup.md` e o docblock de `createRdpConnection` apontam de volta para cá.
+
 Inegociável: **RDP nunca exposto à internet**. É um dos vetores de ransomware mais explorados
 que existem. O acesso de fora entra por Cloudflare Tunnel → dashboard → Guacamole; o 3389 só
 trafega dentro da LAN, e idealmente só a partir de um IP.
@@ -77,3 +97,15 @@ Windows fica indistinguível, e o módulo perde metade do rastro que é a razão
 Quando os três estiverem feitos, confirme aqui na conversa — a subtarefa 7 (e2e contra RDP
 real) também depende de uma **VM Windows de teste** com RDP habilitado, que é o alvo real
 desta onda (mesmo papel das impressoras reais na Onda 2). Nunca a máquina de alguém em uso.
+
+## Onda futura (registrar, NÃO fazer agora): validar certificado de verdade
+
+O arranjo acima deixa o **firewall como única linha de defesa** da identidade do alvo. A forma
+de remover essa dependência é emitir certificados RDP pela PKI interna do domínio (AD CS) e
+trocar `ignore-cert=true` por verificação real no `guacd`.
+
+Não é para esta onda: depende de PKI interna com template de certificado RDP distribuído por
+GPO — infraestrutura própria, não um parâmetro de conexão. Fica registrado como item de onda
+futura para que a decisão atual seja **uma escolha com prazo**, não um default herdado.
+Precedente do projeto: a flag de TLS do módulo de AD, que foi eliminada em vez de defendida
+assim que houve caminho melhor (`AD_TLS_CA_FILE`, PR #32).
